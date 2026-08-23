@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionContext } from "../runtime/contracts.js";
+import { MANAGED_STATE_REL } from "../runtime/managed-state.js";
 import type { PrepareManagedSessionParams } from "../runtime/provider-support/preparation.js";
 import { INIT_COMPLETE_SENTINEL_REL } from "../runtime/workspace.js";
 import { mockCtxPlumbing } from "./test-helpers.js";
@@ -877,6 +878,110 @@ describe("prepareManagedSession", () => {
 
     expect(callOrder).toEqual(["acquire", "chatContext", "sourceRepos", "skills"]);
     expect(ensureAgentBootstrap).not.toHaveBeenCalled();
+    expect(markWorkspaceInitComplete).not.toHaveBeenCalled();
+  });
+
+  function writeManagedState(record: Record<string, unknown>): void {
+    const statePath = join(workspaceRoot, MANAGED_STATE_REL);
+    mkdirSync(join(workspaceRoot, ".first-tree-workspace"), { recursive: true });
+    writeFileSync(statePath, JSON.stringify(record));
+  }
+
+  function boundSessionCtx(): SessionContext {
+    const ctx = sessionCtx();
+    (ctx.sdk as unknown as { getAgentContextTreeConfig: ReturnType<typeof vi.fn> }).getAgentContextTreeConfig = vi.fn(
+      async () => ({
+        bindingState: "bound",
+        repo: "https://example.test/tree",
+        branch: "main",
+        provider: null,
+      }),
+    );
+    return ctx;
+  }
+
+  const boundPayload = {
+    kind: "cursor" as const,
+    prompt: { append: "" },
+    model: "",
+    mcpServers: [],
+    env: [],
+    gitRepos: [{ url: "https://example.test/widget", localPath: "widget" }],
+    resourceSkills: [],
+  };
+
+  it("admits a schema v1 Managed Skills state so reconcile can migrate it", async () => {
+    const prepareManagedSession = await loadPrepare();
+    writeManagedState({
+      schemaVersion: 1,
+      cliVersion: "0.5.17",
+      updatedAt: "2026-07-23T23:24:32.393Z",
+      skills: [],
+    });
+
+    const result = await prepareManagedSession({
+      sessionCtx: boundSessionCtx(),
+      workspaceRoot,
+      agentName: "prep-agent",
+      runtimeProvider: "cursor",
+      providerSkillRoots: TEST_PROVIDER_SKILL_ROOTS,
+      runtimeConfig: {
+        agentId: "019d9a97-90b0-716b-8317-a8c0be8430d7",
+        version: 1,
+        payload: boundPayload,
+        updatedAt: new Date().toISOString(),
+        updatedBy: "test",
+      } as never,
+      payload: boundPayload,
+      payloadResolved: true,
+      contextTree: {
+        path: join(workspaceRoot, "context-tree"),
+        repoUrl: "https://example.test/tree",
+        branch: "main",
+      },
+    });
+
+    expect(callOrder).toContain("skills");
+    expect(reconcileManagedSkillsForConfig).toHaveBeenCalledTimes(1);
+    expect(result.resourceConfigVersion).toBe(3);
+    expect(markWorkspaceInitComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a future-schema Managed Skills state before reconcile", async () => {
+    const prepareManagedSession = await loadPrepare();
+    writeManagedState({
+      schemaVersion: 3,
+      resourceConfigVersion: 99,
+      updatedAt: new Date().toISOString(),
+      skills: [],
+    });
+
+    await expect(
+      prepareManagedSession({
+        sessionCtx: boundSessionCtx(),
+        workspaceRoot,
+        agentName: "prep-agent",
+        runtimeProvider: "cursor",
+        providerSkillRoots: TEST_PROVIDER_SKILL_ROOTS,
+        runtimeConfig: {
+          agentId: "019d9a97-90b0-716b-8317-a8c0be8430d7",
+          version: 1,
+          payload: boundPayload,
+          updatedAt: new Date().toISOString(),
+          updatedBy: "test",
+        } as never,
+        payload: boundPayload,
+        payloadResolved: true,
+        contextTree: {
+          path: join(workspaceRoot, "context-tree"),
+          repoUrl: "https://example.test/tree",
+          branch: "main",
+        },
+      }),
+    ).rejects.toThrow(/unreadable or from an unsupported version/);
+
+    expect(callOrder).not.toContain("skills");
+    expect(reconcileManagedSkillsForConfig).not.toHaveBeenCalled();
     expect(markWorkspaceInitComplete).not.toHaveBeenCalled();
   });
 
