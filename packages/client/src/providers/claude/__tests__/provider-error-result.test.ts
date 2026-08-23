@@ -12,6 +12,9 @@ const mockState = vi.hoisted(() => ({
   messagesByAttempt: [] as unknown[][],
   queryCalls: 0,
   observedInputMessages: [] as Array<{ attempt: number; content: string }>,
+  observedQueryOptions: [] as Array<{ attempt: number; sessionId?: string; resume?: string }>,
+  inputDrainLimitByAttempt: [] as number[],
+  resultGateByAttempt: [] as Array<Promise<void> | undefined>,
   configVersion: 1,
   promptAppend: "",
   configModel: "",
@@ -22,7 +25,11 @@ const mockState = vi.hoisted(() => ({
 }));
 
 vi.mock("@anthropic-ai/claude-agent-sdk", () => {
-  const drainPrompt = async (prompt: AsyncIterable<{ message?: { content?: unknown } }>, attempt: number) => {
+  const drainPrompt = async (
+    prompt: AsyncIterable<{ message?: { content?: unknown } }>,
+    attempt: number,
+    limit: number,
+  ) => {
     let drained = 0;
     for await (const sdkMsg of prompt) {
       const content = sdkMsg.message?.content;
@@ -31,23 +38,34 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => {
         content: typeof content === "string" ? content : JSON.stringify(content),
       });
       drained += 1;
-      if (drained >= 1) break;
+      if (drained >= limit) break;
     }
   };
   return {
-    query: (args: { prompt: AsyncIterable<{ message?: { content?: unknown } }> }) => {
+    query: (args: {
+      prompt: AsyncIterable<{ message?: { content?: unknown } }>;
+      options?: { sessionId?: string; resume?: string };
+    }) => {
       mockState.queryCalls += 1;
       const attempt = mockState.queryCalls;
       if (attempt === mockState.throwQueryOnCall) {
         throw new Error("config restart query construction failed");
       }
       const messages = (mockState.messagesByAttempt[attempt - 1] ?? mockState.nextMessages).slice();
-      void drainPrompt(args.prompt, attempt);
+      const sessionId = args.options?.sessionId;
+      const resume = args.options?.resume;
+      mockState.observedQueryOptions.push({
+        attempt,
+        ...(typeof sessionId === "string" ? { sessionId } : {}),
+        ...(typeof resume === "string" ? { resume } : {}),
+      });
+      void drainPrompt(args.prompt, attempt, mockState.inputDrainLimitByAttempt[attempt - 1] ?? 1);
       return {
         [Symbol.asyncIterator]() {
           let idx = 0;
           return {
             next: async () => {
+              if (idx === 0) await mockState.resultGateByAttempt[attempt - 1];
               if (idx < messages.length) {
                 const value = messages[idx];
                 idx += 1;
@@ -88,6 +106,9 @@ beforeEach(() => {
   if (workspaceRoot) rmSync(workspaceRoot, { recursive: true, force: true });
   workspaceRoot = mkdtempSync(join(realpathSync(tmpdir()), "ftt-claude-provider-error-"));
   mockState.messagesByAttempt.length = 0;
+  mockState.observedQueryOptions.length = 0;
+  mockState.inputDrainLimitByAttempt.length = 0;
+  mockState.resultGateByAttempt.length = 0;
   mockState.configVersion = 1;
   mockState.promptAppend = "";
   mockState.configModel = "";
@@ -142,6 +163,14 @@ async function waitForCondition(predicate: () => boolean, description: string): 
   throw new Error(`timed out waiting for ${description}`);
 }
 
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve = (): void => {};
+  const promise = new Promise<void>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 async function startSingleResultTurn() {
   mockState.queryCalls = 0;
   mockState.observedInputMessages.length = 0;
@@ -149,6 +178,7 @@ async function startSingleResultTurn() {
   const forwardResult = vi.fn<SessionContext["forwardResult"]>().mockResolvedValue(undefined);
   const emitted: SessionEvent[] = [];
   const completed: Array<{ count: number; outcome: TurnOutcome }> = [];
+  const settlementOrder: string[] = [];
   const logs: string[] = [];
   const retryTurn = vi.fn<SessionContext["retryTurn"]>(() => {
     mockState.lifecycleEvents.push("retry:entered");
@@ -180,17 +210,22 @@ async function startSingleResultTurn() {
     chatId: "chat-claude-provider-error",
     log: (m) => logs.push(m),
     recordProviderActivity: () => {},
-    emitEvent: (e) => emitted.push(e),
+    emitEvent: (e) => {
+      const retryEvent = e.kind === "error" ? parseProviderRetryEventMessage(e.payload.message) : null;
+      if (retryEvent?.event === "provider_failure_terminal") settlementOrder.push("terminal-notice");
+      emitted.push(e);
+    },
     ...mockCtxPlumbing({ sendMessage }, "chat-claude-provider-error"),
     forwardResult,
     retryTurn,
     failSessionForRecovery,
     finishTurn: async (messages, outcome) => {
+      settlementOrder.push("complete");
       completed.push({ count: Array.isArray(messages) ? messages.length : 1, outcome });
     },
   };
 
-  await handler.start(
+  const started = await handler.start(
     {
       id: "m1",
       chatId: "chat-claude-provider-error",
@@ -205,12 +240,14 @@ async function startSingleResultTurn() {
 
   return {
     handler,
+    sessionId: started.sessionId,
     cache,
     ctx,
     sendMessage,
     forwardResult,
     emitted,
     completed,
+    settlementOrder,
     logs,
     retryTurn,
     failSessionForRecovery,
@@ -309,6 +346,122 @@ describe("claude-code handler — structured provider error result", () => {
       completion: "consumed",
       reason: "provider_credential_required",
     });
+  });
+
+  it("retires a credential-failed query and lazily resumes only recovered new input", async () => {
+    const failedTurnGate = deferred();
+    const recoveredTurnGate = deferred();
+    mockState.messagesByAttempt = [
+      [
+        {
+          type: "result",
+          subtype: "success",
+          is_error: true,
+          api_error_status: 401,
+          result: "authentication_failed",
+        },
+      ],
+      [
+        {
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          result: "Recovered after login",
+        },
+      ],
+    ];
+    mockState.inputDrainLimitByAttempt = [1, 2];
+    mockState.resultGateByAttempt = [failedTurnGate.promise, recoveredTurnGate.promise];
+
+    const result = await startSingleResultTurn();
+    await waitForCondition(
+      () => mockState.observedInputMessages.filter((input) => input.attempt === 1).length === 1,
+      "failed query input",
+    );
+
+    const tailRecoveryOrder: string[] = [];
+    const makeTailToken = (id: string) => ({
+      processingStarted: vi.fn(),
+      complete: vi.fn().mockResolvedValue(undefined),
+      retry: vi.fn(() => tailRecoveryOrder.push(id)),
+      terminalRejected: vi.fn().mockResolvedValue(undefined),
+    });
+    const tail2 = makeTailToken("m2");
+    const tail3 = makeTailToken("m3");
+    const message2 = {
+      id: "m2",
+      chatId: "chat-claude-provider-error",
+      senderId: "user-1",
+      format: "text" as const,
+      content: "second message",
+      metadata: null,
+    };
+    const message3 = {
+      id: "m3",
+      chatId: "chat-claude-provider-error",
+      senderId: "user-1",
+      format: "text" as const,
+      content: "third message",
+      metadata: null,
+    };
+    result.handler.inject(message2, tail2);
+    result.handler.inject(message3, tail3);
+
+    failedTurnGate.resolve();
+    await waitForCondition(() => result.completed.length === 1, "credential settlement");
+    await waitForCondition(() => tailRecoveryOrder.length === 2, "unentered tail recovery");
+
+    expect(mockState.queryCalls).toBe(1);
+    expect(mockState.closeCalls).toEqual([1]);
+    expect(result.settlementOrder).toEqual(["terminal-notice", "complete"]);
+    expect(result.completed[0]).toMatchObject({
+      count: 1,
+      outcome: {
+        status: "error",
+        terminal: true,
+        completion: "consumed",
+        reason: "provider_credential_required",
+      },
+    });
+    expect(tailRecoveryOrder).toEqual(["m2", "m3"]);
+    expect(tail2.processingStarted).not.toHaveBeenCalled();
+    expect(tail3.processingStarted).not.toHaveBeenCalled();
+    expect(tail2.complete).not.toHaveBeenCalled();
+    expect(tail3.complete).not.toHaveBeenCalled();
+
+    const redelivered2 = deliveryTokenFromSessionContext(result.ctx);
+    const redelivered3 = deliveryTokenFromSessionContext(result.ctx);
+    result.handler.inject(message2, redelivered2);
+    result.handler.inject(message3, redelivered3);
+
+    await waitForCondition(() => mockState.queryCalls === 2, "fresh credential-recovery query");
+    await waitForCondition(
+      () => mockState.observedInputMessages.filter((input) => input.attempt === 2).length === 2,
+      "fresh query inputs",
+    );
+
+    expect(mockState.queryCalls).toBe(2);
+    expect(mockState.observedQueryOptions[0]).toEqual({ attempt: 1, sessionId: result.sessionId });
+    expect(mockState.observedQueryOptions[1]).toEqual({ attempt: 2, resume: result.sessionId });
+    const recoveredInput = mockState.observedInputMessages
+      .filter((input) => input.attempt === 2)
+      .map((input) => input.content);
+    expect(recoveredInput).toHaveLength(2);
+    expect(recoveredInput[0]).toContain("second message");
+    expect(recoveredInput[1]).toContain("third message");
+    expect(
+      mockState.observedInputMessages
+        .filter((input) => input.attempt === 2)
+        .some((input) => input.content.includes("hello")),
+    ).toBe(false);
+
+    recoveredTurnGate.resolve();
+    await waitForCondition(() => result.completed.length === 2, "recovered turn settlement");
+    expect(result.forwardResult).toHaveBeenCalledWith("Recovered after login");
+    expect(result.failSessionForRecovery).not.toHaveBeenCalled();
+
+    await result.handler.suspend();
+    expect(mockState.closeCalls).toEqual([1, 2]);
   });
 
   it("retries a transient structured failure after assistant text was emitted", async () => {

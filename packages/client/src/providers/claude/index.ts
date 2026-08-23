@@ -419,6 +419,13 @@ export const createClaudeCodeHandler: HandlerFactory = (config) => {
   let inputController: InputController<PendingSdkInput> | null = null;
   let providerRetryBackoffAbort: AbortController | null = null;
   let consumerDone: Promise<void> | null = null;
+  /**
+   * A terminal credential result retires the current SDK query because Claude
+   * caches authentication state in its native process. Keep the logical
+   * Session and claudeSessionId, then lazily create one fresh resume query
+   * when the next delivered message arrives.
+   */
+  let credentialResumeRequired = false;
   let retryCount = 0;
   let ctx: SessionContext | null = null;
   /** Snapshot of the runtime config the *current* sub-process was launched with. */
@@ -995,10 +1002,26 @@ export const createClaudeCodeHandler: HandlerFactory = (config) => {
   }
 
   function scheduleInjectedMessagesDrain(sessionCtx: SessionContext, sessionId: string): void {
-    if (!inputController || injectDrainInProgress) return;
+    if (injectDrainInProgress || (!inputController && !credentialResumeRequired)) return;
     void (async () => {
       injectDrainInProgress = true;
       try {
+        if (!inputController && credentialResumeRequired) {
+          try {
+            await assertQuerySpawnCurrent(sessionCtx);
+            if (ctx !== sessionCtx || claudeSessionId !== sessionId || !credentialResumeRequired || inputController) {
+              return;
+            }
+            sessionCtx.log(`Credential recovery: resuming session in a fresh Claude query (${sessionId})`);
+            spawnQuery(sessionId, sessionCtx, sessionId, buildEnv(sessionCtx));
+          } catch (err) {
+            sessionCtx.log(`Credential recovery resume failed: ${err instanceof Error ? err.message : String(err)}`);
+            credentialResumeRequired = false;
+            retryBufferedMessages("claude_credential_resume_failed_recovery");
+            failFatalSessionForRecovery(sessionCtx, "claude_credential_resume_failed");
+            return;
+          }
+        }
         while (
           queuedInjectedMessages.length > 0 &&
           inputController &&
@@ -1019,14 +1042,19 @@ export const createClaudeCodeHandler: HandlerFactory = (config) => {
         }
       } finally {
         injectDrainInProgress = false;
-        if (queuedInjectedMessages.length > 0 && inputController && ctx && claudeSessionId) {
+        if (
+          queuedInjectedMessages.length > 0 &&
+          (inputController || credentialResumeRequired) &&
+          ctx &&
+          claudeSessionId
+        ) {
           scheduleInjectedMessagesDrain(ctx, claudeSessionId);
         }
       }
     })();
   }
 
-  function retryBufferedMessages(reason: string): void {
+  function retryBufferedMessages(reason: string, preserveFifo = false): void {
     inputRecoveryReason = reason;
     unclosedSdkInputs.length = 0;
     const pending = pendingAckMessages.splice(0);
@@ -1037,8 +1065,22 @@ export const createClaudeCodeHandler: HandlerFactory = (config) => {
           pendingItem.message === drainingInjectedMessage?.message &&
           pendingItem.token === drainingInjectedMessage.token,
       );
-    if (drainingInjectedMessage && !drainingIsPending) retryInjectedItem(drainingInjectedMessage, reason);
     const queued = queuedInjectedMessages.splice(0);
+    if (preserveFifo) {
+      // pending inputs reached the controller before the currently formatting
+      // item, which in turn precedes the untouched handler queue. Credential
+      // settlement must return that exact unentered tail order to runtime
+      // recovery after removing the consumed prefix.
+      for (const item of pending) {
+        item.token.retry(item.message, reason);
+      }
+      if (drainingInjectedMessage && !drainingIsPending) retryInjectedItem(drainingInjectedMessage, reason);
+      for (const item of queued) {
+        retryInjectedItem(item, reason);
+      }
+      return;
+    }
+    if (drainingInjectedMessage && !drainingIsPending) retryInjectedItem(drainingInjectedMessage, reason);
     for (const item of queued) {
       retryInjectedItem(item, reason);
     }
@@ -1185,6 +1227,7 @@ export const createClaudeCodeHandler: HandlerFactory = (config) => {
     inputController = nextInputController;
     currentQuery = nextQuery;
     activeProviderEnv = childEnv;
+    credentialResumeRequired = false;
   }
 
   /**
@@ -1457,8 +1500,31 @@ export const createClaudeCodeHandler: HandlerFactory = (config) => {
                   }
                   sessionCtx.emitEvent({ kind: "turn_end", payload: { status: "error" } });
                   retryCount = 0;
+                  const retireCredentialGeneration =
+                    settlement.classification.category === "credential" &&
+                    settlement.decision.action === "stop" &&
+                    settlement.decision.terminalKind === "needs_operator";
+                  if (retireCredentialGeneration) {
+                    // Prevent messages delivered while the durable runtime
+                    // notice / exact-prefix ACK is in flight from reaching
+                    // the stale native process. The logical Session and
+                    // claudeSessionId remain intact for lazy exact resume.
+                    retireProviderTransport();
+                  }
                   await ackTurnClose("error", consumedReasonForProviderSettlement(settlement), providerEnteredPrefix);
                   resetTurnReplaySafety();
+                  if (retireCredentialGeneration) {
+                    // The consumed prefix is now settled and removed from the
+                    // replay buffer. Return only the unentered tail to the
+                    // existing ordered recovery path, then wait for a newly
+                    // delivered message before creating a fresh query.
+                    retryBufferedMessages("claude_credential_terminal_tail_recovery", true);
+                    credentialResumeRequired = true;
+                    if (queuedInjectedMessages.length > 0 && claudeSessionId) {
+                      scheduleInjectedMessagesDrain(sessionCtx, claudeSessionId);
+                    }
+                    return;
+                  }
                   continue;
                 }
               }
@@ -2025,6 +2091,7 @@ export const createClaudeCodeHandler: HandlerFactory = (config) => {
 
     async suspend(reason?: string) {
       ctx?.log("Suspending session");
+      credentialResumeRequired = false;
       retireProviderTransport();
 
       // Wait for consumer loop to finish

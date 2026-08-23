@@ -94,7 +94,7 @@ function isClaudeProvider(provider: RuntimeProvider): boolean {
 function claudeProviderTurnNoticeLead(payload: ProviderRetryEventPayload): string {
   if (payload.category === "credential") {
     if (isEgressForbiddenText(payload.messagePreview ?? "")) return claudeEgressForbiddenLead();
-    return "Claude Code could not run this turn: Anthropic rejected the local Claude authentication. Run `claude auth login` on this machine, then retry.";
+    return "Claude Code could not run this turn: Anthropic rejected the local Claude authentication. Run `claude auth login` on this machine. After sign-in completes, send your message again in this chat.";
   }
   if (payload.category === "provider_capacity") {
     if (payload.reasonCode === "provider_billing_limit") {

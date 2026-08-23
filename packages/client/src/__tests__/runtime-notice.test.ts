@@ -102,9 +102,12 @@ describe("runtime notice formatting", () => {
         }),
       ),
     ).toContain("usually NOT a login problem");
-    expect(formatProviderFailureRuntimeNotice(payload({ provider: "claude-code", category: "credential" }))).toContain(
-      "Run `claude auth login`",
+    const credentialNotice = formatProviderFailureRuntimeNotice(
+      payload({ provider: "claude-code", category: "credential" }),
     );
+    expect(credentialNotice).toContain("Run `claude auth login`");
+    expect(credentialNotice).toContain("send your message again in this chat");
+    expect(credentialNotice).not.toContain("then retry");
     expect(
       formatProviderFailureRuntimeNotice(
         payload({ provider: "claude-code", category: "provider_capacity", reasonCode: "provider_billing_limit" }),
