@@ -947,6 +947,38 @@ describe("prepareManagedSession", () => {
     expect(markWorkspaceInitComplete).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps the null-config guard for a schema v1 Managed Skills state", async () => {
+    const prepareManagedSession = await loadPrepare();
+    writeManagedState({
+      schemaVersion: 1,
+      cliVersion: "0.5.17",
+      updatedAt: "2026-07-23T23:24:32.393Z",
+      skills: [],
+    });
+
+    await expect(
+      prepareManagedSession({
+        sessionCtx: boundSessionCtx(),
+        workspaceRoot,
+        agentName: "prep-agent",
+        runtimeProvider: "cursor",
+        providerSkillRoots: TEST_PROVIDER_SKILL_ROOTS,
+        runtimeConfig: null,
+        payload: boundPayload,
+        payloadResolved: true,
+        contextTree: {
+          path: join(workspaceRoot, "context-tree"),
+          repoUrl: "https://example.test/tree",
+          branch: "main",
+        },
+      }),
+    ).rejects.toThrow(/runtime config is unavailable/);
+
+    expect(callOrder).not.toContain("skills");
+    expect(reconcileManagedSkillsForConfig).not.toHaveBeenCalled();
+    expect(markWorkspaceInitComplete).not.toHaveBeenCalled();
+  });
+
   it("refuses a future-schema Managed Skills state before reconcile", async () => {
     const prepareManagedSession = await loadPrepare();
     writeManagedState({
