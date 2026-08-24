@@ -1001,6 +1001,74 @@ export const createClaudeCodeHandler: HandlerFactory = (config) => {
     }
   }
 
+  async function spawnCredentialRecoveryQuery(sessionCtx: SessionContext, sessionId: string): Promise<void> {
+    await assertQuerySpawnCurrent(sessionCtx);
+    if (ctx !== sessionCtx || claudeSessionId !== sessionId || !credentialResumeRequired || inputController) {
+      return;
+    }
+
+    // A config event may land while the credential-failed query is retired.
+    // Project every newer non-model payload before the only recovery spawn so
+    // buildQuery cannot record that version as applied while CLAUDE.md still
+    // carries the old briefing. Keep this local projection baseline separate
+    // from appliedPayload: only spawnQuery may advance the applied snapshot,
+    // after the projection and SDK constructor both succeed.
+    let projectedPayload = appliedPayload;
+    while (true) {
+      const cached = agentConfigCache?.get(sessionCtx.agent.agentId);
+      const onlyModelChangedSinceProjection =
+        cached !== undefined &&
+        projectedPayload !== null &&
+        JSON.stringify({ ...projectedPayload, model: "" }) === JSON.stringify({ ...cached.payload, model: "" }) &&
+        projectedPayload.model !== cached.payload.model;
+      const needsBriefingProjection =
+        cached !== undefined && cached.version > appliedConfigVersion && !onlyModelChangedSinceProjection;
+
+      if (needsBriefingProjection) {
+        if (!cwd) throw new Error("credential recovery has no managed workspace to project");
+        sessionCtx.log(
+          `[configHotSwitch] path=credential-recovery fromVersion=${appliedConfigVersion} toVersion=${cached.version}`,
+        );
+        const legacyProjection = cwd !== workspaceRoot;
+        const projected = await projectManagedWorkspace({
+          sessionCtx,
+          workspace: cwd,
+          sourceAuthorityRoot: legacyProjection ? workspaceRoot : cwd,
+          agentName,
+          runtimeProvider,
+          providerSkillRoots: PROVIDER_SKILL_ROOTS,
+          runtimeConfig: cached,
+          payload: cached.payload,
+          payloadResolved: true,
+          existingPayload: projectedPayload ?? undefined,
+          contextTree: {
+            kind: contextTree.kind,
+            path: contextTree.path,
+            repoUrl: contextTree.repoUrl,
+            branch: contextTree.branch,
+          },
+          reresolveSource: true,
+          markInitComplete: false,
+          writeIdentityAndManifest: !legacyProjection,
+          suppressSourceRepos: legacyProjection,
+        });
+        currentBriefingFingerprint = computeBriefingFingerprint(projected.briefing);
+        projectedPayload = cached.payload;
+
+        if (ctx !== sessionCtx || claudeSessionId !== sessionId || !credentialResumeRequired || inputController) {
+          return;
+        }
+        const latest = agentConfigCache?.get(sessionCtx.agent.agentId);
+        if (!latest) throw new Error("credential recovery runtime config disappeared during projection");
+        if (latest.version !== cached.version) continue;
+      }
+
+      sessionCtx.log(`Credential recovery: resuming session in a fresh Claude query (${sessionId})`);
+      spawnQuery(sessionId, sessionCtx, sessionId, buildEnv(sessionCtx));
+      return;
+    }
+  }
+
   function scheduleInjectedMessagesDrain(sessionCtx: SessionContext, sessionId: string): void {
     if (injectDrainInProgress || (!inputController && !credentialResumeRequired)) return;
     void (async () => {
@@ -1008,12 +1076,7 @@ export const createClaudeCodeHandler: HandlerFactory = (config) => {
       try {
         if (!inputController && credentialResumeRequired) {
           try {
-            await assertQuerySpawnCurrent(sessionCtx);
-            if (ctx !== sessionCtx || claudeSessionId !== sessionId || !credentialResumeRequired || inputController) {
-              return;
-            }
-            sessionCtx.log(`Credential recovery: resuming session in a fresh Claude query (${sessionId})`);
-            spawnQuery(sessionId, sessionCtx, sessionId, buildEnv(sessionCtx));
+            await spawnCredentialRecoveryQuery(sessionCtx, sessionId);
           } catch (err) {
             sessionCtx.log(`Credential recovery resume failed: ${err instanceof Error ? err.message : String(err)}`);
             credentialResumeRequired = false;

@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type ProviderRetryEventPayload, parseProviderRetryEventMessage, type SessionEvent } from "@first-tree/shared";
@@ -458,6 +458,85 @@ describe("claude-code handler — structured provider error result", () => {
     recoveredTurnGate.resolve();
     await waitForCondition(() => result.completed.length === 2, "recovered turn settlement");
     expect(result.forwardResult).toHaveBeenCalledWith("Recovered after login");
+    expect(result.failSessionForRecovery).not.toHaveBeenCalled();
+
+    await result.handler.suspend();
+    expect(mockState.closeCalls).toEqual([1, 2]);
+  });
+
+  it("projects config updated during credential wait before the fresh resume query", async () => {
+    const failedTurnGate = deferred();
+    const recoveredTurnGate = deferred();
+    mockState.promptAppend = "credential recovery prompt v1";
+    mockState.messagesByAttempt = [
+      [
+        {
+          type: "result",
+          subtype: "success",
+          is_error: true,
+          api_error_status: 401,
+          result: "authentication_failed",
+        },
+      ],
+      [
+        {
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          result: "Recovered with current briefing",
+        },
+      ],
+    ];
+    mockState.inputDrainLimitByAttempt = [1, 1];
+    mockState.resultGateByAttempt = [failedTurnGate.promise, recoveredTurnGate.promise];
+
+    const result = await startSingleResultTurn();
+    await waitForCondition(
+      () => mockState.observedInputMessages.filter((input) => input.attempt === 1).length === 1,
+      "failed query input",
+    );
+    failedTurnGate.resolve();
+    await waitForCondition(() => result.completed.length === 1, "credential settlement");
+
+    const briefingPath = join(workspaceRoot, "CLAUDE.md");
+    expect(readFileSync(briefingPath, "utf8")).toContain("credential recovery prompt v1");
+    expect(mockState.queryCalls).toBe(1);
+
+    mockState.configVersion = 2;
+    mockState.promptAppend = "credential recovery prompt v2";
+    await result.cache.refresh(AGENT_ID);
+    result.handler.inject(
+      {
+        id: "m2",
+        chatId: "chat-claude-provider-error",
+        senderId: "user-1",
+        format: "text",
+        content: "continue after login with the new briefing",
+        metadata: null,
+      },
+      deliveryTokenFromSessionContext(result.ctx),
+    );
+
+    await waitForCondition(() => mockState.queryCalls === 2, "fresh credential-recovery query");
+    await waitForCondition(
+      () => mockState.observedInputMessages.filter((input) => input.attempt === 2).length === 1,
+      "fresh query input",
+    );
+
+    const projectedBriefing = readFileSync(briefingPath, "utf8");
+    expect(projectedBriefing).toContain("credential recovery prompt v2");
+    expect(projectedBriefing).not.toContain("credential recovery prompt v1");
+    expect(mockState.observedQueryOptions[1]).toEqual({ attempt: 2, resume: result.sessionId });
+    expect(mockState.queryCalls).toBe(2);
+    expect(result.logs).toContain("[configHotSwitch] path=credential-recovery fromVersion=1 toVersion=2");
+    const recoveredInput = mockState.observedInputMessages.find((input) => input.attempt === 2)?.content ?? "";
+    expect(recoveredInput).toContain("CLAUDE.md");
+    expect(recoveredInput).toContain("continue after login with the new briefing");
+    expect(recoveredInput).not.toContain("hello");
+
+    recoveredTurnGate.resolve();
+    await waitForCondition(() => result.completed.length === 2, "recovered turn settlement");
+    expect(result.forwardResult).toHaveBeenCalledWith("Recovered with current briefing");
     expect(result.failSessionForRecovery).not.toHaveBeenCalled();
 
     await result.handler.suspend();
