@@ -1,6 +1,6 @@
 {
   "name": "first-tree-dev",
-  "version": "0.5.21",
+  "version": "0.5.22",
   "type": "module",
   "description": "First Tree — unified CLI for Context Tree onboarding, agent management, and team messaging. (Source-tree dev build; CI rewrites `name` and `bin` for prod / staging publishes — see docs/local-dev-isolation.md.)",
   "keywords": [
