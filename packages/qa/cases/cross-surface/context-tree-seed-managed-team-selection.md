@@ -28,10 +28,13 @@ boundary together.
   the installed version) next to a real self-hosted First Tree Server. Use only
   throwaway Teams and credentials.
 - Prepare two Teams on that Server: Team A, where the operator is an active
-  Admin, and Team B, where the signed-in member is an ordinary member. Record
-  both exact Team ids from server-side data, not from display names.
+  Admin, and Team B, where the operator starts as an active Admin (the managed
+  Setup Chat endpoint is admin-only) and is demoted to an ordinary member
+  before the Team B run below. Record both exact Team ids from server-side
+  data, not from display names.
 - Start a managed Context Tree Setup Chat (Settings → Getting Started) in
-  Team A with a connected agent running the build under test.
+  Team A with a connected agent running the build under test, and create the
+  Team B Setup Chat while the operator still holds Admin there.
 - Keep a second agent or runtime on the previous release as the older-runtime
   control when available.
 
@@ -50,18 +53,24 @@ boundary together.
   accepts the result only when exactly one item carries a non-empty
   `organizationId`, and otherwise stops and asks for the exact Team id before
   any Seed command.
-- In the Team B Setup Chat (ordinary member), run the same start. The preflight
-  must fail with `CONTEXT_TREE_SEED_NEEDS_ADMIN` naming Team B as the recovery
-  anchor, and the agent must ask an active Admin of Team B instead of falling
-  back to another Team.
+- In Team B, demote the operator to an ordinary member after its Setup Chat
+  exists, then repeat the preflight directly:
+  `first-tree tree seed --team "<Team B id>" --json`. It must fail with the
+  Server-classified `CONTEXT_TREE_SEED_NEEDS_ADMIN` naming Team B as the
+  recovery anchor, and the agent must ask an active Admin of Team B instead of
+  falling back to another Team.
 - Against the self-hosted Server, exercise the CLI failure ladder directly and
   record the JSON envelope and exit code for each: an expired or revoked token
-  (`CONTEXT_TREE_SEED_AUTHENTICATION_FAILED`, exit `3`), an ordinary member or
-  a wrong Team id (`CONTEXT_TREE_SEED_TEAM_ACCESS_DENIED`, exit `3` — confirm
-  the message does not reveal whether the Team exists), a Server old enough to
-  lack the preflight route (`CONTEXT_TREE_SEED_SERVER_INCOMPATIBLE`, exit `1`),
-  and a stopped or unreachable Server (`CONTEXT_TREE_SEED_PREFLIGHT_UNAVAILABLE`,
-  exit `6`). No envelope may contain raw Server response bodies.
+  (`CONTEXT_TREE_SEED_AUTHENTICATION_FAILED`, exit `3`), an unclassified 403
+  from a wrong Team id or a Team the signed-in member does not belong to
+  (`CONTEXT_TREE_SEED_TEAM_ACCESS_DENIED`, exit `3` — confirm the message does
+  not reveal whether the Team exists), a Server old enough to lack the
+  preflight route (`CONTEXT_TREE_SEED_SERVER_INCOMPATIBLE`, exit `1`), and a
+  stopped or unreachable Server (`CONTEXT_TREE_SEED_PREFLIGHT_UNAVAILABLE`,
+  exit `6`). No envelope may contain raw Server response bodies. The
+  ordinary-member condition above is the Server-classified
+  `CONTEXT_TREE_SEED_NEEDS_ADMIN` path; do not reuse it for the
+  unclassified-403 ladder step.
 - Pass a legacy non-UUID self-hosted Team id to `tree seed --team` and confirm
   it is accepted as input (no UUID-format rejection) and fails or succeeds only
   on server-side authority.
