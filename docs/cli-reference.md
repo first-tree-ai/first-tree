@@ -1710,6 +1710,17 @@ map to CLI-only codes:
 - `CONTEXT_TREE_SEED_AUTHORITY_FAILED` — the safe generic fallback when no
   more specific claim can be made without leaking Server detail.
 
+The CLI itself stays stateless: it consumes only the explicit `--team` value
+it is given. In a managed Setup Chat, that exact Team id is supplied by the
+Seed skill from the runtime-authored `<first-tree-current-chat-context>`
+payload's `organizationId` field — never from the chat topic, title, Team
+display name, Workspace manifest, account default Team, or setup-chat
+transcript text. Runtimes older than this contract omit the field; the
+skill's fail-closed fallback then resolves the exact current chat once
+through `first-tree chat list --engagement all --chat "$FIRST_TREE_CHAT_ID"
+--json` and asks the human for the exact Team id when that result is absent
+or ambiguous.
+
 After the Admin confirms the complete source set, repeat `--confirm-source`
 for every selected repository and `--expected-source-key` for every active
 Team repository observed before confirmation. This performs one atomic,
