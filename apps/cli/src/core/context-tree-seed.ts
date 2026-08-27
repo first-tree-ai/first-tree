@@ -14,7 +14,11 @@ export type ContextTreeSeedStage = "input" | "authority" | "configuration";
 export type ContextTreeSeedPreflightCliErrorCode =
   | ContextTreeSeedPreflightErrorCode
   | "CONTEXT_TREE_SEED_INVALID_INPUT"
-  | "CONTEXT_TREE_SEED_PREFLIGHT_INVALID";
+  | "CONTEXT_TREE_SEED_PREFLIGHT_INVALID"
+  | "CONTEXT_TREE_SEED_AUTHENTICATION_FAILED"
+  | "CONTEXT_TREE_SEED_TEAM_ACCESS_DENIED"
+  | "CONTEXT_TREE_SEED_SERVER_INCOMPATIBLE"
+  | "CONTEXT_TREE_SEED_PREFLIGHT_UNAVAILABLE";
 
 export type ContextTreeSeedAuthorityReader = {
   preflightMemberContextTreeSeed(
@@ -103,26 +107,71 @@ function validateTeamId(value: string): string {
 }
 
 function classifyAuthorityFailure(error: unknown): ContextTreeSeedPreflightCliError {
+  // Known Server preflight codes keep their exact identity and wording; the
+  // splits below apply only to failures the Server did not already classify.
   if (error instanceof SdkError) {
     const parsedCode = contextTreeSeedPreflightErrorCodeSchema.safeParse(error.code);
     if (parsedCode.success) return serverPreflightFailure(parsedCode.data, error.statusCode);
-    if (error.statusCode === 401 || error.statusCode === 403) {
-      return serverPreflightFailure("CONTEXT_TREE_SEED_AUTHORITY_FAILED", error.statusCode);
-    }
+    if (error.statusCode === 401) return authenticationFailure(error.statusCode);
+    if (error.statusCode === 403) return teamAccessDeniedFailure(error.statusCode);
+    if (error.statusCode === 404) return serverIncompatibleFailure(error.statusCode);
+    if (error.statusCode >= 500) return preflightUnavailableFailure(error.statusCode);
   }
 
   const classified = classifyContextTreeReadError(error);
-  const authentication = error instanceof AuthRefreshFailedError || classified.category === "authentication";
+  const httpStatus = classified.httpStatus;
+  if (error instanceof AuthRefreshFailedError || classified.category === "authentication") {
+    return authenticationFailure(httpStatus);
+  }
+  if (classified.category === "timeout" || classified.category === "connection") {
+    return preflightUnavailableFailure(httpStatus);
+  }
+
+  // Safe generic fallback: the authority could not be established, and nothing
+  // more specific can be claimed without leaking server detail.
   return new ContextTreeSeedPreflightCliError(
     "CONTEXT_TREE_SEED_AUTHORITY_FAILED",
-    authentication
-      ? "Authentication failed before the selected Team could authorize Context Tree Seed. Sign in again and retry."
-      : "The selected Team's current Context Tree Seed authority could not be checked online.",
+    "The selected Team's current Context Tree Seed authority could not be checked online.",
     {
       stage: "authority",
       exitCode: classified.exitCode,
-      ...(classified.httpStatus === undefined ? {} : { httpStatus: classified.httpStatus }),
+      ...(httpStatus === undefined ? {} : { httpStatus }),
     },
+  );
+}
+
+function authenticationFailure(httpStatus: number | undefined): ContextTreeSeedPreflightCliError {
+  return new ContextTreeSeedPreflightCliError(
+    "CONTEXT_TREE_SEED_AUTHENTICATION_FAILED",
+    "Authentication failed before the selected Team could authorize Context Tree Seed. Sign in again and retry.",
+    { stage: "authority", exitCode: 3, ...(httpStatus === undefined ? {} : { httpStatus }) },
+  );
+}
+
+function teamAccessDeniedFailure(httpStatus: number): ContextTreeSeedPreflightCliError {
+  // One message covers both genuine causes — the signed-in member is not an
+  // active member of the selected Team, or the Team id itself is wrong — so
+  // the response never confirms whether a given Team id exists.
+  return new ContextTreeSeedPreflightCliError(
+    "CONTEXT_TREE_SEED_TEAM_ACCESS_DENIED",
+    "The signed-in member is not an active member of the selected Team, or the Team id is incorrect. Verify the exact Team id and membership, then retry.",
+    { stage: "authority", exitCode: 3, httpStatus },
+  );
+}
+
+function serverIncompatibleFailure(httpStatus: number): ContextTreeSeedPreflightCliError {
+  return new ContextTreeSeedPreflightCliError(
+    "CONTEXT_TREE_SEED_SERVER_INCOMPATIBLE",
+    "The connected First Tree Server does not serve the Context Tree Seed preflight route (HTTP 404). A self-hosted Server older than this CLI is the common cause; upgrade the Server and retry.",
+    { stage: "authority", exitCode: 1, httpStatus },
+  );
+}
+
+function preflightUnavailableFailure(httpStatus: number | undefined): ContextTreeSeedPreflightCliError {
+  return new ContextTreeSeedPreflightCliError(
+    "CONTEXT_TREE_SEED_PREFLIGHT_UNAVAILABLE",
+    "The Context Tree Seed preflight is temporarily unavailable (network, timeout, or Server error). Retry shortly; if it persists, check connectivity to the First Tree Server.",
+    { stage: "authority", exitCode: 6, ...(httpStatus === undefined ? {} : { httpStatus }) },
   );
 }
 

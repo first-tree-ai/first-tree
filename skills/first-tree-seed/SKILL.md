@@ -56,6 +56,33 @@ Seed has two compatible entry modes:
   sources when they exist. A non-empty manifest source list remains
   authoritative. Managed state is a path/source convenience, not authority for
   role or binding, and no prior setup-chat transcript is required for recovery.
+  Resolve `selectedTeamId` per *Resolve the managed Team id* below before any
+  Seed preflight.
+
+### Resolve the managed Team id (`selectedTeamId`)
+
+In a managed session the exact Team id comes from runtime-authored context,
+never from conversation text:
+
+- **Primary source:** the `organizationId` field of the runtime-authored
+  `<first-tree-current-chat-context>` JSON block for the current chat. Use
+  that exact value as `selectedTeamId` for every Seed/init preflight in this
+  task.
+- **Never substitute** the chat topic, title, Team display name, a local
+  workspace manifest value, an account default/current Team, or setup-chat
+  transcript text for the Team id.
+- **Compatibility path (older runtime without the field):** when the current
+  chat context JSON has no non-empty `organizationId`, query the exact
+  current chat once with the current Agent identity:
+
+  ```bash
+  first-tree chat list --engagement all --chat "$FIRST_TREE_CHAT_ID" --json
+  ```
+
+  Continue only when the result carries exactly one matching chat item whose
+  `organizationId` is a non-empty string, and use that value. On zero or
+  ambiguous results, or a missing/empty `organizationId`, ask the human for
+  the exact Team id and stop before any Seed command.
 
 When an explicit Team is available, start every invocation with this online,
 read-only admission check:
@@ -160,7 +187,8 @@ first-tree tree init --team "<selectedTeamId>" \
 ```
 
 Provider-aware `tree init` always requires `--team`, including in a managed
-workspace. Resolve that id from the trusted current task/Team briefing and
+workspace. Resolve that id per *Resolve the managed Team id
+(`selectedTeamId`)* above and
 repeat the live Server authority preflight for that exact Team. If no trusted
 Team id is available, ask the human for it and do not invoke `tree init`;
 never infer a default Team from local workspace state.

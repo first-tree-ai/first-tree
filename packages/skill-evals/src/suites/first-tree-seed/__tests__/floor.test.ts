@@ -210,6 +210,20 @@ describe("first-tree-seed floor invariants", () => {
     expect(skillMarkdown).toContain("`.gitlab/`");
   });
 
+  it("resolves the managed Seed Team id from the runtime-authored chat context, fail-closed", () => {
+    expect(skillMarkdown).toContain("### Resolve the managed Team id (`selectedTeamId`)");
+    expect(skillMarkdown).toMatch(
+      /`organizationId` field of the runtime-authored[\s\S]*<first-tree-current-chat-context>/u,
+    );
+    expect(skillMarkdown).toMatch(/Never substitute[\s\S]*chat topic, title, Team display name/u);
+    expect(skillMarkdown).toContain('first-tree chat list --engagement all --chat "$FIRST_TREE_CHAT_ID" --json');
+    expect(skillMarkdown).toContain("exactly one matching chat item whose");
+    expect(skillMarkdown).toMatch(/ask the human for\s+the exact Team id and stop before any Seed command/u);
+    // The tree init guidance must point at the same resolution contract.
+    expect(skillMarkdown).toMatch(/Resolve that id per \*Resolve the managed Team id\s+\(`selectedTeamId`\)\* above/u);
+    expect(skillMarkdown).not.toContain("Resolve that id from the trusted current task/Team briefing");
+  });
+
   it("ships behavioral gates for managed sources and portable durable recovery", () => {
     const chatSource = FIRST_TREE_SEED_GATE_CASES.find((evalCase) => evalCase.id === "empty-manifest-chat-source");
     expect(chatSource).toMatchObject({

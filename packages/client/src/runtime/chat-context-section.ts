@@ -19,6 +19,9 @@ export function renderChatContextSection(chatContext: ChatContext | undefined): 
   lines.push("## Current Chat Context (First Tree Managed, per-chat)");
   lines.push("");
   lines.push(`- Chat ID: ${chatContext.chatId}`);
+  if (chatContext.organizationId) {
+    lines.push(`- Organization ID: ${chatContext.organizationId}`);
+  }
   // Topic is the raw `chats.topic` column. We render it on every turn —
   // either the explicit value or a sentinel — so the agent can decide
   // whether to set/refresh it without round-tripping through the API. See
@@ -131,6 +134,9 @@ export function renderChatContextPrompt(chatContext: ChatContext | undefined): s
   const payload = {
     schema: "first-tree.current-chat-context.v1",
     chatId: chatContext.chatId,
+    // `null` (rather than an omitted key) is the explicit "unknown" signal for
+    // contexts built without the field, e.g. by an older runtime.
+    organizationId: chatContext.organizationId ?? null,
     title: chatContext.title,
     topic: chatContext.topic,
     description: chatContext.description,

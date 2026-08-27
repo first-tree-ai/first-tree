@@ -1673,7 +1673,9 @@ unrelated organization policy while removing the retired check.
 `first-tree tree seed --team <team-id>` is the stateless admission boundary for
 portable Context Tree setup. The Team is required and explicit; this command
 does not consult a Workspace manifest, managed briefing, prior setup Chat,
-Web selection, or account default/current Team. The Server resolves the signed-in
+Web selection, or account default/current Team. `--team` accepts any explicit
+non-empty Team id — no UUID shape is required, because legacy self-hosted Team
+ids predate the UUID format. The Server resolves the signed-in
 member's active role and the selected Team's current binding on every call.
 An active Admin receives either the exact bound repo/branch or the current
 unbound branch. An active ordinary member receives the stable
@@ -1682,6 +1684,31 @@ anchor. Invalid historical binding data fails closed. The preflight creates no
 repository, binding, branch, PR, Chat, review, or merge state and disables
 transport retries; setup agents repeat it explicitly immediately before each
 remote mutation.
+
+Preflight failures are reported with stable failure codes; error envelopes
+never carry the raw Server body. Codes the Server already classified keep
+their exact identity and wording (`CONTEXT_TREE_SEED_NEEDS_ADMIN`,
+`CONTEXT_TREE_SEED_CONFIGURATION_INVALID`, and an explicit
+`CONTEXT_TREE_SEED_AUTHORITY_FAILED`). Failures the Server did not classify
+map to CLI-only codes:
+
+- `CONTEXT_TREE_SEED_INVALID_INPUT` — `--team` missing, empty, padded, or
+  carrying control characters; exit `2`, before any network request.
+- `CONTEXT_TREE_SEED_AUTHENTICATION_FAILED` — HTTP `401` or a failed
+  authentication refresh; exit `3`. Sign in again and retry.
+- `CONTEXT_TREE_SEED_TEAM_ACCESS_DENIED` — an unclassified HTTP `403`. One
+  message covers both genuine causes — the signed-in member is not an active
+  member of the selected Team, or the Team id itself is wrong — so the
+  response never confirms whether a given Team id exists; exit `3`.
+- `CONTEXT_TREE_SEED_SERVER_INCOMPATIBLE` — the connected Server does not
+  serve the Seed preflight route (HTTP `404`); a self-hosted Server older than
+  this CLI is the common cause. Exit `1`; upgrade the Server and retry.
+- `CONTEXT_TREE_SEED_PREFLIGHT_UNAVAILABLE` — network, timeout, or HTTP `5xx`;
+  exit `6`. Retry shortly.
+- `CONTEXT_TREE_SEED_PREFLIGHT_INVALID` — the Server returned an unparseable
+  or Team-mismatched preflight response; exit `1`.
+- `CONTEXT_TREE_SEED_AUTHORITY_FAILED` — the safe generic fallback when no
+  more specific claim can be made without leaking Server detail.
 
 After the Admin confirms the complete source set, repeat `--confirm-source`
 for every selected repository and `--expected-source-key` for every active

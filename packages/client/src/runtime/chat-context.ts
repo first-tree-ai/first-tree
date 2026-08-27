@@ -32,6 +32,14 @@ export type ChatContextParticipant = {
 
 export type ChatContext = {
   chatId: string;
+  /**
+   * The chat's owning Team id (`chats.organization_id`), passed through from
+   * the server-authored chat detail so skills that need the exact Team (for
+   * example Context Tree Seed's `--team`) never have to guess it from the
+   * topic, title, or display name. Optional for additive compatibility with
+   * contexts built by older runtimes; `fetchChatContext` always populates it.
+   */
+  organizationId?: string;
   /** Server-resolved display title; always non-empty. */
   title: string;
   /** Raw `chats.topic` column — null when the creator didn't set an explicit topic. */
@@ -85,6 +93,7 @@ export async function fetchChatContext(
 
   return {
     chatId,
+    organizationId: detail.organizationId,
     title: detail.title,
     topic: detail.topic,
     description: detail.description,
