@@ -9,7 +9,7 @@
 //
 //   1. The runtime briefing emitted by `buildAgentBriefing()` —
 //      materialised at `<workspace>/AGENTS.md` (and `<workspace>/CLAUDE.md`
-//      as a symlink to it). The `## CLI Overview` section here tells the
+//      as a symlink to it). The `## First Tree CLI` section here tells the
 //      agent which subcommands exist; advertising a retired command
 //      causes the agent to burn a turn on `unknown command`.
 //
@@ -242,8 +242,8 @@ describe("retired tree subcommand drift guard", () => {
     }
   });
 
-  it("buildAgentBriefing CLI Overview lists only registered tree subcommands — no retired commands", () => {
-    // Reuse a tiny stub of `BuildAgentBriefingOptions`. The CLI Overview
+  it("buildAgentBriefing command surface lists only registered tree subcommands — no retired commands", () => {
+    // Reuse a tiny stub of `BuildAgentBriefingOptions`. The command surface
     // section doesn't depend on identity / payload / sourceRepos / tree
     // path, so a minimal stub renders the same output.
     const briefing = buildAgentBriefing({
@@ -262,12 +262,12 @@ describe("retired tree subcommand drift guard", () => {
       contextTreePath: null,
     });
 
-    const overviewStart = briefing.indexOf("## CLI Overview");
-    expect(overviewStart, "CLI Overview section must be present").toBeGreaterThanOrEqual(0);
-    // CLI Overview ends at the next top-level heading; scope the check to
-    // just that section so unrelated documentation prose in later
-    // sections doesn't false-positive.
-    const overviewEnd = briefing.indexOf("\n# ", overviewStart);
+    const overviewStart = briefing.indexOf("**Command surface.**");
+    expect(overviewStart, "Command surface paragraph must be present").toBeGreaterThanOrEqual(0);
+    // The command surface lives in `## First Tree CLI`; scope the check to
+    // that paragraph and the cron contract after it so unrelated
+    // documentation prose in later sections doesn't false-positive.
+    const overviewEnd = briefing.indexOf("\n## GitHub Working Posture", overviewStart);
     const overview = briefing.slice(overviewStart, overviewEnd === -1 ? undefined : overviewEnd);
 
     expect(overview).toContain("tree verify");
@@ -279,7 +279,7 @@ describe("retired tree subcommand drift guard", () => {
       // Word-boundary regex (not `.toContain`) so prose like
       // "workspace ↔ tree binding" doesn't false-positive on `tree bind`.
       const re = new RegExp(`\\b(?:first-tree|ft)\\s+tree\\s+${sub}\\b`, "u");
-      expect(overview, `CLI Overview must not advertise retired \`tree ${sub}\``).not.toMatch(re);
+      expect(overview, `Command surface must not advertise retired \`tree ${sub}\``).not.toMatch(re);
     }
   });
 

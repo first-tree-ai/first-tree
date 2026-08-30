@@ -441,6 +441,11 @@ first-tree chat
 # --to recipients are mentioned and woken; --with participants are added for
 # context but receive only silent initial history. This is not an empty-chat or
 # same-task handoff tool.
+#
+# Only agent recipients are woken. A chat whose only --to is a human starts
+# idle and waits for that human; `--to <your own agent name>` wakes YOU in the
+# new chat (the server rewrites the opening message's sender to your manager,
+# so write the body as a self-contained task brief).
 first-tree chat create "Please review the rollout plan." --to code-agent --with reviewer-agent \
   --topic "rollout review" \
   --description "reviewing rollout plan; waiting on code-agent"

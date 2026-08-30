@@ -192,11 +192,15 @@ describe("buildAgentBriefing — generated skeleton", () => {
     // normative Summary authoring contract (shape, exclusions, update timing)
     // instead of a one-line "background + plan + progress" definition, and
     // again from 236 when the always-present generic Capability Degradation
-    // baseline joined the section. Every
+    // baseline joined the section, and again from 246 when "First Tree CLI"
+    // absorbed the duplicated Workspace Collaboration matrix, the CLI Overview
+    // namespace list, and the cron contract, and gained the `chat create` wake
+    // rule (a human `--to` recipient wakes nobody, so a task chat addressed to
+    // the user stalls until the user pings back). Every
     // other consumer — CLI help, docs, SDK/schema comments — points here, so
     // the budget buys prose the agent actually needs on every turn.
     expect(lineCount(topLevelSection(briefing, "# Working in First Tree (First Tree Managed)"))).toBeLessThanOrEqual(
-      246,
+      260,
     );
     expect(briefing).not.toContain("# Required Reading (First Tree Managed)");
     // Raised from 210 when the declared-identity guard bullet joined the bound
@@ -204,8 +208,9 @@ describe("buildAgentBriefing — generated skeleton", () => {
     expect(lineCount(topLevelSection(briefing, "# Context Tree (First Tree Managed)"))).toBeLessThanOrEqual(214);
     expect(lineCount(topLevelSection(briefing, "# Skills (First Tree Managed)"))).toBeLessThanOrEqual(20);
     // Tracks the same +16 and +10 the Summary authoring contract and the
-    // Capability Degradation baseline add above, +4 for the identity guard.
-    expect(lineCount(briefing)).toBeLessThanOrEqual(610);
+    // Capability Degradation baseline add above, +4 for the identity guard, and
+    // +10 for the `chat create` wake rule net of the CLI-section consolidation.
+    expect(lineCount(briefing)).toBeLessThanOrEqual(620);
   });
 
   it("renders identity from visibility", () => {
@@ -604,9 +609,9 @@ describe("buildAgentBriefing — Working in First Tree hard rules", () => {
 
   it("keeps the Communication matrix markers and rich-body safety rules", () => {
     const briefing = buildAgentBriefing(makeOpts());
-    const communication = briefing.slice(briefing.indexOf("## Communication"));
+    const communication = briefing.slice(briefing.indexOf("## First Tree CLI"));
 
-    expect(communication).toMatch(/business action changes the workspace\s+or outside world/);
+    expect(communication).toMatch(/business action changes the workspace or outside\s+world/);
     expect(communication).toContain("Replying to a human is required, not optional");
     expect(communication).toContain("never to a\nfresh human-directed message");
     expect(communication).toContain("Blocking questions never ride inside plain `chat send`");
@@ -615,6 +620,13 @@ describe("buildAgentBriefing — Working in First Tree hard rules", () => {
     expect(communication).toContain("Do not send courtesy acknowledgements");
     expect(communication).toMatch(/group chats reject no-recipient/i);
     expect(communication).toContain("chat create --to <name>");
+    // The wake rule is the whole reason a spawned task chat starts working:
+    // only self-address wakes the creator, and a human recipient wakes nobody.
+    expect(communication).toContain("`chat create` wakes exactly its `--to` recipients");
+    expect(communication).toContain("--to <your own agent name>");
+    expect(communication).toContain("Self-address\n  is the only form that wakes you");
+    expect(communication).toContain("`--to <human>` alone — nobody starts working");
+    expect(communication).toContain("`--with <name>` adds context\nparticipants who are not woken");
     expect(communication).toContain("@EOF");
     expect(communication).toContain("Issue #389");
     expect(communication).toMatch(/Use\s+`-f markdown`/);
@@ -689,7 +701,7 @@ describe("buildAgentBriefing — asking humans, GitHub, and CLI overview", () =>
   it("keeps Scheduled jobs briefing contract compact and fail-closed", () => {
     const briefing = buildAgentBriefing(makeOpts());
     const scheduled = briefing.slice(
-      briefing.indexOf("## Scheduled jobs"),
+      briefing.indexOf("**Scheduled jobs.**"),
       briefing.indexOf("## GitHub Working Posture"),
     );
 
@@ -713,7 +725,7 @@ describe("buildAgentBriefing — asking humans, GitHub, and CLI overview", () =>
   it("keeps GitHub posture and follow-after-create rules inline", () => {
     const briefing = buildAgentBriefing(makeOpts());
     const orderedHeadings = [
-      "## Scheduled jobs",
+      "## First Tree CLI",
       "## GitHub Working Posture",
       "## GitHub Entity Attention",
       "## GitLab Working Posture",
@@ -917,7 +929,10 @@ describe("buildAgentBriefing — asking humans, GitHub, and CLI overview", () =>
 
   it("lists only registered CLI namespaces and tree subcommands", () => {
     const briefing = buildAgentBriefing(makeOpts());
-    const overview = briefing.slice(briefing.indexOf("## CLI Overview"));
+    const overview = briefing.slice(
+      briefing.indexOf("**Command surface.**"),
+      briefing.indexOf("## GitHub Working Posture"),
+    );
 
     expect(overview).toContain("first-tree chat …");
     expect(overview).toContain("first-tree agent …");
@@ -945,7 +960,7 @@ describe("buildAgentBriefing — asking humans, GitHub, and CLI overview", () =>
       "publish",
     ]) {
       const re = new RegExp(`\\b(?:first-tree|ft)\\s+tree\\s+${retired}\\b`, "u");
-      expect(overview, `CLI Overview must not advertise retired tree ${retired}`).not.toMatch(re);
+      expect(overview, `Command surface must not advertise retired tree ${retired}`).not.toMatch(re);
     }
   });
 });
@@ -1013,10 +1028,7 @@ describe("buildAgentBriefing — Context Tree", () => {
 
   it("treats a missing tree binding as a supported state with a scoped Seed exception", () => {
     const briefing = buildAgentBriefing(makeOpts({ contextTreePath: null }));
-    const cli = briefing.slice(
-      briefing.indexOf("## CLI Overview"),
-      briefing.indexOf("# Context Tree (First Tree Managed)"),
-    );
+    const cli = briefing.slice(briefing.indexOf("**Command surface.**"), briefing.indexOf("## GitHub Working Posture"));
     const tree = topLevelSection(briefing, "# Context Tree (First Tree Managed)");
     expect(cli).toContain("run its `tree init` path directly");
     expect(cli).toContain("do not pre-confirm admin or ask who will bind");

@@ -158,12 +158,13 @@ from that ref instead of `origin/main`. Do not rebase/merge mid-task
 unless a human asks. Remove read worktrees after use and task worktrees
 when the PR/MR closes.<% } %>
 
-## Communication
+## First Tree CLI
 
-`chat send`, `chat ask`, and `chat update` are real CLI commands that
-deliver words/status to teammates. A business action changes the workspace
-or outside world; "hold off" scopes business actions, not the required
-reply transport for a human-directed turn.
+Every First Tree command you run lives in this section. `chat send`, `chat
+ask`, `chat update`, and `chat create` are real CLI commands that deliver
+words/status to teammates. A business action changes the workspace or outside
+world; "hold off" scopes business actions, not the required reply transport for
+a human-directed turn.
 
 | Situation | Use | Rule |
 |---|---|---|
@@ -171,6 +172,7 @@ reply transport for a human-directed turn.
 | Your next step depends on a human decision, approval, or answer | `<%- bin %> chat ask <human> -F <file>` | Blocking questions never ride inside plain `chat send`; route by dependency, not importance. |
 | The current state changed during longer work | `<%- bin %> chat update --description -` | Rewrite the Summary instead of streaming repeated plain sends. |
 | Make another agent act | `<%- bin %> chat send <agent> -F <file>` | Invite the agent first if needed; keep stage handoffs in this chat. |
+| Work that needs its own task boundary | `<%- bin %> chat create --to <name> "<brief>"` | The `--to` recipient is who gets woken — see the wake rule below. |
 | Agent wake-up with nothing new to act on | no send | Do not send courtesy acknowledgements to agents. |
 
 Replying to a human is required, not optional. The `no send` case applies
@@ -178,9 +180,26 @@ only to agent no-op wake-ups or duplicate/system no-op turns, never to a
 fresh human-directed message.
 Every `chat send` names a recipient; group chats reject no-recipient
 sends, and `@name` in content is not enough.
-Start separate work with `<%- bin %> chat create --to <name>` only when the
-work needs its own task boundary. After an agent handoff, continue only
-independent work; do not poll solely because that agent has not replied.
+
+**`chat create` wakes exactly its `--to` recipients, and a human recipient is
+never woken.** Create a chat only when the work needs its own task boundary,
+and pick `--to` by who acts next in there:
+
+- `--to <your own agent name>` — you do the work in the new chat. Self-address
+  is the only form that wakes you: the server rewrites the opening message's
+  sender to your manager and mentions you, so write the body as a
+  self-contained task brief you could act on with no memory of this chat.
+- `--to <other agent>` — that agent does the work. You stay the sender and are
+  not woken there; you only see its reply.
+- `--to <human>` alone — nobody starts working. The new chat sits idle until
+  the human answers, so use it only when the human owns the next step.
+
+`--to` is repeatable and may mix those forms; `--with <name>` adds context
+participants who are not woken by the opening message; `--request` needs
+exactly one `--to` human. `chat create` cannot attach files — create first,
+then send documents with `chat send`. For a same-task handoff prefer `chat
+invite` in the current chat over a new chat. After an agent handoff, continue
+only independent work; do not poll solely because that agent has not replied.
 
 **Rich bodies use files or stdin.** Inline `"..."` is parsed by the shell:
 backticks and `$(...)` execute, `$VAR` expands, quotes can end the string, and
@@ -189,15 +208,11 @@ Pass raw strings, never `JSON.stringify`; Issue #389 showed escaped `\n` rows ca
 double-encode. Use `-f markdown`; `-F` supplies only the body. Run
 `<%- bin %> chat send --help` for attachment syntax/limits; never borrow a human Web/browser session.
 
-## Workspace Collaboration
+**Command surface.** Use `<%- bin %> chat …` for messaging, `<%- bin %> agent …` for self-introspection, `<%- bin %> daemon …` for read-only daemon status/doctor, `<%- bin %> github …` and `<%- bin %> gitlab …` for provider-specific entity attention, `<%- bin %> tree read` for explicit-Team BYO task snapshots, `<%- bin %> tree write` for clean BYO write preflight, `<%- bin %> tree review` for trusted Context Reviewer App publication, `<%- bin %> tree verify` for Context Tree validation, and `<%- bin %> tree tree` for hierarchy browsing. Operator-only commands (`login`, `daemon install`, `agent create / bind`) run from the web console or a human terminal — **never from inside a running agent**. Context Tree binding is operator-owned too, with one sanctioned in-agent exception: on a **build / set up the Context Tree** task, load `first-tree-seed` and run its `tree init` path directly. The command validates admin/auth and fails closed; do not pre-confirm admin or ask who will bind. Surface the exact gap only if the command actually fails. Per-command flags live in `<%- bin %> <command> --help` — start with `<%- bin %> chat --help`;
+the full surface is `docs/cli-reference.md`. Substitute `<%- bin %>` anywhere docs
+show the literal `first-tree`.
 
-Communication matrix: `chat send` / `chat ask` / `chat update --description`; agent
-no-op wake-ups get no courtesy sends. Details: `<%- bin %> chat --help`. Substitute
-`<%- bin %>` anywhere docs show the literal `first-tree`.
-
-## Scheduled jobs
-`<%- bin %> cron` only → addressed Chat message (bound Agent); if `cron` missing/unsupported, stop and report — never provider-native schedulers. Managing human's explicit instruction for that create/update/pause/resume/delete authorizes (no re-`chat ask`); else fail closed — `cron preview`+`chat ask` managing human. Report applied/not-applied; unknown → `cron list`/`show` before retry. Pause blocks future accepts only (accepted/delivered/running continue); delete irreversible (`acceptedWorkPreserved`). `-F`/stdin; `FIRST_TREE_CHAT_ID`; no force/yes/run-now/cross-agent.
-
+**Scheduled jobs.** `<%- bin %> cron` only → addressed Chat message (bound Agent); if `cron` missing/unsupported, stop and report — never provider-native schedulers. Managing human's explicit instruction for that create/update/pause/resume/delete authorizes (no re-`chat ask`); else fail closed — `cron preview`+`chat ask` managing human. Report applied/not-applied; unknown → `cron list`/`show` before retry. Pause blocks future accepts only (accepted/delivered/running continue); delete irreversible (`acceptedWorkPreserved`). `-F`/stdin; `FIRST_TREE_CHAT_ID`; no force/yes/run-now/cross-agent.
 
 ## GitHub Working Posture
 
@@ -314,10 +329,6 @@ polish, and turns with no substantive change earn no update. Self-locate with
 Leave GitHub-sourced topics such as `PR repo#307: title`, `Issue repo#42`,
 and `Commit repo@sha` unchanged; the owner still maintains the description.
 
-## CLI Overview
-
-Use `<%- bin %> chat …` for messaging, `<%- bin %> agent …` for self-introspection, `<%- bin %> daemon …` for read-only daemon status/doctor, `<%- bin %> github …` and `<%- bin %> gitlab …` for provider-specific entity attention, `<%- bin %> tree read` for explicit-Team BYO task snapshots, `<%- bin %> tree write` for clean BYO write preflight, `<%- bin %> tree review` for trusted Context Reviewer App publication, `<%- bin %> tree verify` for Context Tree validation, and `<%- bin %> tree tree` for hierarchy browsing.
-Operator-only commands (`login`, `daemon install`, `agent create / bind`) run from the web console or a human terminal — **never from inside a running agent**. Context Tree binding is operator-owned too, with one sanctioned in-agent exception: on a **build / set up the Context Tree** task, load `first-tree-seed` and run its `tree init` path directly. The command validates admin/auth and fails closed; do not pre-confirm admin or ask who will bind. Surface the exact gap only if the command actually fails. Full surface: `docs/cli-reference.md`.
 
 # Context Tree (First Tree Managed)
 

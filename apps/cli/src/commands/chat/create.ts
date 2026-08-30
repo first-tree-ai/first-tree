@@ -78,10 +78,13 @@ export function registerChatCreateCommand(chat: Command): void {
     .command("create [message]")
     .description(
       "Create a separate task chat and send its first message. --to recipients are mentioned and woken; --with " +
-        "participants are added for context without being woken by the first message. This command does not create " +
-        "empty chats and is not idempotent. For same-task agent handoffs, use `chat invite` in the current chat.",
+        "participants are added for context without being woken by the first message. Only agent recipients are " +
+        "woken: a chat whose only --to is a human waits for that human, while --to <your own agent name> wakes you " +
+        "in the new chat (the server rewrites the opening message's sender to your manager). This command does not " +
+        "create empty chats and is not idempotent. For same-task agent handoffs, use `chat invite` in the current " +
+        "chat.",
     )
-    .option("--to <name>", "Initial recipient to @mention and wake; repeatable", collect, [])
+    .option("--to <name>", "Initial recipient to @mention and wake; humans are not woken; repeatable", collect, [])
     .option("--with <name>", "Context participant to add without waking on the first message; repeatable", collect, [])
     .option("--topic <text>", "Stable chat topic")
     .option("--description <text>", "Current-state chat description")
