@@ -170,6 +170,7 @@ function createSupervisor(
         env: {
           ...spec.options.env,
           FIRST_TREE_TEST_CONVERSATION_ID: conversationId,
+          FIRST_TREE_TEST_TURN: String(turn - 1),
           ...(usage
             ? {
                 FIRST_TREE_TEST_INPUT_TOKENS: String(usage.inputTokens),
@@ -358,6 +359,73 @@ describe("Antigravity V1 handler", () => {
     expect(usageEvents.map((event) => event.payload)).toEqual([
       { provider: "antigravity", model: "gemini-3-pro", inputTokens: 3, cachedInputTokens: 1, outputTokens: 2 },
       { provider: "antigravity", model: "gemini-3-pro", inputTokens: 7, cachedInputTokens: 3, outputTokens: 5 },
+    ]);
+    await handler.shutdown();
+  });
+
+  it("keeps a failed fresh attempt as the exact conversation usage baseline for recovery", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-usage-recovery-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const recoveryScript = `
+const conversationId = process.env.FIRST_TREE_TEST_CONVERSATION_ID;
+const turn = Number(process.env.FIRST_TREE_TEST_TURN ?? "0");
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  JSON.parse(input.trim());
+  process.stdout.write(JSON.stringify({event:"init",conversation_id:conversationId}) + "\\n");
+  if (turn === 0) {
+    process.stdout.write(JSON.stringify({event:"result",result:{conversation_id:conversationId,status:"ERROR",response:"failed",usage:{input_tokens:3,cache_read_tokens:1,output_tokens:2}}}) + "\\n");
+    process.exitCode = 1;
+    return;
+  }
+  process.stdout.write(JSON.stringify({event:"result",result:{conversation_id:conversationId,status:"SUCCESS",response:"recovered",usage:{input_tokens:10,cache_read_tokens:4,output_tokens:7}}}) + "\\n");
+});
+`;
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createSupervisor(
+        specs,
+        inputs,
+        ["conversation-recovery", "conversation-recovery"],
+        recoveryScript,
+      ),
+      antigravityTurnTimeoutMs: 5_000,
+      antigravityRetrySleep: async () => true,
+    });
+
+    const firstToken = deliveryToken();
+    const first = await handler.start(message("m1", "first prompt"), sessionCtx, firstToken);
+    expect(first.sessionId).toBe("conversation-recovery");
+    expect(firstToken.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "error", completion: "consumed" }),
+    );
+
+    const recoveryToken = deliveryToken();
+    await handler.resume(message("m2", "recovery"), "conversation-recovery", sessionCtx, recoveryToken);
+    expect(recoveryToken.complete).toHaveBeenCalledWith(expect.anything(), { status: "success" });
+    expect(events.filter((event) => (event as { kind?: string }).kind === "token_usage")).toEqual([
+      {
+        kind: "token_usage",
+        payload: {
+          provider: "antigravity",
+          model: "gemini-3-pro",
+          inputTokens: 7,
+          cachedInputTokens: 3,
+          outputTokens: 5,
+        },
+      },
     ]);
     await handler.shutdown();
   });

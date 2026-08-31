@@ -540,12 +540,16 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
     sessionCtx: SessionContext,
     observedIds: ReadonlySet<string>,
     expectedSessionId: string | null,
+    observedUsage: AntigravityUsage | null = null,
   ): string | null {
     const ids = [...observedIds];
     const id = ids.length === 1 ? ids[0] : undefined;
     if (!id || (expectedSessionId && id !== expectedSessionId)) return null;
     adoptSessionId(sessionCtx, id);
-    if (!expectedSessionId) freshConversations.add(id);
+    if (observedUsage) {
+      cumulativeUsageByConversation.set(id, { ...observedUsage });
+      freshConversations.delete(id);
+    }
     return id;
   }
 
@@ -741,7 +745,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
           // settleFailure must terminate as unsafe_replay. Preserve a single
           // exact conversation id first so a later explicit resume cannot
           // accidentally create a second Antigravity conversation.
-          adoptObservedSessionId(sessionCtx, state.sessionIds, expectedSessionId);
+          adoptObservedSessionId(sessionCtx, state.sessionIds, expectedSessionId, state.usage);
           const abortError = new Error("Antigravity turn aborted or timed out before a safe terminal event");
           abortError.name = "TimeoutError";
           return settleFailure({
@@ -787,6 +791,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
             sessionCtx.emitEvent({ kind: "assistant_text", payload: { text: chunk } });
           }
           if (state.usage) {
+            if (!expectedSessionId) freshConversations.add(id);
             emitAntigravityUsage(sessionCtx, payload, id, state.usage);
           }
           try {
@@ -831,7 +836,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
         ]
           .filter((value): value is string => Boolean(value?.trim()))
           .join("\n");
-        adoptObservedSessionId(sessionCtx, state.sessionIds, expectedSessionId);
+        adoptObservedSessionId(sessionCtx, state.sessionIds, expectedSessionId, state.usage);
         return settleFailure({
           failure: redactErrorPreview(rawFailure || "Antigravity produced no terminal result", 2000),
           ...(outcome.spawnError ? { spawnError: outcome.spawnError } : {}),
