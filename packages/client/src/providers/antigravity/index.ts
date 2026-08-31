@@ -100,6 +100,27 @@ export function clearAntigravityAttemptCacheForTests(): void {
   providerTurnFailureAttempts.clear();
 }
 
+/**
+ * Antigravity's terminal usage object is cumulative for a conversation. First
+ * Tree's token_usage event is a per-turn delta, so diff the counters only
+ * against a baseline belonging to this exact conversation. A handler that
+ * cold-resumes an existing conversation has no trustworthy baseline; skip its
+ * first snapshot rather than charging the whole conversation to one turn.
+ */
+export function computeAntigravityUsageDelta(
+  cumulative: AntigravityUsage,
+  baseline: AntigravityUsage | null,
+  conversationIsFresh: boolean,
+): AntigravityUsage | null {
+  if (!baseline) return conversationIsFresh ? { ...cumulative } : null;
+  const delta = (current: number, previous: number): number => (current >= previous ? current - previous : current);
+  return {
+    inputTokens: delta(cumulative.inputTokens, baseline.inputTokens),
+    cachedInputTokens: delta(cumulative.cachedInputTokens, baseline.cachedInputTokens),
+    outputTokens: delta(cumulative.outputTokens, baseline.outputTokens),
+  };
+}
+
 type AntigravityRetrySleep = (delayMs: number, signal: AbortSignal) => Promise<boolean | undefined>;
 type QueuedDelivery = { message: SessionMessage; token: DeliveryToken };
 
@@ -221,6 +242,8 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
   let drainingBatch: QueuedDelivery[] | null = null;
   let drainCancellationReason: string | null = null;
   let pendingChatContextPrompt: string | null = null;
+  const cumulativeUsageByConversation = new Map<string, AntigravityUsage>();
+  const freshConversations = new Set<string>();
   const queue: QueuedDelivery[] = [];
 
   async function refreshProjection(sessionCtx: SessionContext): Promise<{
@@ -513,6 +536,45 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
     }
   }
 
+  function adoptObservedSessionId(
+    sessionCtx: SessionContext,
+    observedIds: ReadonlySet<string>,
+    expectedSessionId: string | null,
+  ): string | null {
+    const ids = [...observedIds];
+    const id = ids.length === 1 ? ids[0] : undefined;
+    if (!id || (expectedSessionId && id !== expectedSessionId)) return null;
+    adoptSessionId(sessionCtx, id);
+    if (!expectedSessionId) freshConversations.add(id);
+    return id;
+  }
+
+  function emitAntigravityUsage(
+    sessionCtx: SessionContext,
+    payload: AntigravityRuntimeConfigPayload,
+    conversationId: string,
+    cumulative: AntigravityUsage,
+  ): void {
+    const delta = computeAntigravityUsageDelta(
+      cumulative,
+      cumulativeUsageByConversation.get(conversationId) ?? null,
+      freshConversations.has(conversationId),
+    );
+    cumulativeUsageByConversation.set(conversationId, { ...cumulative });
+    freshConversations.delete(conversationId);
+    if (!delta || delta.inputTokens + delta.cachedInputTokens + delta.outputTokens === 0) return;
+    sessionCtx.emitEvent({
+      kind: "token_usage",
+      payload: {
+        provider: "antigravity",
+        model: payload.model || "antigravity-default",
+        inputTokens: delta.inputTokens,
+        cachedInputTokens: delta.cachedInputTokens,
+        outputTokens: delta.outputTokens,
+      },
+    });
+  }
+
   function emitProviderTurnSettlementEvent(sessionCtx: SessionContext, settlement: ProviderAttemptSettlement): void {
     sessionCtx.emitEvent({
       kind: "error",
@@ -669,9 +731,28 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
           clearTimeout(timeout);
         }
 
-        if (abort.signal.aborted || generation !== turnGeneration || !sessionActive) {
+        if (generation !== turnGeneration || !sessionActive) {
           token.retry(messages, "antigravity_turn_aborted_or_timed_out");
           return false;
+        }
+        if (abort.signal.aborted) {
+          // A timeout/provider abort is a provider attempt, not an implicit
+          // safe redelivery. If the stream already observed a mutating tool,
+          // settleFailure must terminate as unsafe_replay. Preserve a single
+          // exact conversation id first so a later explicit resume cannot
+          // accidentally create a second Antigravity conversation.
+          adoptObservedSessionId(sessionCtx, state.sessionIds, expectedSessionId);
+          const abortError = new Error("Antigravity turn aborted or timed out before a safe terminal event");
+          abortError.name = "TimeoutError";
+          return settleFailure({
+            failure: abortError.message,
+            spawnError: abortError,
+            state,
+            sessionCtx,
+            messages,
+            token,
+            turnGeneration,
+          });
         }
 
         const ids = [...state.sessionIds];
@@ -700,21 +781,13 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
           const id = ids[0];
           if (!id) throw new Error("Antigravity success without conversation ID");
           adoptSessionId(sessionCtx, id);
+          if (!expectedSessionId) freshConversations.add(id);
           const finalText = state.results[0]?.text || state.text.join("");
           for (const chunk of chunkAssistantText(finalText)) {
             sessionCtx.emitEvent({ kind: "assistant_text", payload: { text: chunk } });
           }
           if (state.usage) {
-            sessionCtx.emitEvent({
-              kind: "token_usage",
-              payload: {
-                provider: "antigravity",
-                model: payload.model || "antigravity-default",
-                inputTokens: state.usage.inputTokens,
-                cachedInputTokens: state.usage.cachedInputTokens,
-                outputTokens: state.usage.outputTokens,
-              },
-            });
+            emitAntigravityUsage(sessionCtx, payload, id, state.usage);
           }
           try {
             await sessionCtx.forwardResult(finalText);
@@ -758,6 +831,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
         ]
           .filter((value): value is string => Boolean(value?.trim()))
           .join("\n");
+        adoptObservedSessionId(sessionCtx, state.sessionIds, expectedSessionId);
         return settleFailure({
           failure: redactErrorPreview(rawFailure || "Antigravity produced no terminal result", 2000),
           ...(outcome.spawnError ? { spawnError: outcome.spawnError } : {}),
@@ -1049,6 +1123,8 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
       providerSessionId = null;
       pendingSyntheticId = null;
       pendingChatContextPrompt = null;
+      cumulativeUsageByConversation.clear();
+      freshConversations.clear();
       providerTurnFailureAttempts.clear();
       queue.length = 0;
       initialTurnPreparing = false;

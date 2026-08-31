@@ -931,7 +931,6 @@ describe("probeCapabilities (aggregator)", () => {
       "cursor",
       "deepseek-harness",
       "grok",
-      "antigravity",
       "kimi-code",
       "opencode",
       "pi",
