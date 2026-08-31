@@ -24,8 +24,10 @@ export function registerChatSendCommand(chat: Command): void {
         "human; the recipient is @mentioned and notified — an agent recipient is woken, a human is not (the " +
         "recipient must already be a participant — `chat invite` an agent first). " +
         "A plain send to a human is informational only — a free reply or report they can read and move " +
-        "on from; any question your next step depends on goes through `chat ask` (a send never carries a " +
-        "blocking question). Report progress with `chat update --description`. A message must name a recipient " +
+        "on from; a send never carries a question. Anything you want the human to consider or answer — a " +
+        "blocking decision, an optional offer, or a one-line confirmation alike — goes through `chat ask`, which " +
+        "gives the answer somewhere to land. Report progress with `chat update --description`. A message must " +
+        "name a recipient " +
         "— there is no no-mention send. The body can be the [message] argument, piped via stdin (omit " +
         "[message]), or read from a file with --message-file <path> (`-` = stdin); prefer stdin or --message-file " +
         "for any rich or multi-line body so the shell cannot mangle backticks, quotes, or newlines.",

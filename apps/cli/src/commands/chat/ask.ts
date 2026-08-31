@@ -57,7 +57,9 @@ export function registerChatAskCommand(chat: Command): void {
     .command("ask [name] [message]")
     .description(
       "Ask a HUMAN in the caller's current chat (FIRST_TREE_CHAT_ID) a tracked question — a decision, approval, or " +
-        "answer. Any question your next step depends on goes through `chat ask`, never a plain `chat send`. Writes " +
+        "answer. Every question you put to a human goes through `chat ask` — whether or not your next step is " +
+        "blocked on it, and including an optional offer or a one-line confirmation — never a plain `chat send`. " +
+        "Writes " +
         "an open question (format=request) directed at a single human <name>: the message body IS the ask, and it " +
         "must be decision-self-sufficient for a human who remembers nothing of this chat — (1) why this question " +
         "exists, (2) a recap of the recent interactions, (3) the single question plus your recommendation — written " +
