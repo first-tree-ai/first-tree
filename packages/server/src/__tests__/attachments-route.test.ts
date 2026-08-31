@@ -1,3 +1,4 @@
+import { validateHeaderValue } from "node:http";
 import { Readable } from "node:stream";
 import { ATTACHMENT_FILENAME_HEADER, ATTACHMENT_MIME_HEADER, MAX_ATTACHMENT_BYTES } from "@first-tree/shared";
 import { eq, sql } from "drizzle-orm";
@@ -85,6 +86,30 @@ describe("attachments route — upload + capability download", () => {
       lifecycleState: "ready",
       data: bytes,
     });
+  });
+
+  it("serves Unicode filenames through an ASCII-safe Content-Disposition header", async () => {
+    const app = getApp();
+    const admin = await createTestAdmin(app, { username: `up-unicode-${crypto.randomUUID().slice(0, 6)}` });
+    const filename = "\u4f1a\u8bdd\u9644\u4ef6 100%\uff08\u7ec8\u7248\uff09.docx";
+    const encodedFilename = encodeURIComponent(filename);
+    const bytes = Buffer.from("unicode filename payload");
+
+    const upload = await postAttachment(app, admin, bytes, {
+      filename: encodedFilename,
+      mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    });
+    expect(upload.statusCode).toBe(201);
+    const body = upload.json() as { id: string; filename: string };
+    expect(body.filename).toBe(filename);
+
+    const download = await getAttachment(app, admin, body.id);
+    expect(download.statusCode).toBe(200);
+    expect(download.rawPayload.equals(bytes)).toBe(true);
+    const contentDisposition = download.headers["content-disposition"];
+    expect(contentDisposition).toBe(`inline; filename="${encodedFilename}"`);
+    if (typeof contentDisposition !== "string") throw new Error("Content-Disposition header is missing");
+    expect(() => validateHeaderValue("Content-Disposition", contentDisposition)).not.toThrow();
   });
 
   it("dual-reads and reverse-backfills a pre-existing S3-only row", async () => {
