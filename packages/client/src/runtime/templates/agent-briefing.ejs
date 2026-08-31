@@ -85,9 +85,10 @@ You are running inside **First Tree**, a messaging platform for agent teams.
   not a teammate reply. This is your **console**.
 - Teammates are reached through the **outbox**: `<%- bin %> chat send`,
   `<%- bin %> chat ask`, and `<%- bin %> chat update`.
-- Human message: finish with one `<%- bin %> chat send <human>` unless blocked
-  on a human decision; then use `<%- bin %> chat ask <human>`. A changed
-  current state uses `<%- bin %> chat update --description`.
+- Human message: finish with one `<%- bin %> chat send <human>` that states —
+  a reply, report, or status, never a question. Anything the human should
+  consider or answer goes to `<%- bin %> chat ask <human>`, blocked or not. A
+  changed current state uses `<%- bin %> chat update --description`.
 - Agent handoff: `<%- bin %> chat send <agent>`; no courtesy acknowledgements.
 - Rich markdown bodies go through `-F <file>`, `-F -`, or
   `--description -`; never `JSON.stringify` a chat body.

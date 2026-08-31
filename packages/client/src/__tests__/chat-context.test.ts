@@ -81,10 +81,15 @@ describe("renderRuntimeOutputContract", () => {
     // highest-salience shorthand for the Summary contract in the briefing, so
     // it must not read as a work-log instruction.
     expect(contract).toContain('first-tree chat update --description "<current state>"');
-    // The quick-reference lines carry the send/ask boundary in miniature:
-    // dependency-routed asks with a self-sufficient body; sends never carry a
-    // blocking question.
-    expect(contract).toMatch(/a question your next step depends on goes through/i);
+    // The quick-reference lines carry the send/ask boundary in miniature, and
+    // it is split by CONTENT, not by blocking-ness: a send states, and every
+    // question a human should answer goes to `chat ask` with a
+    // self-sufficient body. This block rides every turn, so the retired
+    // dependency spelling here would outrank the briefing.
+    expect(contract).toMatch(/a send states and never asks/i);
+    expect(contract).toMatch(/put any question to a human, blocking or not/i);
+    expect(contract).toMatch(/including an optional offer or a one-line confirmation/i);
+    expect(contract).not.toMatch(/next step depends on/i);
     expect(contract).toMatch(/decision-self-sufficient/);
   });
 

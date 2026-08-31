@@ -451,6 +451,12 @@ describe("buildAgentBriefing — Working in First Tree hard rules", () => {
     expect(briefing).toContain("first-tree chat ask");
     expect(briefing).toContain("first-tree chat update --description");
     expect(briefing).toMatch(/Human message: finish with one/);
+    // The intro is read first, so it must teach the same content split as the
+    // Communication table rather than the retired blocked-ness gate.
+    expect(briefing).toMatch(/a reply, report, or status, never a question/);
+    expect(briefing).toMatch(/should\n  consider or answer goes to `first-tree chat ask <human>`, blocked or not/);
+    expect(briefing).not.toContain("unless blocked\n  on a human decision");
+    expect(briefing).not.toMatch(/next step depends on a human decision/);
     expect(briefing).toMatch(/Agent handoff: `first-tree chat send <agent>`/);
     expect(briefing).toMatch(/Do not send\s+courtesy acknowledgements to agents/);
     expect(briefing).toContain("-F <file>");
