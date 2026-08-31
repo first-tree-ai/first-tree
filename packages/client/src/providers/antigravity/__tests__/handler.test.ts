@@ -198,6 +198,7 @@ function createControlledSupervisor(
   outputLines: readonly string[],
   outputLinesByTurn: readonly (readonly string[])[] = [],
   closeAfterTurn: readonly boolean[] = [],
+  lateOutputLinesByTurn: readonly (readonly string[])[] = [],
 ): ProviderProcessSupervisor {
   let turn = 0;
   return {
@@ -205,6 +206,7 @@ function createControlledSupervisor(
       specs.push(spec);
       const currentOutputLines = outputLinesByTurn[turn] ?? outputLines;
       const shouldCloseAfterOutput = closeAfterTurn[turn] ?? false;
+      const lateOutputLines = lateOutputLinesByTurn[turn] ?? [];
       turn += 1;
       const stdin = new PassThrough();
       const stdout = new PassThrough();
@@ -230,6 +232,7 @@ function createControlledSupervisor(
         stdout,
         stderr,
         kill: vi.fn(() => {
+          for (const line of lateOutputLines) stdout.write(`${line}\n`);
           close();
           return true;
         }),
@@ -491,11 +494,12 @@ process.stdin.on("end", () => {
   });
 
   it.each([
-    ["suspend", true],
-    ["shutdown", true],
-    ["suspend", false],
-    ["shutdown", false],
-  ] as const)("preserves the exact conversation and handles a mutating first turn on %s with settleProviderEntered=%s", async (lifecycle, shouldSettleProviderEntered) => {
+    ["operator suspend", "suspend", true, false],
+    ["full graceful shutdown", "shutdown", true, false],
+    ["concurrency preemption", "suspend", false, false],
+    ["route retirement", "shutdown", false, false],
+    ["operator suspend overlapped by route retirement", "suspend", true, true],
+  ] as const)("preserves the exact conversation, custody, and late-event fence on %s", async (_label, lifecycle, shouldSettleProviderEntered, overlapsRouteRetirement) => {
     const root = mkdtempSync(join(tmpdir(), `ft-antigravity-lifecycle-${lifecycle}-`));
     roots.push(root);
     const specs: ProviderProcessSpec[] = [];
@@ -524,6 +528,20 @@ process.stdin.on("end", () => {
         result: { conversation_id: "conversation-lifecycle", status: "SUCCESS", response: "recovered" },
       }),
     ];
+    const lateOutput = [
+      JSON.stringify({ event: "init", conversation_id: "conversation-late" }),
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "conversation-late",
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "run_command",
+          tool_call_id: "call-late",
+          tool_info: { parameters: { command: "touch late-side-effect-marker" } },
+        },
+      }),
+    ];
     const handler = createAntigravityHandler({
       workspaceRoot: root,
       agentName: "antigravity-test-agent",
@@ -536,6 +554,7 @@ process.stdin.on("end", () => {
         lifecycleOutput,
         [lifecycleOutput, recoveredOutput],
         [false, true],
+        [lateOutput],
       ),
       antigravityTurnTimeoutMs: 5_000,
     });
@@ -547,8 +566,15 @@ process.stdin.on("end", () => {
       expect(events.some((event) => (event as { kind?: string }).kind === "tool_call")).toBe(true),
     );
     const lifecycleOptions = shouldSettleProviderEntered ? { settleProviderEntered: true } : undefined;
-    if (lifecycle === "suspend") await handler.suspend("test lifecycle suspend", lifecycleOptions);
-    else await handler.shutdown("test lifecycle shutdown", lifecycleOptions);
+    const lifecyclePromise =
+      lifecycle === "suspend"
+        ? handler.suspend("test lifecycle suspend", lifecycleOptions)
+        : handler.shutdown("test lifecycle shutdown", lifecycleOptions);
+    if (overlapsRouteRetirement) {
+      await Promise.all([lifecyclePromise, handler.shutdown("test lifecycle route retirement")]);
+    } else {
+      await lifecyclePromise;
+    }
 
     const started = await startPromise;
     expect(started.sessionId).toBe("conversation-lifecycle");
@@ -578,6 +604,86 @@ process.stdin.on("end", () => {
     expect(recoveryToken.complete).toHaveBeenCalledWith(expect.anything(), { status: "success" });
     expect(forwarded).toEqual(["recovered"]);
     expect(events.filter((event) => (event as { kind?: string }).kind === "tool_call")).toHaveLength(1);
+    await handler.shutdown();
+  });
+
+  it("adopts the exact conversation when a pending-id resume is settled during lifecycle", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-pending-resume-lifecycle-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const lifecycleOutput = [
+      JSON.stringify({ event: "init", conversation_id: "conversation-resume-lifecycle" }),
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "conversation-resume-lifecycle",
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "run_command",
+          tool_call_id: "call-resume-lifecycle",
+          tool_info: { parameters: { command: "touch side-effect-marker" } },
+        },
+      }),
+    ];
+    const recoveredOutput = [
+      JSON.stringify({ event: "init", conversation_id: "conversation-resume-lifecycle" }),
+      JSON.stringify({
+        event: "result",
+        result: { conversation_id: "conversation-resume-lifecycle", status: "SUCCESS", response: "recovered" },
+      }),
+    ];
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(
+        specs,
+        inputs,
+        [],
+        [[], lifecycleOutput, recoveredOutput],
+        [false, false, true],
+      ),
+      antigravityTurnTimeoutMs: 50,
+      antigravityRetrySleep: vi.fn(async () => true),
+    });
+    const firstToken = deliveryToken();
+    const pending = await handler.start(message("m-pending", "prepare this"), sessionCtx, firstToken);
+    expect(pending.sessionId).toMatch(/^antigravity-pending-/);
+    expect(firstToken.retry).toHaveBeenCalledWith(expect.anything(), "operation_timeout");
+
+    const lifecycleToken = deliveryToken();
+    const resumePromise = handler.resume(
+      message("m-lifecycle", "mutate this"),
+      pending.sessionId,
+      sessionCtx,
+      lifecycleToken,
+    );
+    await vi.waitFor(() => expect(specs).toHaveLength(2), { timeout: 3_000 });
+    await vi.waitFor(() =>
+      expect(events.some((event) => (event as { kind?: string }).kind === "tool_call")).toBe(true),
+    );
+    await handler.suspend("operator suspend", { settleProviderEntered: true });
+    const resumed = await resumePromise;
+    expect(resumed.sessionId).toBe("conversation-resume-lifecycle");
+    expect(lifecycleToken.retry).not.toHaveBeenCalled();
+    expect(lifecycleToken.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "error", completion: "consumed", reason: "unsafe_replay" }),
+    );
+
+    const recoveryToken = deliveryToken();
+    await handler.resume(message("m-recovery", "recover without replay"), resumed.sessionId, sessionCtx, recoveryToken);
+    expect(specs[2]?.args).toEqual(expect.arrayContaining(["--conversation", "conversation-resume-lifecycle"]));
+    expect(inputs[2]).toContain("recover without replay");
+    expect(inputs[2]).not.toContain("mutate this");
+    expect(events.filter((event) => (event as { kind?: string }).kind === "tool_call")).toHaveLength(1);
+    expect(recoveryToken.complete).toHaveBeenCalledWith(expect.anything(), { status: "success" });
     await handler.shutdown();
   });
 

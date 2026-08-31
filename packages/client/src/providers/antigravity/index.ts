@@ -237,6 +237,8 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
   // enough for start()/resume() to return it to SessionRuntime.
   let pendingLifecycleSessionId: string | null = null;
   let sessionActive = false;
+  // Lifecycle calls may overlap. Once an operator/full-drain caller grants
+  // settlement for the current turn, a plain teardown must not revoke it.
   let settleProviderEntered = false;
   let initialTurnPreparing = false;
   let currentAbort: AbortController | null = null;
@@ -1116,8 +1118,10 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
         initialTurnPreparing = false;
         scheduleDrain();
       }
+      const resolvedSessionId = providerSessionId ?? pendingLifecycleSessionId ?? pendingSyntheticId ?? sessionId;
+      pendingLifecycleSessionId = null;
       return {
-        sessionId: providerSessionId ?? pendingSyntheticId ?? sessionId,
+        sessionId: resolvedSessionId,
         route: message ? { kind: "owned", mode: "processing" } : null,
       };
     },
@@ -1133,7 +1137,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
       const recoveryReason = reason ?? "antigravity_suspend_before_terminal";
       sessionActive = false;
       drainCancellationReason = recoveryReason;
-      settleProviderEntered = opts?.settleProviderEntered === true;
+      settleProviderEntered ||= opts?.settleProviderEntered === true;
       generation++;
       currentAbort?.abort();
       await Promise.all([currentTurnPromise, currentDrainPromise]);
@@ -1150,7 +1154,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
       const recoveryReason = reason ?? "antigravity_shutdown_before_terminal";
       sessionActive = false;
       drainCancellationReason = recoveryReason;
-      settleProviderEntered = opts?.settleProviderEntered === true;
+      settleProviderEntered ||= opts?.settleProviderEntered === true;
       generation++;
       currentAbort?.abort();
       await Promise.all([currentTurnPromise, currentDrainPromise]);
