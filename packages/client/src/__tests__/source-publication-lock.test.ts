@@ -41,6 +41,7 @@ const TEST_PROVIDER_SKILL_ROOTS = Object.freeze({
   codex: ".agents/skills",
   cursor: ".cursor/skills",
   grok: ".grok/skills",
+  antigravity: ".agents/skills",
   "kimi-code": ".kimi-code/skills",
   opencode: ".opencode/skills",
   pi: ".agents/skills",

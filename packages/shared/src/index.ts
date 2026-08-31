@@ -151,6 +151,7 @@ export {
   AMP_RUNTIME_MODES,
   type AmpRuntimeConfigPayload,
   type AmpRuntimeMode,
+  type AntigravityRuntimeConfigPayload,
   agentRuntimeConfigDryRunResultSchema,
   agentRuntimeConfigPayloadSchema,
   agentRuntimeConfigSchema,
@@ -161,6 +162,7 @@ export {
   type CursorRuntimeConfigPayload,
   DEFAULT_AGENT_RUNTIME_CONFIG_PAYLOAD,
   DEFAULT_AMP_RUNTIME_CONFIG_PAYLOAD,
+  DEFAULT_ANTIGRAVITY_RUNTIME_CONFIG_PAYLOAD,
   DEFAULT_CLAUDE_CODE_TUI_RUNTIME_CONFIG_PAYLOAD,
   DEFAULT_CODEX_RUNTIME_CONFIG_PAYLOAD,
   DEFAULT_CURSOR_RUNTIME_CONFIG_PAYLOAD,
@@ -1524,6 +1526,7 @@ export {
 } from "./schemas/runtime-provider.js";
 export {
   AMP_INSTALL_COMMAND,
+  ANTIGRAVITY_INSTALL_COMMAND,
   CURSOR_INSTALL_COMMAND,
   DEEPSEEK_INSTALL_NPM_PACKAGE,
   enabledOkRuntimeProviders,

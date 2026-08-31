@@ -912,6 +912,7 @@ describe("probeCapabilities (aggregator)", () => {
       codex: okProbe,
       cursor: okProbe,
       grok: okProbe,
+      antigravity: okProbe,
       "kimi-code": okProbe,
       opencode: okProbe,
       pi: okProbe,
@@ -924,11 +925,13 @@ describe("probeCapabilities (aggregator)", () => {
     // gets no capability entry AND its probe is never called (no binary spawn).
     expect(Object.keys(caps).sort()).toEqual([
       "amp",
+      "antigravity",
       "claude-code",
       "codex",
       "cursor",
       "deepseek-harness",
       "grok",
+      "antigravity",
       "kimi-code",
       "opencode",
       "pi",
@@ -936,7 +939,7 @@ describe("probeCapabilities (aggregator)", () => {
     expect(caps["claude-code"]?.state).toBe("ok");
     expect(caps["claude-code-tui"]).toBeUndefined();
     expect(tuiProbe).not.toHaveBeenCalled();
-    expect(okProbe).toHaveBeenCalledTimes(9);
+    expect(okProbe).toHaveBeenCalledTimes(10);
   }, 15_000);
 
   it("publishes the machine-level lark-cli capability alongside runtime providers", async () => {
@@ -960,6 +963,7 @@ describe("probeCapabilities (aggregator)", () => {
       codex: vi.fn().mockRejectedValue("codex probe failed"),
       cursor: vi.fn().mockRejectedValue("cursor probe failed"),
       grok: vi.fn().mockRejectedValue("grok probe failed"),
+      antigravity: vi.fn().mockRejectedValue("antigravity probe failed"),
       "kimi-code": vi.fn().mockRejectedValue("kimi probe failed"),
       opencode: vi.fn().mockRejectedValue("opencode probe failed"),
       pi: vi.fn().mockRejectedValue("pi probe failed"),
@@ -978,6 +982,7 @@ describe("probeCapabilities (aggregator)", () => {
     expect(caps.codex).toMatchObject({ state: "error", error: "codex probe failed" });
     expect(caps.cursor).toMatchObject({ state: "error", error: "cursor probe failed" });
     expect(caps.grok).toMatchObject({ state: "error", error: "grok probe failed" });
+    expect(caps.antigravity).toMatchObject({ state: "error", error: "antigravity probe failed" });
     expect(caps["kimi-code"]).toMatchObject({ state: "error", error: "kimi probe failed" });
     expect(caps.opencode).toMatchObject({ state: "error", error: "opencode probe failed" });
     expect(caps.pi).toMatchObject({ state: "error", error: "pi probe failed" });
@@ -1023,6 +1028,7 @@ describe("probeCapabilities (aggregator)", () => {
       "deepseek-harness",
       "cursor",
       "grok",
+      "antigravity",
       "kimi-code",
       "opencode",
       "pi",
@@ -1039,6 +1045,7 @@ describe("probeCapabilities (aggregator)", () => {
       codex: vi.fn().mockRejectedValue(new Error("only codex")),
       cursor: ok,
       grok: ok,
+      antigravity: ok,
       "kimi-code": ok,
       opencode: ok,
       pi: ok,

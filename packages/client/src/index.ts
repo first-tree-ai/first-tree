@@ -18,6 +18,31 @@ export type {
   SdkConfig,
 } from "./cloud/sdk.js";
 export { FirstTreeHubSDK, FirstTreeHubSDK as FirstTreeSDK, SdkError } from "./cloud/sdk.js";
+export {
+  ANTIGRAVITY_LOGIN_COMMAND,
+  buildAntigravityTurnArgs,
+  findAntigravityExecutableOnPath,
+  formatAntigravityBinaryMissingMessage,
+  isAntigravityBinaryMissingError,
+  resolveAntigravityRuntimeBinary,
+} from "./providers/antigravity/binary.js";
+export { probeAntigravityCapability } from "./providers/antigravity/capability.js";
+export {
+  ANTIGRAVITY_PENDING_SESSION_PREFIX,
+  clearAntigravityAttemptCacheForTests,
+  createAntigravityHandler,
+  isAntigravityPendingSessionId,
+} from "./providers/antigravity/index.js";
+export {
+  buildAntigravityMcpConfigContent,
+  mapAntigravityMcpServers,
+  mergeAntigravityMcpConfig,
+  projectAntigravityMcpConfig,
+} from "./providers/antigravity/mcp-config.js";
+export {
+  AntigravityStreamParser,
+  parseAntigravityStreamLine,
+} from "./providers/antigravity/parser.js";
 export type {
   RuntimeAuthDriver,
   RuntimeAuthLoginResolution,

@@ -17,6 +17,7 @@ export const runtimeProviderSchema = z.enum([
   "codex",
   "cursor",
   "grok",
+  "antigravity",
   "kimi-code",
   "opencode",
   "pi",

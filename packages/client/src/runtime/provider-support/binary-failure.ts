@@ -17,6 +17,7 @@ export const PROVIDER_BINARY_FAILURE_REASON_CODES = {
   CURSOR_BINARY_MISSING: "cursor_binary_missing",
   GROK_VERIFY_TRANSIENT: "grok_verify_transient",
   GROK_BINARY_MISSING: "grok_binary_missing",
+  ANTIGRAVITY_BINARY_MISSING: "antigravity_binary_missing",
   PI_VERIFY_TRANSIENT: "pi_verify_transient",
   PI_BINARY_MISSING: "pi_binary_missing",
 } as const;
@@ -68,6 +69,12 @@ const GROK_BINARY_MISSING_PATTERNS: readonly RegExp[] = [
   /grok.*not (?:found|installed)/i,
 ];
 
+const ANTIGRAVITY_BINARY_MISSING_PATTERNS: readonly RegExp[] = [
+  /antigravity cli is missing/i,
+  /agy.*not (?:found|installed)/i,
+  /no agy binary/i,
+];
+
 function errorText(input: unknown): string {
   if (input instanceof Error) return input.message;
   if (typeof input === "string") return input;
@@ -114,6 +121,11 @@ export function isCursorBinaryMissingError(input: unknown): boolean {
 export function isGrokBinaryMissingError(input: unknown): boolean {
   const text = namedErrorSearchText(input);
   return GROK_BINARY_MISSING_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+export function isAntigravityBinaryMissingError(input: unknown): boolean {
+  const text = namedErrorSearchText(input);
+  return ANTIGRAVITY_BINARY_MISSING_PATTERNS.some((pattern) => pattern.test(text));
 }
 
 export function isPiBinaryMissingError(input: unknown): boolean {
@@ -235,6 +247,12 @@ function recognizeDirectProviderBinaryFailure(err: unknown): ProviderBinaryFailu
       isGrokBinaryMissingError,
       PROVIDER_BINARY_FAILURE_REASON_CODES.GROK_BINARY_MISSING,
       "Grok Build CLI binary missing",
+      err,
+    ) ??
+    missingSignal(
+      isAntigravityBinaryMissingError,
+      PROVIDER_BINARY_FAILURE_REASON_CODES.ANTIGRAVITY_BINARY_MISSING,
+      "Antigravity CLI binary missing",
       err,
     ) ??
     verifyTransientSignal(err, "PiBinaryVerifyTransientError") ??

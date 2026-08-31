@@ -274,7 +274,7 @@ first-tree agent list --remote --org <id>  # cross-org view (multi-org operators
 ### agent create
 
 ```
-first-tree agent create <name> --type <human|agent> --client-id <thisClient> [--runtime claude-code|claude-code-tui|codex|cursor|grok|kimi-code|opencode]
+first-tree agent create <name> --type <human|agent> --client-id <thisClient> [--runtime claude-code|claude-code-tui|codex|cursor|grok|antigravity|kimi-code|opencode|pi]
 ```
 
 Creates the agent row on the server and binds it to the given client
@@ -303,6 +303,15 @@ provider-owned authentication with `grok login`, and run
 artifact/platform re-detection. First Tree never reads or relays Grok
 credentials; the probe is install/platform-only and Windows is not advertised
 in V1.
+
+The `antigravity` runtime drives an operator-installed Google Antigravity CLI
+(`agy`) in headless `stream-json` mode on macOS or Linux. Install it with
+`curl -fsSL https://antigravity.google/cli/install.sh | bash`, run `agy` once to
+complete provider-owned setup, and run `first-tree daemon probe` after
+installation. First Tree stores the provider's opaque conversation id and
+resumes later turns with `agy --conversation <id> -p` semantics; it never reads
+Antigravity credentials. Windows is not advertised in V1 because the default
+client process supervisor fails closed there.
 
 ### agent add
 

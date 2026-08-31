@@ -47,7 +47,8 @@ capability gates — do not reverse-parse package strings.
 
 **Auth recovery (`authRecovery`):**
 - `{ kind: "host" }` — provider-owned CLI / interactive login may appear on
-  computer and setup-incomplete surfaces (Amp / DeepSeek / Kimi / OpenCode / Pi today).
+  computer and setup-incomplete surfaces (Amp / Antigravity / DeepSeek / Kimi /
+  OpenCode / Pi today).
 - `{ kind: "in-product", target }` — browser-OAuth / Connect from a failing
   chat, with `target` typed by the narrower server-accepted
   `RuntimeAuthProvider` contract. Computer and setup cards stay
@@ -59,7 +60,7 @@ capability gates — do not reverse-parse package strings.
 
 Only an `{ kind: "in-product", target }` provider gets a driver, and the target
 set is `runtimeAuthProviderSchema` — narrower than `runtimeProviderSchema`.
-Host-login providers (Amp / DeepSeek / Kimi / OpenCode / Pi) never appear here, and
+Host-login providers (Amp / Antigravity / DeepSeek / Kimi / OpenCode / Pi) never appear here, and
 `claude-code-tui` is not its own target because it shares Claude Code's
 keychain credential.
 

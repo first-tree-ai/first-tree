@@ -16,7 +16,7 @@ export function registerAgentCreateCommand(agent: Command): void {
     )
     .option(
       "--runtime <runtime>",
-      "Runtime handler — one of: claude-code, claude-code-tui, codex, cursor, grok, kimi-code, opencode, pi (default: claude-code)",
+      "Runtime handler — one of: claude-code, claude-code-tui, codex, cursor, grok, antigravity, kimi-code, opencode, pi (default: claude-code)",
       "claude-code",
     )
     .option("--display-name <name>", "Display name")
