@@ -55,12 +55,14 @@ import type {
   HandlerConfig,
   HandlerFactory,
   HandlerRouteReceipt,
+  ProviderContinuation,
   ResumeResult,
   SessionContext,
   SessionMessage,
   StartResult,
   TurnOutcome,
 } from "./handler.js";
+import { continuationResumeOptions } from "./handler.js";
 import { findImagePath, writeImage } from "./image-store.js";
 import { type DeliveryRouteOwnership, InboxDeliveryCoordinator } from "./inbox-delivery-coordinator.js";
 import { ManagedSkillsUnsafeDiscoveryError } from "./managed-skills.js";
@@ -103,6 +105,8 @@ import {
 type SessionEntry = {
   chatId: string;
   claudeSessionId: string;
+  /** Provider-owned continuation for a delivery already entered in-session. */
+  providerContinuation: ProviderContinuation | null;
   handler: AgentHandler;
   /** Context source captured by the handler factory that owns this entry. */
   handlerSourceKey: string;
@@ -447,17 +451,11 @@ function asTerminateError(kind: "suspend" | "teardown", error: unknown): Error {
   return error instanceof Error ? error : new Error(`session ${kind} failed: ${String(error)}`);
 }
 
-function normalizeStartReceipt(result: StartResult): {
-  sessionId: string;
-  route: Extract<HandlerRouteReceipt, { kind: "owned" }>;
-} {
+function normalizeStartReceipt(result: StartResult): StartResult {
   return result;
 }
 
-function normalizeResumeReceipt(result: ResumeResult): {
-  sessionId: string;
-  route: Extract<HandlerRouteReceipt, { kind: "owned" }> | null;
-} {
+function normalizeResumeReceipt(result: ResumeResult): ResumeResult {
   return result;
 }
 
@@ -2043,7 +2041,58 @@ export class SessionRuntime {
       }
     }
     entry.claudeSessionId = receipt.sessionId;
+    entry.providerContinuation =
+      continuationResumeOptions(receipt.continuation, message, receipt.sessionId, this.runtimeProvider())
+        ?.continuation ?? null;
     return true;
+  }
+
+  /**
+   * Preserve an explicit provider continuation before discarding a stale
+   * route transition. The route fence protects handler adoption, but it must
+   * not erase the provider's exact opaque identity or turn the later server
+   * redelivery into a fresh conversation. Generic providers do not opt in and
+   * therefore retain the historical fresh-start recovery path.
+   */
+  private preserveStaleProviderContinuation(
+    entry: SessionEntry,
+    message: SessionMessage | null | undefined,
+    receipt: { sessionId: string; continuation?: ProviderContinuation },
+  ): void {
+    const options = continuationResumeOptions(receipt.continuation, message, receipt.sessionId, this.runtimeProvider());
+    if (!options?.continuation) return;
+    entry.claudeSessionId = receipt.sessionId;
+    entry.providerContinuation = options.continuation;
+    this.projection.recordEvictionResume(entry.chatId, {
+      claudeSessionId: receipt.sessionId,
+      lastActivity: entry.lastActivity,
+      continuation: options.continuation,
+    });
+    this.projection.persistRegistry();
+    this.config.log.info(
+      {
+        chatId: entry.chatId,
+        sessionId: receipt.sessionId,
+        messageId: options.continuation.messageId,
+      },
+      "preserved provider continuation from stale route completion",
+    );
+  }
+
+  /**
+   * A continuation is custody for one exact delivery, not a generic resume
+   * hint. If a different message reaches the mapping, retain the mapping and
+   * recover the delivery instead of silently sending that message as a fresh
+   * provider turn in the old conversation.
+   */
+  private deferMismatchedProviderContinuation(
+    entry: SessionEntry,
+    mapping: { claudeSessionId: string; lastActivity: number; continuation: ProviderContinuation },
+    reason: string,
+  ): void {
+    this.failSessionForRecovery(entry.chatId, reason, mapping.claudeSessionId);
+    this.projection.recordEvictionResume(entry.chatId, mapping);
+    this.projection.persistRegistry();
   }
 
   private async routeMessage(
@@ -2265,6 +2314,7 @@ export class SessionRuntime {
     const entry: SessionEntry = {
       chatId,
       claudeSessionId: "",
+      providerContinuation: null,
       handler,
       handlerSourceKey: admission.sourceKey,
       status: "active",
@@ -2277,7 +2327,10 @@ export class SessionRuntime {
     };
 
     const evicted = this.projection.activateLiveSession(entry);
-    if (evicted) entry.claudeSessionId = evicted.claudeSessionId;
+    if (evicted) {
+      entry.claudeSessionId = evicted.claudeSessionId;
+      entry.providerContinuation = evicted.continuation ?? null;
+    }
     this.slotScheduler.attachLiveSession(entry, { resumeFromEvicted: evicted });
     this.routeTeardown.attachLiveSession(entry);
     this.slotScheduler.claimActiveSlot(entry);
@@ -2305,8 +2358,30 @@ export class SessionRuntime {
       this.projection.setCurrentTrigger(chatId, message);
       const token = this.createDeliveryToken(chatId, routeLeases);
       if (evicted) {
-        const receipt = normalizeResumeReceipt(await handler.resume(message, evicted.claudeSessionId, ctx, token));
+        const continuationOptions = continuationResumeOptions(
+          evicted.continuation,
+          message,
+          evicted.claudeSessionId,
+          this.runtimeProvider(),
+        );
+        if (evicted.continuation && !continuationOptions) {
+          this.deferMismatchedProviderContinuation(
+            entry,
+            {
+              claudeSessionId: evicted.claudeSessionId,
+              lastActivity: evicted.lastActivity,
+              continuation: evicted.continuation,
+            },
+            "session_eviction_provider_continuation_mismatch",
+          );
+          return;
+        }
+        const resumeResult = continuationOptions
+          ? await handler.resume(message, evicted.claudeSessionId, ctx, token, continuationOptions)
+          : await handler.resume(message, evicted.claudeSessionId, ctx, token);
+        const receipt = normalizeResumeReceipt(resumeResult);
         if (!this.routeTeardown.isCurrentRouteTransition(entry, transition)) {
+          this.preserveStaleProviderContinuation(entry, message, receipt);
           this.routeTeardown.discardStaleRouteTransition(
             entry.chatId,
             transition,
@@ -2319,10 +2394,12 @@ export class SessionRuntime {
       } else {
         const receipt = normalizeStartReceipt(await handler.start(message, ctx, token));
         if (!this.routeTeardown.isCurrentRouteTransition(entry, transition)) {
+          this.preserveStaleProviderContinuation(entry, message, receipt);
           this.routeTeardown.discardStaleRouteTransition(entry.chatId, transition, "session_start_stale_completion");
           return;
         }
         entry.claudeSessionId = receipt.sessionId;
+        entry.providerContinuation = null;
         if (this.markRouteOwned(chatId, message, receipt.route) === "lost") {
           this.abortUnownedRoute(entry, "session_start_unowned_delivery");
           return;
@@ -2547,14 +2624,37 @@ export class SessionRuntime {
       // and the next suspend→resume cycle would re-trigger the same
       // missing-transcript fallback ad infinitum.
       const token = message ? this.createDeliveryToken(entry.chatId, routeLeases) : undefined;
+      const continuationOptions = continuationResumeOptions(
+        entry.providerContinuation ?? undefined,
+        message,
+        entry.claudeSessionId,
+        this.runtimeProvider(),
+      );
+      if (entry.providerContinuation && !continuationOptions) {
+        this.deferMismatchedProviderContinuation(
+          entry,
+          {
+            claudeSessionId: entry.claudeSessionId,
+            lastActivity: entry.lastActivity,
+            continuation: entry.providerContinuation,
+          },
+          "session_resume_provider_continuation_mismatch",
+        );
+        return;
+      }
       const resumeResult = token
-        ? await routeHandler.resume(message ?? undefined, entry.claudeSessionId, ctx, token)
-        : await routeHandler.resume(message ?? undefined, entry.claudeSessionId, ctx);
+        ? continuationOptions
+          ? await routeHandler.resume(message ?? undefined, entry.claudeSessionId, ctx, token, continuationOptions)
+          : await routeHandler.resume(message ?? undefined, entry.claudeSessionId, ctx, token)
+        : continuationOptions
+          ? await routeHandler.resume(message ?? undefined, entry.claudeSessionId, ctx, undefined, continuationOptions)
+          : await routeHandler.resume(message ?? undefined, entry.claudeSessionId, ctx);
+      const receipt = normalizeResumeReceipt(resumeResult);
       if (!this.routeTeardown.isCurrentRouteTransition(entry, transition)) {
+        this.preserveStaleProviderContinuation(entry, message, receipt);
         this.routeTeardown.discardStaleRouteTransition(entry.chatId, transition, "session_resume_stale_completion");
         return;
       }
-      const receipt = normalizeResumeReceipt(resumeResult);
       if (!this.adoptResumeReceipt(entry, message, receipt, "session_resume_unowned_delivery")) return;
       if (!this.routeTeardown.completeRouteTransition(entry, transition)) {
         this.routeTeardown.discardStaleRouteTransition(entry.chatId, transition, "session_resume_stale_adoption");

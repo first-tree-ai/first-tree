@@ -14,7 +14,9 @@ import type {
   AgentHandler,
   DeliveryToken,
   HandlerFactory,
+  HandlerResumeOptions,
   HandlerShutdownOptions,
+  ProviderContinuation,
   SessionContext,
   SessionMessage,
   TurnConsumedErrorReason,
@@ -67,6 +69,16 @@ const KILL_GRACE_MS = 5_000;
 const FINAL_CLOSE_WAIT_MS = 2_000;
 const PROVIDER_ATTEMPT_WINDOW_TTL_MS = 30 * 60_000;
 const MAX_PROVIDER_ATTEMPT_WINDOWS = 512;
+
+/**
+ * Antigravity has no documented headless "resume the interrupted turn without
+ * a new user event" operation. Its safe recovery boundary is therefore an
+ * exact conversation resume with a provider-owned continuation instruction;
+ * the original First Tree delivery is custody identity only and is never
+ * serialized again.
+ */
+export const ANTIGRAVITY_CONTINUATION_PROMPT =
+  "Continue the interrupted turn from this existing Antigravity conversation. The original First Tree delivery was already submitted and may have produced tool effects. Do not repeat the original user prompt or any tool call already present in conversation history; inspect the existing state and finish the turn.";
 
 type ProcessOutcome = {
   exitCode: number | null;
@@ -236,6 +248,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
   // cleared the live handler state. Keep an exact provider ID just long
   // enough for start()/resume() to return it to SessionRuntime.
   let pendingLifecycleSessionId: string | null = null;
+  let pendingLifecycleContinuation: ProviderContinuation | null = null;
   let sessionActive = false;
   let settleProviderEntered = false;
   let initialTurnPreparing = false;
@@ -749,6 +762,17 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
             state.usage,
           );
           if (lifecycleObservedId) pendingLifecycleSessionId = lifecycleObservedId;
+          if (lifecycleObservedId && !settleProviderEntered && messages.length === 1) {
+            const message = messages[0];
+            if (message) {
+              pendingLifecycleContinuation = {
+                kind: "provider_continuation",
+                provider: runtimeProvider,
+                sessionId: lifecycleObservedId,
+                messageId: message.id,
+              };
+            }
+          }
           if (drainingBatch?.some((entry) => entry.token === token)) drainingBatch = null;
           if (state.sawUnsafeTool && settleProviderEntered) {
             const lifecycleError = new Error(
@@ -1060,6 +1084,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
   return {
     async start(message, sessionCtx, token) {
       pendingLifecycleSessionId = null;
+      pendingLifecycleContinuation = null;
       initialTurnPreparing = true;
       let delivered = false;
       let briefing: string;
@@ -1076,13 +1101,20 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
       }
       const sessionId = providerSessionId ?? pendingLifecycleSessionId ?? pendingSyntheticId;
       if (!sessionId) throw new Error("Antigravity conversation ID unresolved");
+      const continuation = pendingLifecycleContinuation;
       pendingLifecycleSessionId = null;
+      pendingLifecycleContinuation = null;
       if (delivered) writeSessionBriefingFingerprint(workspaceCwd, sessionId, computeBriefingFingerprint(briefing));
-      return { sessionId, route: { kind: "owned", mode: "processing" } };
+      return {
+        sessionId,
+        route: { kind: "owned", mode: "processing" },
+        ...(continuation ? { continuation } : {}),
+      };
     },
 
-    async resume(message, sessionId, sessionCtx, token) {
+    async resume(message, sessionId, sessionCtx, token, opts?: HandlerResumeOptions) {
       pendingLifecycleSessionId = null;
+      pendingLifecycleContinuation = null;
       const deliveryToken = message ? requireDeliveryToken(token, "messageful resume") : noopDeliveryToken();
       initialTurnPreparing = true;
       let briefing: string;
@@ -1102,10 +1134,22 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
       }
       if (message) {
         try {
-          let prompt = await sessionCtx.formatInboundContent(message);
-          const fingerprint = computeBriefingFingerprint(briefing);
-          if (readSessionBriefingFingerprint(workspaceCwd, sessionId) !== fingerprint) {
-            prompt = `${buildBriefingUpdateNotice(join(workspaceCwd, "AGENTS.md"))}\n\n${prompt}`;
+          let prompt: string;
+          if (opts?.continuation) {
+            if (
+              opts.continuation.provider !== runtimeProvider ||
+              opts.continuation.sessionId !== sessionId ||
+              opts.continuation.messageId !== message.id
+            ) {
+              throw new Error("Antigravity provider continuation identity mismatch");
+            }
+            prompt = ANTIGRAVITY_CONTINUATION_PROMPT;
+          } else {
+            prompt = await sessionCtx.formatInboundContent(message);
+            const fingerprint = computeBriefingFingerprint(briefing);
+            if (readSessionBriefingFingerprint(workspaceCwd, sessionId) !== fingerprint) {
+              prompt = `${buildBriefingUpdateNotice(join(workspaceCwd, "AGENTS.md"))}\n\n${prompt}`;
+            }
           }
           await runTurn(prompt, sessionCtx, [message], deliveryToken);
         } finally {
@@ -1116,9 +1160,12 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
         initialTurnPreparing = false;
         scheduleDrain();
       }
+      const continuation = pendingLifecycleContinuation;
+      pendingLifecycleContinuation = null;
       return {
         sessionId: providerSessionId ?? pendingSyntheticId ?? sessionId,
         route: message ? { kind: "owned", mode: "processing" } : null,
+        ...(continuation ? { continuation } : {}),
       };
     },
 

@@ -6,11 +6,13 @@ import type {
   AgentHandler,
   DeliveryToken,
   HandlerRouteReceipt,
+  ProviderContinuation,
   ResumeResult,
   SessionContext,
   SessionMessage,
   StartResult,
 } from "./handler.js";
+import { continuationResumeOptions } from "./handler.js";
 import type { DeliveryRouteOwnership } from "./inbox-delivery-coordinator.js";
 import {
   buildProviderRetryEvent,
@@ -32,6 +34,7 @@ export type PendingMessage = {
 export type EvictedResumeMapping = {
   readonly claudeSessionId: string;
   readonly lastActivity: number;
+  readonly continuation?: ProviderContinuation;
 };
 
 /**
@@ -60,7 +63,7 @@ type SlotState = {
   lastRetryRawError: string | null;
   retryHeadMessage: SessionMessage | null;
   deferredMessages: SessionMessage[];
-  retryFromEvicted: { claudeSessionId: string; lastActivity: number } | null;
+  retryFromEvicted: EvictedResumeMapping | null;
 };
 
 function emptySlotState(resumeFromEvicted: EvictedResumeMapping | null): SlotState {
@@ -76,7 +79,11 @@ function emptySlotState(resumeFromEvicted: EvictedResumeMapping | null): SlotSta
     retryHeadMessage: null,
     deferredMessages: [],
     retryFromEvicted: resumeFromEvicted
-      ? { claudeSessionId: resumeFromEvicted.claudeSessionId, lastActivity: resumeFromEvicted.lastActivity }
+      ? {
+          claudeSessionId: resumeFromEvicted.claudeSessionId,
+          lastActivity: resumeFromEvicted.lastActivity,
+          ...(resumeFromEvicted.continuation ? { continuation: { ...resumeFromEvicted.continuation } } : {}),
+        }
       : null,
   };
 }
@@ -172,10 +179,12 @@ export type SlotSchedulerAuthorityDeps = {
   normalizeResumeReceipt: (result: ResumeResult) => {
     sessionId: string;
     route: Extract<HandlerRouteReceipt, { kind: "owned" }> | null;
+    continuation?: ProviderContinuation;
   };
   normalizeStartReceipt: (result: StartResult) => {
     sessionId: string;
     route: Extract<HandlerRouteReceipt, { kind: "owned" }>;
+    continuation?: ProviderContinuation;
   };
   recordEvictionResume: (chatId: string, mapping: EvictedResumeMapping | null) => void;
   getSessionRuntimeState: (chatId: string) => RuntimeState | undefined;
@@ -212,6 +221,33 @@ export class SlotSchedulerAuthority {
   private readonly slotBySession = new WeakMap<SlotSchedulerSessionEntry, SlotState>();
 
   constructor(private readonly deps: SlotSchedulerAuthorityDeps) {}
+
+  /**
+   * A canceled provider start/resume can materialize after its route fence.
+   * Preserve an explicitly provider-safe continuation before the stale
+   * handler is retired; generic receipts intentionally do not create a
+   * resume mapping and retain the historical fresh-start behaviour.
+   */
+  private preserveStaleProviderContinuation(
+    entry: SlotSchedulerSessionEntry,
+    message: SessionMessage | null | undefined,
+    receipt: { sessionId: string; continuation?: ProviderContinuation },
+  ): void {
+    const options = continuationResumeOptions(
+      receipt.continuation,
+      message,
+      receipt.sessionId,
+      this.deps.runtimeProvider(),
+    );
+    if (!options?.continuation) return;
+    entry.claudeSessionId = receipt.sessionId;
+    this.deps.recordEvictionResume(entry.chatId, {
+      claudeSessionId: receipt.sessionId,
+      lastActivity: entry.lastActivity,
+      continuation: options.continuation,
+    });
+    this.deps.persistRegistry();
+  }
 
   /**
    * Create (or replace) private slot/retry state for a live session. The host
@@ -683,10 +719,41 @@ export class SlotSchedulerAuthority {
       if (retryHeadMessage) this.deps.setCurrentTrigger(chatId, retryHeadMessage);
       const token = retryHeadMessage ? this.deps.createDeliveryToken(chatId, routeLeases) : undefined;
       if (retryRoute.kind === "resume") {
+        const continuationOptions = continuationResumeOptions(
+          slot.retryFromEvicted?.continuation,
+          retryHeadMessage,
+          retryRoute.previousSessionId,
+          this.deps.runtimeProvider(),
+        );
+        if (slot.retryFromEvicted?.continuation && !continuationOptions) {
+          const mapping = {
+            claudeSessionId: slot.retryFromEvicted.claudeSessionId,
+            lastActivity: slot.retryFromEvicted.lastActivity,
+            continuation: slot.retryFromEvicted.continuation,
+          };
+          this.deps.failSessionForRecovery(
+            chatId,
+            "session_retry_provider_continuation_mismatch",
+            mapping.claudeSessionId,
+          );
+          this.deps.recordEvictionResume(chatId, mapping);
+          this.deps.persistRegistry();
+          return;
+        }
         const resumeResult = token
-          ? await newHandler.resume(retryHeadMessage ?? undefined, retryRoute.previousSessionId, ctx, token)
+          ? continuationOptions
+            ? await newHandler.resume(
+                retryHeadMessage ?? undefined,
+                retryRoute.previousSessionId,
+                ctx,
+                token,
+                continuationOptions,
+              )
+            : await newHandler.resume(retryHeadMessage ?? undefined, retryRoute.previousSessionId, ctx, token)
           : await newHandler.resume(undefined, retryRoute.previousSessionId, ctx);
+        const receipt = this.deps.normalizeResumeReceipt(resumeResult);
         if (!this.deps.routeTeardown.isCurrentRouteTransition(entry, transition)) {
+          this.preserveStaleProviderContinuation(entry, retryHeadMessage, receipt);
           this.deps.routeTeardown.discardStaleRouteTransition(
             entry.chatId,
             transition,
@@ -694,7 +761,6 @@ export class SlotSchedulerAuthority {
           );
           return;
         }
-        const receipt = this.deps.normalizeResumeReceipt(resumeResult);
         if (!this.deps.adoptResumeReceipt(entry, retryHeadMessage, receipt, "session_retry_resume_unowned_delivery")) {
           return;
         }
@@ -703,6 +769,7 @@ export class SlotSchedulerAuthority {
           await newHandler.start(retryRoute.message, ctx, this.deps.createDeliveryToken(chatId, routeLeases)),
         );
         if (!this.deps.routeTeardown.isCurrentRouteTransition(entry, transition)) {
+          this.preserveStaleProviderContinuation(entry, retryRoute.message, receipt);
           this.deps.routeTeardown.discardStaleRouteTransition(
             entry.chatId,
             transition,

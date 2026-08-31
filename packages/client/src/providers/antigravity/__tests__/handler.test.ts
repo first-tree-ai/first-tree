@@ -10,7 +10,7 @@ import type { FirstTreeHubSDK } from "../../../cloud/sdk.js";
 import type { AgentConfigCache } from "../../../runtime/agent-config-cache.js";
 import type { DeliveryToken, SessionContext, SessionMessage } from "../../../runtime/contracts.js";
 import type { ProviderProcessSpec, ProviderProcessSupervisor } from "../../../runtime/provider-process-supervisor.js";
-import { computeAntigravityUsageDelta, createAntigravityHandler } from "../index.js";
+import { ANTIGRAVITY_CONTINUATION_PROMPT, computeAntigravityUsageDelta, createAntigravityHandler } from "../index.js";
 
 const roots: string[] = [];
 
@@ -553,27 +553,43 @@ process.stdin.on("end", () => {
     const started = await startPromise;
     expect(started.sessionId).toBe("conversation-lifecycle");
     if (shouldSettleProviderEntered) {
+      expect(started.continuation).toBeUndefined();
       expect(token.retry).not.toHaveBeenCalled();
       expect(token.complete).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({ status: "error", completion: "consumed", reason: "unsafe_replay" }),
       );
     } else {
+      expect(started.continuation).toEqual({
+        kind: "provider_continuation",
+        provider: "antigravity",
+        sessionId: "conversation-lifecycle",
+        messageId: "m-lifecycle",
+      });
       expect(token.complete).not.toHaveBeenCalled();
       expect(token.retry).toHaveBeenCalledWith(expect.anything(), `test lifecycle ${lifecycle}`);
     }
 
     const recoveryToken = deliveryToken();
+    const recoveryMessage = shouldSettleProviderEntered
+      ? message("m-recovery", "recover without replay")
+      : message("m-lifecycle", "mutate this");
     const resumed = await handler.resume(
-      message("m-recovery", "recover without replay"),
+      recoveryMessage,
       started.sessionId,
       sessionCtx,
       recoveryToken,
+      started.continuation ? { continuation: started.continuation } : undefined,
     );
     expect(resumed.sessionId).toBe("conversation-lifecycle");
     expect(specs).toHaveLength(2);
     expect(specs[1]?.args).toEqual(expect.arrayContaining(["--conversation", "conversation-lifecycle"]));
-    expect(inputs[1]).toContain("recover without replay");
+    if (started.continuation) {
+      expect(inputs[1]).toContain(ANTIGRAVITY_CONTINUATION_PROMPT);
+      expect(inputs[1]).not.toContain("mutate this");
+    } else {
+      expect(inputs[1]).toContain("recover without replay");
+    }
     expect(inputs[1]).not.toContain("mutate this");
     expect(recoveryToken.complete).toHaveBeenCalledWith(expect.anything(), { status: "success" });
     expect(forwarded).toEqual(["recovered"]);

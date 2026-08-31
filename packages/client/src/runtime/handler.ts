@@ -90,9 +90,31 @@ export type HandlerRouteReceipt =
   | { kind: "owned"; mode: "queued" | "processing" }
   | { kind: "rejected"; reason: string; retryable: true };
 
+/**
+ * Provider-owned continuation of a delivery that already entered an exact
+ * provider conversation. The message id is custody identity only: a handler
+ * receiving this marker MUST NOT serialize the original message content again.
+ *
+ * Keeping this opt-in on the receipt preserves the generic runtime contract:
+ * providers without a safe continuation path retain the historical fresh-start
+ * recovery behaviour.
+ */
+export type ProviderContinuation = {
+  readonly kind: "provider_continuation";
+  readonly provider: RuntimeProvider;
+  readonly sessionId: string;
+  readonly messageId: string;
+};
+
+export type HandlerResumeOptions = {
+  /** Reclaim an already-provider-entered delivery without replaying its text. */
+  readonly continuation?: ProviderContinuation;
+};
+
 export type StartReceipt = {
   sessionId: string;
   route: Extract<HandlerRouteReceipt, { kind: "owned" }>;
+  continuation?: ProviderContinuation;
 };
 
 export type StartResult = StartReceipt;
@@ -100,6 +122,7 @@ export type StartResult = StartReceipt;
 export type ResumeReceipt = {
   sessionId: string;
   route: Extract<HandlerRouteReceipt, { kind: "owned" }> | null;
+  continuation?: ProviderContinuation;
 };
 
 export type ResumeResult = ResumeReceipt;
@@ -386,6 +409,30 @@ export type PrecedingMessage = {
 };
 
 /**
+ * Validate a provider continuation before handing it to a replacement route.
+ * The exact provider and session identity are part of the receipt so a stale
+ * continuation cannot cross a runtime switch or silently fall back to a
+ * different conversation.
+ */
+export function continuationResumeOptions(
+  continuation: ProviderContinuation | undefined,
+  message: SessionMessage | null | undefined,
+  sessionId: string,
+  provider: RuntimeProvider,
+): HandlerResumeOptions | undefined {
+  if (
+    !continuation ||
+    !message ||
+    continuation.provider !== provider ||
+    continuation.sessionId !== sessionId ||
+    continuation.messageId !== message.id
+  ) {
+    return undefined;
+  }
+  return { continuation };
+}
+
+/**
  * Session-oriented agent handler.
  *
  * Each handler instance owns the full lifecycle of a Claude session
@@ -403,6 +450,7 @@ export type AgentHandler = {
     sessionId: string,
     ctx: SessionContext,
     token?: DeliveryToken,
+    opts?: HandlerResumeOptions,
   ): Promise<ResumeResult>;
 
   /** Message arrives while session is active. Push into provider-owned queue or reject. */

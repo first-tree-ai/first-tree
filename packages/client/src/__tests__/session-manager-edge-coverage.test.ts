@@ -5,6 +5,7 @@ import type {
   AgentRuntimeConfig,
   InboxEntryWithMessage,
   ProviderRetryEventPayload,
+  RuntimeProvider,
   RuntimeState,
   SessionEvent,
   SessionState,
@@ -16,6 +17,8 @@ import type {
   AgentHandler,
   DeliveryToken,
   HandlerFactory,
+  HandlerResumeOptions,
+  ProviderContinuation,
   SessionContext,
   SessionMessage,
 } from "../runtime/handler.js";
@@ -29,6 +32,7 @@ import { mockEntry } from "./test-helpers.js";
 type SessionRecord = {
   chatId: string;
   claudeSessionId: string;
+  providerContinuation: ProviderContinuation | null;
   handler: AgentHandler;
   handlerSourceKey: string;
   status: SessionState;
@@ -44,7 +48,11 @@ type SessionSeed = Partial<SessionRecord> & {
   activeSlotHeld?: boolean;
   retryAttempt?: number;
   retryHeadMessage?: SessionMessage | null;
-  retryFromEvicted?: { claudeSessionId: string; lastActivity: number } | null;
+  retryFromEvicted?: {
+    claudeSessionId: string;
+    lastActivity: number;
+    continuation?: ProviderContinuation;
+  } | null;
   lastRetryReason?: string | null;
   lastRetryCategory?: string | null;
   lastRetryScope?: "session_start" | "session_resume" | null;
@@ -57,7 +65,10 @@ type SessionSeed = Partial<SessionRecord> & {
 type SessionRuntimeInternals = {
   projection: {
     sessions: Map<string, SessionRecord>;
-    evictedMappings: Map<string, { claudeSessionId: string; lastActivity: number }>;
+    evictedMappings: Map<
+      string,
+      { claudeSessionId: string; lastActivity: number; continuation?: ProviderContinuation }
+    >;
     registry: SessionRegistry | null;
     sessionRuntimeStates: Map<string, RuntimeState>;
     currentTrigger: Map<string, { messageId: string; senderId: string }>;
@@ -108,7 +119,13 @@ type SessionRuntimeInternals = {
     activeCount: number;
     attachLiveSession(
       entry: SessionRecord,
-      opts?: { resumeFromEvicted?: { claudeSessionId: string; lastActivity: number } | null },
+      opts?: {
+        resumeFromEvicted?: {
+          claudeSessionId: string;
+          lastActivity: number;
+          continuation?: ProviderContinuation;
+        } | null;
+      },
     ): void;
     claimActiveSlot(entry: SessionRecord): void;
     isActiveSlotHeld(entry: SessionRecord): boolean;
@@ -158,6 +175,7 @@ type SessionRuntimeInternals = {
   routeMessage(chatId: string, message: SessionMessage): Promise<void>;
   startNewSession(chatId: string, message: SessionMessage, deliveryKind?: string): Promise<void>;
   resumeSession(entry: SessionRecord, message: SessionMessage | null | undefined): Promise<void>;
+  failSessionForRecovery(chatId: string, reason: string, sessionId?: string): void;
   abortUnownedRoute(entry: SessionRecord, reason: string): void;
   ensureContextTreeBinding(): Promise<unknown>;
   markRouteOwned(
@@ -270,6 +288,7 @@ function makeRuntime(
     confirmSessionEvent?: (chatId: string, event: SessionEvent) => Promise<void>;
     workspaceRoot?: string;
     runtimeSessionTokenFile?: string;
+    runtimeProvider?: RuntimeProvider;
   } = {},
 ): SessionRuntime {
   const handlers = [...(opts.handlers ?? [handler()])];
@@ -286,7 +305,10 @@ function makeRuntime(
     concurrency: opts.concurrency ?? 5,
     subprocessProbe: opts.subprocessProbe,
     handlerFactory,
-    handlerConfig: { workspaceRoot: opts.workspaceRoot ?? "/tmp/test-edge/agent-a", runtimeProvider: "codex" },
+    handlerConfig: {
+      workspaceRoot: opts.workspaceRoot ?? "/tmp/test-edge/agent-a",
+      runtimeProvider: opts.runtimeProvider ?? "codex",
+    },
     agentIdentity: {
       agentId: "agent-1",
       inboxId: "inbox-agent-1",
@@ -347,6 +369,7 @@ function makeSessionRecord(chatId: string, overrides: SessionSeed = {}): Session
   const record: SessionRecord = {
     chatId,
     claudeSessionId: overrides.claudeSessionId ?? `session-${chatId}`,
+    providerContinuation: overrides.providerContinuation ?? null,
     handler: overrides.handler ?? handler(),
     handlerSourceKey: overrides.handlerSourceKey ?? "none",
     status,
@@ -400,6 +423,157 @@ function requireSession(i: SessionRuntimeInternals, chatId: string): SessionReco
   const entry = i.projection.sessions.get(chatId);
   if (!entry) throw new Error(`session missing: ${chatId}`);
   return entry;
+}
+
+async function exerciseAntigravityRetirementRecovery(
+  mode: "concurrency_preemption" | "forced_route_retirement",
+): Promise<void> {
+  const chatId = `chat-antigravity-${mode}`;
+  const conversationId = "conversation-lifecycle";
+  const headEntry = mockEntry({
+    id: 610,
+    chatId,
+    messageId: "msg-antigravity-original",
+    content: "mutating original",
+  });
+  const continuation: ProviderContinuation = {
+    kind: "provider_continuation",
+    provider: "antigravity",
+    sessionId: conversationId,
+    messageId: headEntry.message.id,
+  };
+  const providerPrompts: Array<{ kind: "start" | "resume"; prompt: string }> = [];
+  const toolCalls: string[] = [];
+  let originalMessage: SessionMessage | undefined;
+  let originalContext: SessionContext | undefined;
+  let signalStartStarted: (() => void) | undefined;
+  let resolveStart: (() => void) | undefined;
+  const startStarted = new Promise<void>((resolve) => {
+    signalStartStarted = resolve;
+  });
+  const startGate = new Promise<void>((resolve) => {
+    resolveStart = resolve;
+  });
+
+  const oldHandler = handler({
+    start: vi.fn(async (message: SessionMessage, ctx: SessionContext, token: DeliveryToken) => {
+      originalMessage = message;
+      originalContext = ctx;
+      providerPrompts.push({ kind: "start", prompt: String(message.content) });
+      token.processingStarted(message);
+      toolCalls.push("run_command");
+      signalStartStarted?.();
+      await startGate;
+      return {
+        sessionId: conversationId,
+        route: { kind: "owned" as const, mode: "processing" as const },
+        continuation,
+      };
+    }),
+    shutdown: vi.fn().mockResolvedValue(undefined),
+  });
+
+  const requester = handler({
+    start: vi.fn(async (message: SessionMessage, _ctx: SessionContext, token: DeliveryToken) => {
+      token.processingStarted(message);
+      await token.complete(message, { status: "success", terminal: true });
+      return { sessionId: "requester-session", route: { kind: "owned" as const, mode: "queued" as const } };
+    }),
+  });
+
+  let recoveryMessage: SessionMessage | undefined;
+  let recoveryContext: SessionContext | undefined;
+  const recoveryResume = vi.fn(
+    async (
+      message: SessionMessage | undefined,
+      _sessionId: string,
+      ctx: SessionContext,
+      token: DeliveryToken | undefined,
+      opts?: HandlerResumeOptions,
+    ) => {
+      if (!message || !token) throw new Error("recovery resume did not receive the original delivery");
+      recoveryMessage = message;
+      recoveryContext = ctx;
+      providerPrompts.push({
+        kind: "resume",
+        prompt: opts?.continuation ? "provider-continuation" : String(message.content),
+      });
+      token.processingStarted(message);
+      return { sessionId: conversationId, route: { kind: "owned" as const, mode: "processing" as const } };
+    },
+  );
+  const recoveryHandler = handler({
+    start: vi.fn().mockRejectedValue(new Error("recovery must resume the exact conversation")),
+    resume: recoveryResume,
+  });
+
+  const ackEntry = vi.fn<(entryId: number) => Promise<void>>().mockResolvedValue(undefined);
+  const recoverChat = vi.fn<(id: string) => Promise<void>>().mockResolvedValue(undefined);
+  const sm = makeRuntime({
+    handlers:
+      mode === "concurrency_preemption" ? [oldHandler, requester, recoveryHandler] : [oldHandler, recoveryHandler],
+    runtimeProvider: "antigravity",
+    concurrency: 1,
+    ackEntry,
+    recoverChat,
+  });
+  const i = internals(sm);
+
+  const originalDispatch = sm.dispatch(headEntry);
+  await startStarted;
+  if (!originalMessage || !originalContext) throw new Error("Antigravity first turn did not start");
+
+  if (mode === "concurrency_preemption") {
+    await sm.dispatch(mockEntry({ id: 611, chatId: "chat-preempting-requester", messageId: "msg-requester" }));
+  } else {
+    originalContext.failSessionForRecovery?.("forced_route_retirement", conversationId);
+    expect(ackEntry).not.toHaveBeenCalledWith(headEntry.id);
+  }
+
+  if (mode === "concurrency_preemption") {
+    expect(ackEntry).not.toHaveBeenCalledWith(headEntry.id);
+  }
+  resolveStart?.();
+  await originalDispatch;
+
+  await vi.waitFor(() =>
+    expect(i.projection.evictedMappings.get(chatId)).toEqual(
+      expect.objectContaining({
+        claudeSessionId: conversationId,
+        continuation,
+      }),
+    ),
+  );
+  await vi.waitFor(() => expect(recoverChat).toHaveBeenCalledWith(chatId));
+  expect(ackEntry).not.toHaveBeenCalledWith(headEntry.id);
+
+  await sm.dispatch(headEntry);
+  expect(recoveryResume).toHaveBeenCalledTimes(1);
+  expect(recoveryHandler.start).not.toHaveBeenCalled();
+  expect(recoveryMessage).toEqual(
+    expect.objectContaining({
+      inboxEntryId: headEntry.id,
+      id: headEntry.message.id,
+      content: headEntry.message.content,
+    }),
+  );
+  const resumeCall = recoveryResume.mock.calls[0];
+  expect(resumeCall?.[1]).toBe(conversationId);
+  expect(resumeCall?.[4]).toEqual({ continuation });
+  expect(providerPrompts).toEqual([
+    { kind: "start", prompt: "mutating original" },
+    { kind: "resume", prompt: "provider-continuation" },
+  ]);
+  expect(toolCalls).toEqual(["run_command"]);
+  expect(i.projection.sessions.get(chatId)?.claudeSessionId).toBe(conversationId);
+  expect(i.projection.evictedMappings.has(chatId)).toBe(false);
+  expect(ackEntry).not.toHaveBeenCalledWith(headEntry.id);
+
+  if (!recoveryMessage || !recoveryContext) throw new Error("recovery route did not capture the original row");
+  await recoveryContext.finishTurn(recoveryMessage, { status: "success", terminal: true });
+  expect(ackEntry).toHaveBeenCalledWith(headEntry.id);
+  expect(originalMessage.inboxEntryId).toBe(headEntry.id);
+  await sm.shutdown();
 }
 
 afterEach(() => {
@@ -4575,6 +4749,13 @@ describe("SessionRuntime edge coverage", () => {
 
     await headDispatch;
     await sm.shutdown();
+  });
+
+  it.each([
+    ["working concurrency preemption", "concurrency_preemption"],
+    ["forced route retirement", "forced_route_retirement"],
+  ] as const)("keeps an Antigravity first-turn continuation through %s", async (_label, mode) => {
+    await exerciseAntigravityRetirementRecovery(mode);
   });
 
   it("serializes concurrent same-chat resumes to exactly one provider resume", async () => {
