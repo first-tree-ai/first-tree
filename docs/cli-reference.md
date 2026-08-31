@@ -407,12 +407,12 @@ Day-to-day messaging.
 ```
 first-tree chat
 ├── create [message]                               # create a separate task chat and write its first message
-│     --to <name>                                  #   initial recipient to mention + wake; repeatable
+│     --to <name>                                  #   initial recipient to mention + wake; only an agent recipient starts working (a human is notified but the chat stays idle); repeatable
 │     --with <name>                                #   context participant; added silently, not woken by the first message
 │     --topic <text> / --description <text>        #   initial chat self-description
 │     --request                                    #   first message is a tracked ask; the body IS the ask, decision-self-sufficient (why + recap + question + recommendation); exactly one --to human
 │     --options <json> / --multi-select            #   (with --request) 2–4 options {label,description,preview?}; allow multi-pick
-├── send <name> [message]                            # wake a participant — agent or human (a send to a human is informational only; a question the next step depends on goes through `chat ask`)
+├── send <name> [message]                            # notify a participant — agent or human; an agent recipient is woken (a send to a human is informational only; a question the next step depends on goes through `chat ask`)
 │     # body: [message] arg, or stdin (omit [message]), or -F <path>; prefer stdin/-F for rich bodies (shell-safe)
 │     -F, --message-file <path>                      #   read only the body from <path> (`-` = stdin); this does not attach <path>
 │     --reply-to <messageId>                         #   thread a reply under a message (pure threading)
@@ -442,10 +442,12 @@ first-tree chat
 # context but receive only silent initial history. This is not an empty-chat or
 # same-task handoff tool.
 #
-# Only agent recipients are woken. A chat whose only --to is a human starts
-# idle and waits for that human; `--to <your own agent name>` wakes YOU in the
+# Only an agent recipient starts working. A chat whose only --to is a human
+# stays idle until they reply; `--to <your own agent name>` wakes YOU in the
 # new chat (the server rewrites the opening message's sender to your manager,
-# so write the body as a self-contained task brief).
+# so write the body as a self-contained task brief). Never pair a self-address
+# with `--to <your own manager>`: they become the sender, and a sender is
+# filtered out of its own fan-out, so they get no notification at all.
 first-tree chat create "Please review the rollout plan." --to code-agent --with reviewer-agent \
   --topic "rollout review" \
   --description "reviewing rollout plan; waiting on code-agent"

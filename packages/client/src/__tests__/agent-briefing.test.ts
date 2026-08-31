@@ -201,7 +201,7 @@ describe("buildAgentBriefing — generated skeleton", () => {
     // other consumer — CLI help, docs, SDK/schema comments — points here, so
     // the budget buys prose the agent actually needs on every turn.
     expect(lineCount(topLevelSection(briefing, "# Working in First Tree (First Tree Managed)"))).toBeLessThanOrEqual(
-      278,
+      284,
     );
     expect(briefing).not.toContain("# Required Reading (First Tree Managed)");
     // Raised from 210 when the declared-identity guard bullet joined the bound
@@ -210,8 +210,9 @@ describe("buildAgentBriefing — generated skeleton", () => {
     expect(lineCount(topLevelSection(briefing, "# Skills (First Tree Managed)"))).toBeLessThanOrEqual(20);
     // Tracks the same +16 and +10 the Summary authoring contract and the
     // Capability Degradation baseline add above, +4 for the identity guard, and
-    // +28 for the regrouped CLI sections and the `chat create` wake rule.
-    expect(lineCount(briefing)).toBeLessThanOrEqual(640);
+    // +28 for the regrouped CLI sections and the `chat create` wake rule, and
+    // +7 for the review follow-ups (what "woken" means, the manager-mix trap).
+    expect(lineCount(briefing)).toBeLessThanOrEqual(647);
   });
 
   it("renders identity from visibility", () => {
@@ -639,10 +640,17 @@ describe("buildAgentBriefing — Working in First Tree hard rules", () => {
     expect(task).toContain("--to <your own agent name>");
     expect(task).toContain("Self-address is the\n  only form that wakes you");
     expect(task).toContain("`--to <human>` alone — nobody starts working");
-    expect(task).toContain("`--with <name>` adds context\nparticipants who are not woken");
+    expect(task).toContain("`--with <name>` adds context participants who are not woken");
+    // Reviewer finding: self-address already seats the manager as sender, and a
+    // sender is filtered out of its own fan-out, so `--to <manager>` on top of
+    // it silently leaves them with no inbox row at all.
+    expect(task).toContain("never list\nyour own manager alongside a self-address");
+    expect(task).toContain("a sender is filtered out of its\nown fan-out");
+    // `chat invite` adds a participant; it does not wake anyone by itself.
+    expect(task).toContain("only adds the participant, so follow it");
     expect(task).toContain("chat invite");
     expect(task).toContain("do not poll solely because that agent has not replied");
-    expect(task).toContain("cannot attach files");
+    expect(task).toMatch(/cannot\s+attach files/);
   });
 
   it("uses one channel-resolved binary name across prompt, chat, GitHub, and tree commands", () => {
@@ -958,6 +966,9 @@ describe("buildAgentBriefing — asking humans, GitHub, and CLI overview", () =>
     expect(overview).toContain("first-tree tree read");
     expect(overview).toContain("first-tree tree write");
     expect(overview).toContain("first-tree tree review");
+    // "woken" is defined once, here, because the rest of the file leans on it.
+    expect(overview).toContain("**woken** means an agent session is started");
+    expect(overview).toContain("never starts work");
     expect(overview).not.toContain("github scan");
     expect(overview).not.toContain("first-tree tree …");
 

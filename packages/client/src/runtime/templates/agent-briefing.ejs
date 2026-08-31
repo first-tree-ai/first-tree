@@ -165,15 +165,18 @@ Operator-only commands (`login`, `daemon install`, `agent create / bind`) run fr
 Per-command flags live in `<%- bin %> <command> --help` — start with `<%- bin %> chat --help`;
 the full surface is `docs/cli-reference.md`. Substitute `<%- bin %>` anywhere docs
 show the literal `first-tree`.
+Throughout this file **woken** means an agent session is started to act on a
+message. A human recipient is notified but never starts work, so a chat with no
+agent recipient makes no progress until a person replies.
 
 ## Agent Identity & Config
 
 `<%- bin %> agent …` reads your own identity and configuration; the one
-writable piece is your prompt fragment, read with `<%- bin %> agent config prompt show <agent> --raw`
-and replaced with `<%- bin %> agent config prompt set <agent> -f <file>` — the
-`# Agent Prompt` section above is the only part of this file such an edit may
-produce. Team prompts and binding-managed overrides are edited in the web
-console, not here.
+writable piece is your own prompt fragment, read with `<%- bin %> agent config prompt show <agent> --raw`
+and replaced with `<%- bin %> agent config prompt set <agent> -f <file>`. Such an
+edit may only ever produce that fragment: never paste an assembled section of
+this generated file back into it. Team prompts and binding-managed overrides
+are edited in the web console, not here.
 
 ## Communication
 
@@ -207,12 +210,13 @@ double-encode. Use `-f markdown`; `-F` supplies only the body. Run
 ## Task Management
 
 Start separate work with `<%- bin %> chat create --to <name> "<brief>"` only
-when the work needs its own task boundary; a same-task handoff stays in this
-chat behind `<%- bin %> chat invite`. After an agent handoff, continue only
-independent work; do not poll solely because that agent has not replied.
+when the work needs its own task boundary. A same-task handoff stays in this
+chat: `<%- bin %> chat invite <agent>` only adds the participant, so follow it
+with the `chat send` that actually wakes them. After an agent handoff, continue
+only independent work; do not poll solely because that agent has not replied.
 
-**`chat create` wakes exactly its `--to` recipients, and a human recipient is
-never woken.** Pick `--to` by who acts next in the new chat:
+**`chat create` wakes exactly its `--to` recipients, and only an agent
+recipient can start working.** Pick `--to` by who acts next in the new chat:
 
 - `--to <your own agent name>` — you do the work there. Self-address is the
   only form that wakes you: the server rewrites the opening message's sender to
@@ -223,10 +227,14 @@ never woken.** Pick `--to` by who acts next in the new chat:
 - `--to <human>` alone — nobody starts working. The new chat sits idle until
   the human answers, so use it only when the human owns the next step.
 
-`--to` is repeatable and may mix those forms; `--with <name>` adds context
-participants who are not woken by the opening message; `--request` needs
-exactly one `--to` human. `chat create` cannot attach files — create first,
-then send documents with `chat send`.
+`--to` is repeatable and may mix those forms, with one exception: never list
+your own manager alongside a self-address. Self-address already puts them in
+the chat as the opening message's sender, and a sender is filtered out of its
+own fan-out, so naming them in `--to` leaves them with no notification at all —
+tell them with a separate `chat send` once the chat exists.
+`--with <name>` adds context participants who are not woken by the opening
+message; `--request` needs exactly one `--to` human. `chat create` cannot
+attach files — create first, then send documents with `chat send`.
 
 ## Scheduled Jobs
 

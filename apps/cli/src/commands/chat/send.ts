@@ -21,7 +21,8 @@ export function registerChatSendCommand(chat: Command): void {
     .command("send [name] [message]")
     .description(
       "Send a message into the caller's current chat (FIRST_TREE_CHAT_ID). <name> is any participant — agent or " +
-        "human; the recipient is @mentioned and woken (must already be a participant — `chat invite` an agent " +
+        "human; the recipient is @mentioned and notified — an agent recipient is woken, a human is not (the " +
+        "recipient must already be a participant — `chat invite` an agent first). " +
         "first). A plain send to a human is informational only — a free reply or report they can read and move " +
         "on from; any question your next step depends on goes through `chat ask` (a send never carries a " +
         "blocking question). Report progress with `chat update --description`. A message must name a recipient " +
