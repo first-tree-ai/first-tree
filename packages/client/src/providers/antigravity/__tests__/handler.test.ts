@@ -491,9 +491,11 @@ process.stdin.on("end", () => {
   });
 
   it.each([
-    "suspend",
-    "shutdown",
-  ] as const)("preserves the exact conversation and consumes a mutating first turn on lifecycle %s", async (lifecycle) => {
+    ["suspend", true],
+    ["shutdown", true],
+    ["suspend", false],
+    ["shutdown", false],
+  ] as const)("preserves the exact conversation and handles a mutating first turn on %s with settleProviderEntered=%s", async (lifecycle, shouldSettleProviderEntered) => {
     const root = mkdtempSync(join(tmpdir(), `ft-antigravity-lifecycle-${lifecycle}-`));
     roots.push(root);
     const specs: ProviderProcessSpec[] = [];
@@ -544,16 +546,22 @@ process.stdin.on("end", () => {
     await vi.waitFor(() =>
       expect(events.some((event) => (event as { kind?: string }).kind === "tool_call")).toBe(true),
     );
-    if (lifecycle === "suspend") await handler.suspend("test lifecycle suspend");
-    else await handler.shutdown("test lifecycle shutdown");
+    const lifecycleOptions = shouldSettleProviderEntered ? { settleProviderEntered: true } : undefined;
+    if (lifecycle === "suspend") await handler.suspend("test lifecycle suspend", lifecycleOptions);
+    else await handler.shutdown("test lifecycle shutdown", lifecycleOptions);
 
     const started = await startPromise;
     expect(started.sessionId).toBe("conversation-lifecycle");
-    expect(token.retry).not.toHaveBeenCalled();
-    expect(token.complete).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ status: "error", completion: "consumed", reason: "unsafe_replay" }),
-    );
+    if (shouldSettleProviderEntered) {
+      expect(token.retry).not.toHaveBeenCalled();
+      expect(token.complete).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ status: "error", completion: "consumed", reason: "unsafe_replay" }),
+      );
+    } else {
+      expect(token.complete).not.toHaveBeenCalled();
+      expect(token.retry).toHaveBeenCalledWith(expect.anything(), `test lifecycle ${lifecycle}`);
+    }
 
     const recoveryToken = deliveryToken();
     const resumed = await handler.resume(
@@ -565,8 +573,11 @@ process.stdin.on("end", () => {
     expect(resumed.sessionId).toBe("conversation-lifecycle");
     expect(specs).toHaveLength(2);
     expect(specs[1]?.args).toEqual(expect.arrayContaining(["--conversation", "conversation-lifecycle"]));
+    expect(inputs[1]).toContain("recover without replay");
+    expect(inputs[1]).not.toContain("mutate this");
     expect(recoveryToken.complete).toHaveBeenCalledWith(expect.anything(), { status: "success" });
     expect(forwarded).toEqual(["recovered"]);
+    expect(events.filter((event) => (event as { kind?: string }).kind === "tool_call")).toHaveLength(1);
     await handler.shutdown();
   });
 

@@ -14,6 +14,7 @@ import type {
   AgentHandler,
   DeliveryToken,
   HandlerFactory,
+  HandlerShutdownOptions,
   SessionContext,
   SessionMessage,
   TurnConsumedErrorReason,
@@ -236,6 +237,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
   // enough for start()/resume() to return it to SessionRuntime.
   let pendingLifecycleSessionId: string | null = null;
   let sessionActive = false;
+  let settleProviderEntered = false;
   let initialTurnPreparing = false;
   let currentAbort: AbortController | null = null;
   let currentTurnPromise: Promise<void> | null = null;
@@ -747,7 +749,8 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
             state.usage,
           );
           if (lifecycleObservedId) pendingLifecycleSessionId = lifecycleObservedId;
-          if (state.sawUnsafeTool) {
+          if (drainingBatch?.some((entry) => entry.token === token)) drainingBatch = null;
+          if (state.sawUnsafeTool && settleProviderEntered) {
             const lifecycleError = new Error(
               "Antigravity turn cancelled during a lifecycle transition after a mutating tool",
             );
@@ -762,7 +765,8 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
               turnGeneration,
             });
           }
-          token.retry(messages, "antigravity_turn_aborted_or_timed_out");
+          const lifecycleRecoveryReason = drainCancellationReason ?? "antigravity_turn_aborted_or_timed_out";
+          token.retry(messages, lifecycleRecoveryReason);
           return false;
         }
         if (abort.signal.aborted) {
@@ -1125,31 +1129,35 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
       return { kind: "owned", mode: "queued" };
     },
 
-    async suspend(reason) {
+    async suspend(reason, opts?: HandlerShutdownOptions) {
       const recoveryReason = reason ?? "antigravity_suspend_before_terminal";
       sessionActive = false;
       drainCancellationReason = recoveryReason;
+      settleProviderEntered = opts?.settleProviderEntered === true;
       generation++;
       currentAbort?.abort();
       await Promise.all([currentTurnPromise, currentDrainPromise]);
       if (drainingBatch) retryDrainingBatch(drainingBatch, recoveryReason);
       retryQueue(recoveryReason);
       drainCancellationReason = null;
+      settleProviderEntered = false;
       currentAbort = null;
       currentTurnPromise = null;
       initialTurnPreparing = false;
     },
 
-    async shutdown(reason) {
+    async shutdown(reason, opts?: HandlerShutdownOptions) {
       const recoveryReason = reason ?? "antigravity_shutdown_before_terminal";
       sessionActive = false;
       drainCancellationReason = recoveryReason;
+      settleProviderEntered = opts?.settleProviderEntered === true;
       generation++;
       currentAbort?.abort();
       await Promise.all([currentTurnPromise, currentDrainPromise]);
       if (drainingBatch) retryDrainingBatch(drainingBatch, recoveryReason);
       retryQueue(recoveryReason);
       drainCancellationReason = null;
+      settleProviderEntered = false;
       currentAbort = null;
       currentTurnPromise = null;
       cwd = null;
