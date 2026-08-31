@@ -4,7 +4,10 @@ import { fileURLToPath } from "node:url";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
+import { createLogger } from "../observability/index.js";
 import { sslOptions } from "./connection.js";
+
+const log = createLogger("Migrations");
 
 /**
  * Resolve the drizzle migrations directory.
@@ -53,18 +56,23 @@ function validateJournalOrder(migrationsFolder: string): void {
 }
 
 /**
- * Advisory-lock key used by the preflight check.
+ * Advisory-lock key serializing startup migrations across replicas (T10).
  *
  * Verified against `drizzle-orm@0.44.7`:
  *   - `node_modules/drizzle-orm/postgres-js/migrator.js` → delegates to
  *     `node_modules/drizzle-orm/pg-core/dialect.js::migrate()`, which
  *     **does NOT acquire any advisory lock** in this version; it only wraps
  *     `INSERT INTO drizzle.__drizzle_migrations` in a transaction.
- *   - So this preflight is **purely defensive**: it surfaces *external*
- *     holders (an operator's `SELECT pg_advisory_lock(...)`, a stale
- *     prior-replica session that exited mid-migration with the lock held,
- *     or a future drizzle release that re-introduces locking) within the
- *     timeout window instead of letting drizzle hang silently.
+ *   - The journal table makes migrations idempotent but NOT serialized:
+ *     without this lock, two replicas starting together both execute
+ *     DDL/backfills concurrently (duplicate-object errors, duplicated data
+ *     work, failed rollout replicas — PERF-027).
+ *
+ * The lock is acquired on the same dedicated connection that then runs
+ * `migrate()`, and is held from acquisition through the final statement so
+ * the lock window covers the full operation. Non-owner replicas poll until
+ * the owner releases; once they acquire it, the journal has already
+ * advanced and their `migrate()` is a no-op.
  *
  * If you bump `drizzle-orm`, re-read `pg-core/dialect.js::migrate()` and
  * update this key (and `MIGRATION_LOCK_TIMEOUT_MS`) accordingly. The
@@ -72,49 +80,49 @@ function validateJournalOrder(migrationsFolder: string): void {
  * behavior using the same key.
  */
 const MIGRATION_LOCK_KEY_SQL = "hashtext('drizzle_migrations')";
-// Sits inside the 20s `runMigrations` stage budget set in `index.ts`; 15s
-// preflight + ≥5s for the actual drizzle migrate call. If you raise either,
-// raise the other in lockstep (and re-evaluate the Dockerfile HEALTHCHECK
-// `--start-period`).
+// Sits inside the 20s `runMigrations` stage budget set in `bootstrap-server.ts`;
+// 15s lock wait + ≥5s for the actual drizzle migrate call. A waiting replica
+// can block for the holder's whole migrate, so if a future migration is known
+// to run longer, raise this budget, the stage budget, and the Dockerfile
+// HEALTHCHECK `--start-period` in lockstep.
 const DEFAULT_MIGRATION_LOCK_TIMEOUT_MS = 15_000;
 const MIGRATION_LOCK_POLL_INTERVAL_MS = 1_000;
 
 export type RunMigrationsOptions = {
-  /** Override the preflight advisory-lock timeout. Default 15s. */
+  /** Override the advisory-lock wait timeout. Default 15s. */
   lockTimeoutMs?: number;
 };
 
 /**
- * Probe the advisory-lock key drizzle would use for migrations. If another
- * session holds it, fail with a clear message instead of letting drizzle's
- * `migrate()` hang forever. We don't keep the lock — see the key constant
- * above for the full rationale. See server-bootstrap-resilience-design.md §3 (T10).
+ * Acquire the migration advisory lock on `client`, polling once per second
+ * until `timeoutMs` elapses. Throws a clear contention error on timeout; on
+ * success the caller owns the lock and MUST release it (see `runMigrations`).
+ * The lock is session-scoped, so it is also released automatically if the
+ * connection drops — a crashed replica never leaves an orphan lock behind.
  */
-async function preflightMigrationLock(databaseUrl: string, timeoutMs: number): Promise<void> {
-  const ssl = sslOptions(databaseUrl);
-  const client = postgres(databaseUrl, { max: 1, ...ssl });
+async function acquireMigrationLock(client: postgres.Sql, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  try {
-    while (true) {
-      const rows = (await client.unsafe(
-        `SELECT pg_try_advisory_lock(${MIGRATION_LOCK_KEY_SQL}) AS acquired`,
-      )) as Array<{
-        acquired: boolean;
-      }>;
-      if (rows[0]?.acquired) {
-        await client.unsafe(`SELECT pg_advisory_unlock(${MIGRATION_LOCK_KEY_SQL})`);
-        return;
-      }
-      if (Date.now() >= deadline) {
-        throw new Error(
-          `migration lock contention — another process holds drizzle migration lock (${MIGRATION_LOCK_KEY_SQL}) ` +
-            `after ${timeoutMs}ms`,
-        );
-      }
-      await new Promise((r) => setTimeout(r, MIGRATION_LOCK_POLL_INTERVAL_MS));
+  let loggedWait = false;
+  while (true) {
+    const rows = (await client.unsafe(`SELECT pg_try_advisory_lock(${MIGRATION_LOCK_KEY_SQL}) AS acquired`)) as Array<{
+      acquired: boolean;
+    }>;
+    if (rows[0]?.acquired) {
+      return;
     }
-  } finally {
-    await client.end();
+    if (!loggedWait) {
+      // A replica blocked here would otherwise sit silent until the timeout
+      // crash — log once so operators can see who it is waiting on.
+      log.info({ lockKey: MIGRATION_LOCK_KEY_SQL }, "waiting for migration lock held by another session");
+      loggedWait = true;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `migration lock contention — another process holds drizzle migration lock (${MIGRATION_LOCK_KEY_SQL}) ` +
+          `after ${timeoutMs}ms`,
+      );
+    }
+    await new Promise((r) => setTimeout(r, MIGRATION_LOCK_POLL_INTERVAL_MS));
   }
 }
 
@@ -123,32 +131,41 @@ async function preflightMigrationLock(databaseUrl: string, timeoutMs: number): P
  * migration, used as a rough indicator that the schema landed.
  */
 export async function runMigrations(databaseUrl: string, options: RunMigrationsOptions = {}): Promise<number> {
+  // Validation must stay before any postgres client is created — the edge
+  // tests assert no connection is opened for validation failures.
   const migrationsFolder = resolveMigrationsFolder();
 
   validateJournalOrder(migrationsFolder);
 
-  await preflightMigrationLock(databaseUrl, options.lockTimeoutMs ?? DEFAULT_MIGRATION_LOCK_TIMEOUT_MS);
-
   const ssl = sslOptions(databaseUrl);
-
+  // max: 1 keeps the advisory lock and migrate() on one session, so the lock
+  // covers the full migration (see the MIGRATION_LOCK_KEY_SQL comment above).
   const client = postgres(databaseUrl, { max: 1, ...ssl });
-  const db = drizzle(client);
-
+  let lockAcquired = false;
   try {
+    await acquireMigrationLock(client, options.lockTimeoutMs ?? DEFAULT_MIGRATION_LOCK_TIMEOUT_MS);
+    lockAcquired = true;
+
+    const db = drizzle(client);
     await migrate(db, { migrationsFolder });
-  } finally {
-    await client.end();
-  }
 
-  const countClient = postgres(databaseUrl, { max: 1, ...ssl });
-  try {
-    const result = await countClient`
+    const result = await client`
       SELECT count(*)::int AS count
       FROM information_schema.tables
       WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
     `;
     return (result[0] as { count: number }).count;
   } finally {
-    await countClient.end();
+    if (lockAcquired) {
+      try {
+        await client.unsafe(`SELECT pg_advisory_unlock(${MIGRATION_LOCK_KEY_SQL})`);
+      } catch (unlockError) {
+        // Best-effort release: if the connection died mid-migration the
+        // server has already dropped the session lock. Never mask the
+        // original migrate error with an unlock failure.
+        log.warn({ err: unlockError }, "failed to release migration advisory lock explicitly");
+      }
+    }
+    await client.end();
   }
 }

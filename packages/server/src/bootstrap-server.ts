@@ -95,13 +95,15 @@ export async function startServer(deps: ServerBootstrapDeps = {}): Promise<void>
   // failed}` logs emitted by `runStage`, which are sufficient for boot
   // analysis without dragging a context onto every downstream span.
 
-  // Run Drizzle migrations before the app comes up. Idempotent under
-  // multi-replica startup (Drizzle journal table); cold-start cost is a few
-  // hundred ms when there's nothing new to apply. The 20s budget matches
-  // the Dockerfile HEALTHCHECK start-period so a migration that truly
-  // exceeds it fails the boot fast rather than letting docker judge
-  // unhealthy mid-migration. If a future migration is known to run longer,
-  // raise both this and the HEALTHCHECK start-period together.
+  // Run Drizzle migrations before the app comes up. Serialized across
+  // replicas by a session-level advisory lock held for the whole migrate
+  // (see db/migrate.ts): non-owner replicas wait, and once they acquire the
+  // lock the journal has advanced, so their migrate is a no-op. The 20s
+  // budget matches the Dockerfile HEALTHCHECK start-period so a migration
+  // (including the lock wait) that truly exceeds it fails the boot fast
+  // rather than letting docker judge unhealthy mid-migration. If a future
+  // migration is known to run longer, raise both this and the HEALTHCHECK
+  // start-period together.
   const tableCount = await runStage(
     "runMigrations",
     () => (deps.runMigrations ?? runMigrations)(serverConfig.database.url),
