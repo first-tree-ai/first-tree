@@ -249,9 +249,11 @@ export type SessionContext = HandlerContext & {
    * Drop the current live handler after it has fenced an unknown-custody
    * provider failure and marked the affected inbox work for recovery. The
    * optional session id lets recovery resume provider context from a fresh
-   * handler instead of routing redelivery back into the dead one.
+   * handler instead of routing redelivery back into the dead one. A provider
+   * continuation carries the exact message custody when a provider-entered
+   * turn must be recovered without serializing the original prompt again.
    */
-  failSessionForRecovery?: (reason: string, sessionId?: string) => void;
+  failSessionForRecovery?: (reason: string, sessionId?: string, continuation?: ProviderContinuation) => void;
 
   /**
    * Rebind the active runtime session to a provider-minted replacement id
@@ -452,6 +454,20 @@ export type AgentHandler = {
     token?: DeliveryToken,
     opts?: HandlerResumeOptions,
   ): Promise<ResumeResult>;
+
+  /**
+   * True while the provider has accepted a turn whose external effects cannot
+   * be made exactly-once by starting a replacement process. Runtime eviction
+   * and forced route retirement must leave such a turn in place until it
+   * settles. Providers that do not expose this boundary retain legacy policy.
+   */
+  isProviderTurnActive?(): boolean;
+
+  /**
+   * Wait until an active provider turn has reached its terminal provider
+   * boundary. Used when a forced route retirement arrives during that window.
+   */
+  waitForProviderTurnSettled?(): Promise<void>;
 
   /** Message arrives while session is active. Push into provider-owned queue or reject. */
   inject(message: SessionMessage, token: DeliveryToken): HandlerRouteReceipt | undefined;

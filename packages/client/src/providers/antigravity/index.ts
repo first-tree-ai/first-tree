@@ -14,9 +14,7 @@ import type {
   AgentHandler,
   DeliveryToken,
   HandlerFactory,
-  HandlerResumeOptions,
   HandlerShutdownOptions,
-  ProviderContinuation,
   SessionContext,
   SessionMessage,
   TurnConsumedErrorReason,
@@ -69,6 +67,10 @@ const KILL_GRACE_MS = 5_000;
 const FINAL_CLOSE_WAIT_MS = 2_000;
 const PROVIDER_ATTEMPT_WINDOW_TTL_MS = 30 * 60_000;
 const MAX_PROVIDER_ATTEMPT_WINDOWS = 512;
+
+type AntigravityResumeOptions = NonNullable<Parameters<AgentHandler["resume"]>[4]>;
+type ProviderContinuation = NonNullable<AntigravityResumeOptions["continuation"]>;
+type HandlerResumeOptions = AntigravityResumeOptions;
 
 /**
  * Antigravity has no documented headless "resume the interrupted turn without
@@ -254,6 +256,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
   let initialTurnPreparing = false;
   let currentAbort: AbortController | null = null;
   let currentTurnPromise: Promise<void> | null = null;
+  let providerTurnActive = false;
   let generation = 0;
   let drainScheduled = false;
   let drainInProgress = false;
@@ -661,10 +664,24 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
       ) {
         return false;
       }
-      input.token.retry(input.messages, settlement.decision.reasonCode);
       if (input.state.sawProviderActivity) {
-        input.sessionCtx.failSessionForRecovery?.("antigravity_turn_retryable_failure", providerSessionId ?? undefined);
+        const message = input.messages.length === 1 ? input.messages[0] : undefined;
+        const continuation =
+          providerSessionId && message
+            ? {
+                kind: "provider_continuation" as const,
+                provider: runtimeProvider,
+                sessionId: providerSessionId,
+                messageId: message.id,
+              }
+            : undefined;
+        input.sessionCtx.failSessionForRecovery?.(
+          "antigravity_turn_retryable_failure",
+          providerSessionId ?? undefined,
+          continuation,
+        );
       }
+      input.token.retry(input.messages, settlement.decision.reasonCode);
       return false;
     }
     const completion = await input.token.complete(
@@ -728,6 +745,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
         const expectedSessionId = providerSessionId;
         token.processingStarted(messages);
         processingStarted = true;
+        providerTurnActive = true;
         const timeout = setTimeout(() => abort.abort(), turnTimeoutMs);
         timeout.unref?.();
         let outcome: ProcessOutcome;
@@ -752,6 +770,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
           });
         } finally {
           clearTimeout(timeout);
+          providerTurnActive = false;
         }
 
         if (generation !== turnGeneration || !sessionActive) {
@@ -938,6 +957,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
       if (currentTurnPromise && generation === turnGeneration) {
         currentTurnPromise = null;
       }
+      providerTurnActive = false;
       scheduleDrain();
     }
   }
@@ -1082,6 +1102,13 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
   }
 
   return {
+    isProviderTurnActive: () => providerTurnActive,
+    waitForProviderTurnSettled: async () => {
+      await currentTurnPromise;
+      while (providerTurnActive) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    },
     async start(message, sessionCtx, token) {
       pendingLifecycleSessionId = null;
       pendingLifecycleContinuation = null;

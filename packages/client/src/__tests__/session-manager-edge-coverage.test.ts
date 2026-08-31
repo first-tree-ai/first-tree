@@ -175,7 +175,7 @@ type SessionRuntimeInternals = {
   routeMessage(chatId: string, message: SessionMessage): Promise<void>;
   startNewSession(chatId: string, message: SessionMessage, deliveryKind?: string): Promise<void>;
   resumeSession(entry: SessionRecord, message: SessionMessage | null | undefined): Promise<void>;
-  failSessionForRecovery(chatId: string, reason: string, sessionId?: string): void;
+  failSessionForRecovery(chatId: string, reason: string, sessionId?: string, continuation?: ProviderContinuation): void;
   abortUnownedRoute(entry: SessionRecord, reason: string): void;
   ensureContextTreeBinding(): Promise<unknown>;
   markRouteOwned(
@@ -425,8 +425,8 @@ function requireSession(i: SessionRuntimeInternals, chatId: string): SessionReco
   return entry;
 }
 
-async function exerciseAntigravityRetirementRecovery(
-  mode: "concurrency_preemption" | "forced_route_retirement",
+async function exerciseAntigravityRecovery(
+  mode: "concurrency_protection" | "forced_route_retirement" | "provider_retryable_failure",
 ): Promise<void> {
   const chatId = `chat-antigravity-${mode}`;
   const conversationId = "conversation-lifecycle";
@@ -446,13 +446,18 @@ async function exerciseAntigravityRetirementRecovery(
   const toolCalls: string[] = [];
   let originalMessage: SessionMessage | undefined;
   let originalContext: SessionContext | undefined;
+  let providerTurnActive = false;
   let signalStartStarted: (() => void) | undefined;
   let resolveStart: (() => void) | undefined;
+  let resolveProviderSettled: (() => void) | undefined;
   const startStarted = new Promise<void>((resolve) => {
     signalStartStarted = resolve;
   });
   const startGate = new Promise<void>((resolve) => {
     resolveStart = resolve;
+  });
+  const providerSettled = new Promise<void>((resolve) => {
+    resolveProviderSettled = resolve;
   });
 
   const oldHandler = handler({
@@ -462,15 +467,32 @@ async function exerciseAntigravityRetirementRecovery(
       providerPrompts.push({ kind: "start", prompt: String(message.content) });
       token.processingStarted(message);
       toolCalls.push("run_command");
+      providerTurnActive = true;
       signalStartStarted?.();
-      await startGate;
+      if (mode === "concurrency_protection" || mode === "forced_route_retirement") {
+        await startGate;
+      }
+      if (mode === "provider_retryable_failure") {
+        providerTurnActive = false;
+        ctx.failSessionForRecovery?.("provider_retryable_failure", conversationId, continuation);
+        token.retry(message, "provider_retryable_failure");
+      } else {
+        providerTurnActive = false;
+        if (mode === "forced_route_retirement") resolveProviderSettled?.();
+        if (mode === "concurrency_protection") {
+          await token.complete(message, { status: "success", terminal: true });
+        }
+      }
       return {
         sessionId: conversationId,
         route: { kind: "owned" as const, mode: "processing" as const },
-        continuation,
       };
     }),
     shutdown: vi.fn().mockResolvedValue(undefined),
+    isProviderTurnActive: () => providerTurnActive,
+    waitForProviderTurnSettled: async () => {
+      await providerSettled;
+    },
   });
 
   const requester = handler({
@@ -511,7 +533,7 @@ async function exerciseAntigravityRetirementRecovery(
   const recoverChat = vi.fn<(id: string) => Promise<void>>().mockResolvedValue(undefined);
   const sm = makeRuntime({
     handlers:
-      mode === "concurrency_preemption" ? [oldHandler, requester, recoveryHandler] : [oldHandler, recoveryHandler],
+      mode === "concurrency_protection" ? [oldHandler, requester, recoveryHandler] : [oldHandler, recoveryHandler],
     runtimeProvider: "antigravity",
     concurrency: 1,
     ackEntry,
@@ -523,16 +545,32 @@ async function exerciseAntigravityRetirementRecovery(
   await startStarted;
   if (!originalMessage || !originalContext) throw new Error("Antigravity first turn did not start");
 
-  if (mode === "concurrency_preemption") {
-    await sm.dispatch(mockEntry({ id: 611, chatId: "chat-preempting-requester", messageId: "msg-requester" }));
-  } else {
-    originalContext.failSessionForRecovery?.("forced_route_retirement", conversationId);
+  if (mode === "concurrency_protection") {
+    const requesterDispatch = sm.dispatch(
+      mockEntry({ id: 611, chatId: "chat-preempting-requester", messageId: "msg-requester" }),
+    );
+    await Promise.resolve();
+    expect(oldHandler.shutdown).not.toHaveBeenCalled();
+    expect(requester.start).not.toHaveBeenCalled();
+    expect(ackEntry).not.toHaveBeenCalledWith(headEntry.id);
+    resolveStart?.();
+    await originalDispatch;
+    await requesterDispatch;
+    await vi.waitFor(() => expect(requester.start).toHaveBeenCalledTimes(1));
+    expect(oldHandler.shutdown).toHaveBeenCalled();
+    expect(ackEntry).toHaveBeenCalledWith(headEntry.id);
+    expect(providerPrompts).toEqual([{ kind: "start", prompt: "mutating original" }]);
+    expect(toolCalls).toEqual(["run_command"]);
+    await sm.shutdown();
+    return;
+  }
+
+  if (mode === "forced_route_retirement") {
+    originalContext.failSessionForRecovery?.("forced_route_retirement", conversationId, continuation);
+    expect(oldHandler.shutdown).not.toHaveBeenCalled();
     expect(ackEntry).not.toHaveBeenCalledWith(headEntry.id);
   }
 
-  if (mode === "concurrency_preemption") {
-    expect(ackEntry).not.toHaveBeenCalledWith(headEntry.id);
-  }
   resolveStart?.();
   await originalDispatch;
 
@@ -545,6 +583,7 @@ async function exerciseAntigravityRetirementRecovery(
     ),
   );
   await vi.waitFor(() => expect(recoverChat).toHaveBeenCalledWith(chatId));
+  expect(oldHandler.shutdown).toHaveBeenCalled();
   expect(ackEntry).not.toHaveBeenCalledWith(headEntry.id);
 
   await sm.dispatch(headEntry);
@@ -4752,10 +4791,11 @@ describe("SessionRuntime edge coverage", () => {
   });
 
   it.each([
-    ["working concurrency preemption", "concurrency_preemption"],
+    ["working concurrency preemption", "concurrency_protection"],
     ["forced route retirement", "forced_route_retirement"],
-  ] as const)("keeps an Antigravity first-turn continuation through %s", async (_label, mode) => {
-    await exerciseAntigravityRetirementRecovery(mode);
+    ["provider retryable failure", "provider_retryable_failure"],
+  ] as const)("protects an Antigravity provider-entered first turn through %s", async (_label, mode) => {
+    await exerciseAntigravityRecovery(mode);
   });
 
   it("serializes concurrent same-chat resumes to exactly one provider resume", async () => {

@@ -530,6 +530,16 @@ export class SessionRuntime {
    */
   private readonly pendingFenceFormatFailures = new Map<string, Set<string>>();
 
+  /**
+   * Forced recovery/retirement requests waiting for a provider's
+   * non-interruptible turn to settle. The action is released only for the
+   * exact live entry/handler that accepted the turn.
+   */
+  private readonly deferredProviderRetirements = new Map<
+    string,
+    { entry: SessionEntry; handler: AgentHandler; action: () => void }
+  >();
+
   private recordPendingFenceFormatFailure(chatId: string, message: SessionMessage): void {
     if (message.inboxEntryId === undefined) return;
     if (!this.inboxDelivery.hasEntry({ chatId, entryId: message.inboxEntryId, messageId: message.id })) return;
@@ -719,7 +729,8 @@ export class SessionRuntime {
       drainDeferredMessages: (entry) => this.drainDeferredMessages(entry as SessionEntry),
       persistRegistry: () => this.projection.persistRegistry(),
       ensureImagesLocal: (message) => this.ensureImagesLocal(message),
-      failSessionForRecovery: (chatId, reason, sessionId) => this.failSessionForRecovery(chatId, reason, sessionId),
+      failSessionForRecovery: (chatId, reason, sessionId, continuation) =>
+        this.failSessionForRecovery(chatId, reason, sessionId, continuation),
       runtimeProvider: () => this.runtimeProvider(),
       normalizeResumeReceipt,
       normalizeStartReceipt,
@@ -1288,6 +1299,7 @@ export class SessionRuntime {
   /** Shut down all sessions gracefully. */
   async shutdown(reason?: string, opts: SessionRuntimeShutdownOptions = {}): Promise<void> {
     this.shuttingDown = true;
+    this.deferredProviderRetirements.clear();
     this.config.subprocessProbe?.stop();
     this.slotScheduler.stopIdleEviction();
     this.projection.stopRuntimeReaffirm();
@@ -1695,6 +1707,17 @@ export class SessionRuntime {
   private fenceSessionForRuntimeSessionProofRecovery(chatId: string, reasonCode: string): void {
     const entry = this.projection.getSession(chatId);
     if (!entry) return;
+    if (
+      this.deferProviderRetirement(entry, () => this.fenceSessionForRuntimeSessionProofRecoveryNow(chatId, reasonCode))
+    ) {
+      return;
+    }
+    this.fenceSessionForRuntimeSessionProofRecoveryNow(chatId, reasonCode);
+  }
+
+  private fenceSessionForRuntimeSessionProofRecoveryNow(chatId: string, reasonCode: string): void {
+    const entry = this.projection.getSession(chatId);
+    if (!entry) return;
     const reason = `runtime_session_proof:${reasonCode}`;
     this.routeTeardown.invalidateRouteTransition(entry, reason);
     this.slotScheduler.clearRetryState(entry);
@@ -1706,6 +1729,7 @@ export class SessionRuntime {
       this.projection.recordEvictionResume(chatId, {
         claudeSessionId: resumeSessionId,
         lastActivity: entry.lastActivity,
+        ...(entry.providerContinuation ? { continuation: entry.providerContinuation } : {}),
       });
     }
     this.slotScheduler.releaseActiveSlot(entry);
@@ -1781,7 +1805,83 @@ export class SessionRuntime {
     return true;
   }
 
-  private failSessionForRecovery(chatId: string, reason: string, sessionId?: string): void {
+  private deferProviderRetirement(entry: SessionEntry, action: () => void): boolean {
+    let active = false;
+    try {
+      active = entry.handler.isProviderTurnActive?.() === true;
+    } catch (error) {
+      this.config.log.warn(
+        { chatId: entry.chatId, error },
+        "provider turn liveness probe failed; deferring forced retirement",
+      );
+      active = true;
+    }
+    if (!active) return false;
+
+    const existing = this.deferredProviderRetirements.get(entry.chatId);
+    if (existing) return true;
+    const waitForSettled = entry.handler.waitForProviderTurnSettled;
+    if (!waitForSettled) {
+      this.config.log.error(
+        { chatId: entry.chatId },
+        "provider exposed an active turn without a settlement waiter; retaining live route",
+      );
+      return true;
+    }
+    const pending = { entry, handler: entry.handler, action };
+    this.deferredProviderRetirements.set(entry.chatId, pending);
+    void Promise.resolve()
+      .then(() => waitForSettled.call(entry.handler))
+      .catch((error) => {
+        this.config.log.warn({ chatId: entry.chatId, error }, "provider turn settlement waiter failed");
+      })
+      .then(() => {
+        if (this.deferredProviderRetirements.get(entry.chatId) !== pending) return;
+        this.deferredProviderRetirements.delete(entry.chatId);
+        if (this.shuttingDown) return;
+        if (!this.projection.isSameSession(entry.chatId, entry) || entry.handler !== pending.handler) return;
+        let stillActive = false;
+        try {
+          stillActive = pending.handler.isProviderTurnActive?.() === true;
+        } catch {
+          stillActive = true;
+        }
+        if (stillActive) {
+          this.deferProviderRetirement(entry, action);
+          return;
+        }
+        action();
+      });
+    this.config.log.info(
+      { chatId: entry.chatId },
+      "deferring forced provider route retirement until the active turn settles",
+    );
+    return true;
+  }
+
+  private failSessionForRecovery(
+    chatId: string,
+    reason: string,
+    sessionId?: string,
+    continuation?: ProviderContinuation,
+  ): void {
+    const entry = this.projection.getSession(chatId);
+    if (!entry) return;
+
+    if (
+      this.deferProviderRetirement(entry, () => this.failSessionForRecoveryNow(chatId, reason, sessionId, continuation))
+    ) {
+      return;
+    }
+    this.failSessionForRecoveryNow(chatId, reason, sessionId, continuation);
+  }
+
+  private failSessionForRecoveryNow(
+    chatId: string,
+    reason: string,
+    sessionId?: string,
+    continuation?: ProviderContinuation,
+  ): void {
     const entry = this.projection.getSession(chatId);
     if (!entry) return;
 
@@ -1789,13 +1889,24 @@ export class SessionRuntime {
     this.slotScheduler.clearRetryState(entry);
     const resumeSessionId = resumableProviderSessionId(
       sessionId,
+      continuation?.sessionId,
       entry.claudeSessionId,
       this.slotScheduler.resumeFallbackSessionId(entry),
     );
     if (resumeSessionId) {
+      const entryContinuation = entry.providerContinuation ?? undefined;
+      const recoveryContinuation =
+        continuation && continuation.provider === this.runtimeProvider() && continuation.sessionId === resumeSessionId
+          ? continuation
+          : entryContinuation &&
+              entryContinuation.provider === this.runtimeProvider() &&
+              entryContinuation.sessionId === resumeSessionId
+            ? entryContinuation
+            : undefined;
       this.projection.recordEvictionResume(chatId, {
         claudeSessionId: resumeSessionId,
         lastActivity: entry.lastActivity,
+        ...(recoveryContinuation ? { continuation: recoveryContinuation } : {}),
       });
     }
     this.slotScheduler.releaseActiveSlot(entry);
@@ -3410,9 +3521,9 @@ export class SessionRuntime {
             }),
         );
       },
-      failSessionForRecovery: (reason, sessionId) => {
+      failSessionForRecovery: (reason, sessionId, continuation) => {
         if (mutationValid && !mutationValid()) return;
-        this.failSessionForRecovery(chatId, reason, sessionId);
+        this.failSessionForRecovery(chatId, reason, sessionId, continuation);
       },
       replaceSessionId: (sessionId, reason) => {
         if (mutationValid && !mutationValid()) return;

@@ -174,7 +174,12 @@ export type SlotSchedulerAuthorityDeps = {
   drainDeferredMessages: (entry: SlotSchedulerSessionEntry) => void;
   persistRegistry: () => void;
   ensureImagesLocal: (message: SessionMessage) => Promise<void>;
-  failSessionForRecovery: (chatId: string, reason: string, sessionId?: string) => void;
+  failSessionForRecovery: (
+    chatId: string,
+    reason: string,
+    sessionId?: string,
+    continuation?: ProviderContinuation,
+  ) => void;
   runtimeProvider: () => RuntimeProvider;
   normalizeResumeReceipt: (result: ResumeResult) => {
     sessionId: string;
@@ -221,6 +226,20 @@ export class SlotSchedulerAuthority {
   private readonly slotBySession = new WeakMap<SlotSchedulerSessionEntry, SlotState>();
 
   constructor(private readonly deps: SlotSchedulerAuthorityDeps) {}
+
+  /**
+   * A provider may expose a non-interruptible window after its input crossed
+   * the provider boundary. Treat an observation failure as protected: force
+   * retirement is a safety fallback, never a reason to risk duplicate effects.
+   */
+  private isProviderTurnActive(entry: SlotSchedulerSessionEntry): boolean {
+    try {
+      return entry.handler.isProviderTurnActive?.() === true;
+    } catch (error) {
+      this.deps.log.warn({ chatId: entry.chatId, error }, "provider turn liveness probe failed; protecting session");
+      return true;
+    }
+  }
 
   /**
    * A canceled provider start/resume can materialize after its route fence.
@@ -898,13 +917,17 @@ export class SlotSchedulerAuthority {
       const idle = this.findOldestActiveSession(
         (session) =>
           session.chatId !== chatId &&
+          !this.isProviderTurnActive(session) &&
           !this.deps.inbox.hasProcessingOwnedWork(session.chatId) &&
           (!protectSubprocess || !this.hasLiveSubprocess(session.chatId)),
       );
       if (idle) return { victim: idle, kind: "idle" };
       if (deliveryKind === "fresh") {
         const working = this.findOldestActiveSession(
-          (session) => session.chatId !== chatId && (!protectSubprocess || !this.hasLiveSubprocess(session.chatId)),
+          (session) =>
+            session.chatId !== chatId &&
+            !this.isProviderTurnActive(session) &&
+            (!protectSubprocess || !this.hasLiveSubprocess(session.chatId)),
         );
         if (working) return { victim: working, kind: "working" };
       }
@@ -1072,6 +1095,10 @@ export class SlotSchedulerAuthority {
       // its detached handlers are still being confirmed stopped, so keep it
       // out of the candidate set (force-keep).
       if (this.deps.routeTeardown.hasPendingTeardown(key)) continue;
+      // A lifecycle transition can mark an entry non-active before its
+      // provider turn has crossed the terminal boundary. Keep that handler
+      // protected regardless of the host session status.
+      if (this.isProviderTurnActive(session)) continue;
       if (session.status !== "active") {
         if (!nonActiveCandidate || session.lastActivity < nonActiveCandidate.session.lastActivity) {
           nonActiveCandidate = { key, session };
@@ -1159,16 +1186,26 @@ export class SlotSchedulerAuthority {
 
       const currentState = this.deps.getSessionRuntimeState(session.chatId);
       const hasProcessingWork = this.deps.inbox.hasProcessingOwnedWork(session.chatId);
+      const providerTurnActive = this.isProviderTurnActive(session);
       // A live background subprocess (e.g. a `run_in_background` watcher) is
       // real in-flight work even though no turn is processing: suspending would
       // close the provider stream and lose its completion wake-up.
       const hasLiveSubprocess = this.hasLiveSubprocess(session.chatId);
 
-      // Hard cap: regardless of unsettled work, once we are past
-      // `idle_timeout + working_grace_seconds` the slot MUST be reclaimed.
-      // Anything else means a stuck handler — or a forgotten background
-      // subprocess — can hold a slot forever just by never closing the work.
+      // Hard cap: for sessions without an active provider turn, regardless of
+      // other unsettled work, once we are past `idle_timeout +
+      // working_grace_seconds` the slot MUST be reclaimed. A provider-entered
+      // turn is the explicit exception: it stays alive until its terminal
+      // provider boundary so a replacement cannot duplicate external effects.
       const pastHardCap = inactiveMs >= timeoutMs + workingGraceMs;
+
+      if (providerTurnActive) {
+        this.deps.log.info(
+          { chatId: session.chatId, runtimeState: currentState, reason: "provider_turn_active" },
+          "session idle threshold reached but provider turn is non-interruptible — skipping suspend",
+        );
+        continue;
+      }
 
       if ((hasProcessingWork || hasLiveSubprocess) && !pastHardCap) {
         this.deps.log.info(
