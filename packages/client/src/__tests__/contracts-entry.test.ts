@@ -9,8 +9,10 @@ import type {
   DeliveryToken,
   HandlerConfig,
   HandlerFactory,
+  HandlerResumeOptions,
   HandlerShutdownOptions,
   LoginOutcome,
+  ProviderContinuation,
   ReplayFenceEntry,
   ReplayFenceWriter,
   SessionContext,
@@ -30,12 +32,14 @@ const CONTRACT_TYPE_EXPORTS = [
   "DeliveryToken",
   "HandlerConfig",
   "HandlerFactory",
+  "HandlerResumeOptions",
   "HandlerShutdownOptions",
   "SessionContext",
   "SessionMessage",
   "TurnConsumedErrorReason",
   "TurnOutcome",
   "LoginOutcome",
+  "ProviderContinuation",
   "ReplayFenceEntry",
   "ReplayFenceWriter",
 ] as const;
@@ -243,12 +247,14 @@ export { noopDeliveryToken as requireDeliveryToken } from "./handler.js";
       | DeliveryToken
       | HandlerConfig
       | HandlerFactory
+      | HandlerResumeOptions
       | HandlerShutdownOptions
       | SessionContext
       | SessionMessage
       | TurnConsumedErrorReason
       | TurnOutcome
       | LoginOutcome
+      | ProviderContinuation
       | ReplayFenceEntry
       | ReplayFenceWriter
       | undefined;

@@ -170,10 +170,25 @@ export class SessionProjectionAuthority<
     if (!stored) return null;
     const sessionId = resumableProviderSessionId(stored.claudeSessionId);
     if (!sessionId) return null;
+    const lastActivity = stored.lastActivity;
+    const storedContinuation = stored.continuation;
+    if (!storedContinuation) {
+      return Object.freeze({
+        claudeSessionId: sessionId,
+        lastActivity,
+      });
+    }
+    // Copy primitive continuation fields so the public snapshot is a fresh
+    // object, not the nested value identity still owned by evictedMappings.
     return Object.freeze({
       claudeSessionId: sessionId,
-      lastActivity: stored.lastActivity,
-      ...(stored.continuation ? { continuation: { ...stored.continuation } } : {}),
+      lastActivity,
+      continuation: {
+        kind: storedContinuation.kind,
+        provider: storedContinuation.provider,
+        sessionId: storedContinuation.sessionId,
+        messageId: storedContinuation.messageId,
+      },
     });
   }
 
