@@ -160,6 +160,12 @@ describe("chat command behavior", () => {
     expect(help).toContain("workspace `.md` path");
     expect(help).toContain("10 MiB each, up to 10 documents per message");
     expect(help).toContain("Other outbound file types are not captured");
+    // Who a send actually wakes: an agent recipient starts a session, a human
+    // is only notified. The sentence had no coverage and shipped with a
+    // duplicated "first)." fragment before this assertion existed.
+    expect(help).toContain("an agent recipient is woken, a human is not");
+    expect(help).toContain("`chat invite` an agent first). A plain send to a human is informational only");
+    expect(help).not.toMatch(/first\)\. first\)\./u);
   });
 
   it("sends messages with metadata, stdin fallback, document context, and validation errors", async () => {
