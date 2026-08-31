@@ -4,7 +4,6 @@ import {
   type AgentRuntimeConfigPayload,
   encodeProviderRetryEventMessage,
   isLandingCampaignTrialAgentMetadata,
-  RUNTIME_NOTICE_METADATA_KEY,
   runtimeProviderSchema,
   type SessionEvent,
   type ToolFileRef,
@@ -1401,17 +1400,11 @@ export const createCodexAppServerHandler: HandlerFactory = (config: HandlerConfi
       );
       // Post the usage-limit notice as a deliberate, chat-visible runtime
       // message — an EXPLICIT send, not the retired final-text forward
-      // (`forwardResult` no longer delivers). It rides the `agent-final-text`
-      // purpose only for its delivery profile (recipientless, notify=false,
-      // bypasses the group @mention guard).
+      // (`forwardResult` no longer delivers). It goes through the dedicated
+      // runtime-notice endpoint, which owns the recipientless notify=false
+      // delivery profile and the server-side `runtimeNotice` marker.
       try {
-        await sessionCtx.sdk.sendMessage(sessionCtx.chatId, {
-          source: "api",
-          format: "text",
-          content: USAGE_LIMIT_NOTICE,
-          metadata: { [RUNTIME_NOTICE_METADATA_KEY]: true },
-          purpose: "agent-final-text",
-        });
+        await sessionCtx.sdk.postRuntimeNotice(sessionCtx.chatId, USAGE_LIMIT_NOTICE);
         consumedErrorReason = "usage_limit_notice_posted";
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

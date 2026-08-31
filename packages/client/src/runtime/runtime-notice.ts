@@ -1,7 +1,6 @@
 import {
   type ProviderRetryEventPayload,
   type ProviderRetryScope,
-  RUNTIME_NOTICE_METADATA_KEY,
   type RuntimeProvider,
   runtimeProviderLabel,
 } from "@first-tree/shared";
@@ -26,18 +25,21 @@ export function formatProviderFailureRuntimeNotice(payload: ProviderRetryEventPa
   return detail.length > 0 ? `${lead} Original provider message: ${detail}` : lead;
 }
 
+/**
+ * Publish the notice through the dedicated runtime-notice endpoint.
+ *
+ * Not `sendMessage` with a `runtimeNotice` metadata flag any more: that flag is
+ * what exempts the write from the Feishu-bridged chat boundary, and a request
+ * body is not a place to keep a capability — any agent credential could set the
+ * same fields. The server now owns the marker and the delivery profile, and
+ * grants the exemption to this route rather than to a shape of body.
+ */
 export async function postProviderFailureRuntimeNotice(
   sdk: FirstTreeHubSDK,
   chatId: string,
   payload: ProviderRetryEventPayload,
 ): Promise<void> {
-  await sdk.sendMessage(chatId, {
-    source: "api",
-    format: "text",
-    content: formatProviderFailureRuntimeNotice(payload),
-    metadata: { [RUNTIME_NOTICE_METADATA_KEY]: true },
-    purpose: "agent-final-text",
-  });
+  await sdk.postRuntimeNotice(chatId, formatProviderFailureRuntimeNotice(payload));
 }
 
 function actionLabel(scope: ProviderRetryScope): string {

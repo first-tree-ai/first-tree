@@ -1069,10 +1069,11 @@ describe("OpenCode V1 handler", () => {
     );
     const ackEntry = vi.fn<(entryId: number) => Promise<void>>(async () => {});
     const recoverChat = vi.fn<(chatId: string) => Promise<void>>(async () => {});
-    const sendMessage = vi.fn(async () => ({ id: "runtime-notice" }));
+    const postRuntimeNotice = vi.fn(async () => ({ id: "runtime-notice" }));
     const sdk = {
       serverUrl: "https://first-tree.test",
-      sendMessage,
+      sendMessage: vi.fn(async () => ({ id: "msg-reply" })),
+      postRuntimeNotice,
       getChatDetail: vi.fn(async () => ({
         id: "chat-sm-retry",
         title: "Retry chat",
@@ -1144,7 +1145,7 @@ describe("OpenCode V1 handler", () => {
     }
 
     expect(sleep.mock.calls.map(([delay]) => delay)).toEqual([5_000, 15_000]);
-    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(postRuntimeNotice).toHaveBeenCalledTimes(1);
     expect(ackEntry).toHaveBeenCalledWith(802);
     await manager.shutdown();
   });
@@ -1210,10 +1211,11 @@ describe("OpenCode V1 handler", () => {
     ]);
     const ackEntry = vi.fn<(entryId: number) => Promise<void>>(async () => {});
     const recoverChat = vi.fn<(chatId: string) => Promise<void>>(async () => {});
-    const sendMessage = vi.fn(async () => ({ id: "runtime-notice" }));
+    const postRuntimeNotice = vi.fn(async () => ({ id: "runtime-notice" }));
     const sdk = {
       serverUrl: "https://first-tree.test",
-      sendMessage,
+      sendMessage: vi.fn(async () => ({ id: "msg-reply" })),
+      postRuntimeNotice,
       getChatDetail: vi.fn(async (chatId: string) => ({
         id: chatId,
         title: "Retry preemption chat",
@@ -1280,7 +1282,7 @@ describe("OpenCode V1 handler", () => {
     await vi.waitFor(() => expect(ackEntry).toHaveBeenCalledWith(811));
 
     expect(sleep.mock.calls.map(([delay]) => delay)).toEqual([5_000, 15_000]);
-    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(postRuntimeNotice).toHaveBeenCalledTimes(1);
     await manager.shutdown();
   });
 
@@ -1332,13 +1334,14 @@ describe("OpenCode V1 handler", () => {
     const supervisor = createProtocolSupervisor([], [`${credentialOutput}\n`, `${successfulTurn()}\n`], inputs);
     const ackEntry = vi.fn<(entryId: number) => Promise<void>>(async () => {});
     const recoverChat = vi.fn<(chatId: string) => Promise<void>>(async () => {});
-    const sendMessage = vi
+    const postRuntimeNotice = vi
       .fn()
       .mockRejectedValueOnce(new Error("runtime notice write failed"))
       .mockResolvedValue({ id: "runtime-notice" });
     const sdk = {
       serverUrl: "https://first-tree.test",
-      sendMessage,
+      sendMessage: vi.fn(async () => ({ id: "msg-reply" })),
+      postRuntimeNotice,
       getChatDetail: vi.fn(async () => ({
         id: "chat-sm-notice",
         title: "Notice chat",
@@ -1394,8 +1397,8 @@ describe("OpenCode V1 handler", () => {
     await manager.dispatch(entry);
     await vi.waitFor(() => expect(ackEntry).toHaveBeenCalledWith(802));
 
-    expect(sendMessage).toHaveBeenCalledTimes(2);
-    expect(sendMessage.mock.invocationCallOrder[1] as number).toBeLessThan(
+    expect(postRuntimeNotice).toHaveBeenCalledTimes(2);
+    expect(postRuntimeNotice.mock.invocationCallOrder[1] as number).toBeLessThan(
       ackEntry.mock.invocationCallOrder[0] as number,
     );
     expect(inputs).toHaveLength(1);

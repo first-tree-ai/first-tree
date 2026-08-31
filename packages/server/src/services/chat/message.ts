@@ -101,6 +101,12 @@ function stripUntrustedMetadataKeys(
   const shouldStripFirstChatOrientation =
     !options.allowFirstChatOrientation && FIRST_CHAT_ORIENTATION_METADATA_KEY in meta;
   const shouldStripFeishu = !options.allowFeishuMetadata && "feishu" in meta;
+  // Always stripped, never allow-listed: the runtime-notice marker is re-stamped
+  // below from `options.runtimeNotice`, which only the dedicated runtime-notice
+  // route can set. The key grants an exemption from the Feishu-bridged chat
+  // write boundary, so accepting it from a request body would let any agent
+  // credential mint that exemption for itself.
+  const shouldStripRuntimeNotice = RUNTIME_NOTICE_METADATA_KEY in meta;
   if (
     !shouldStripSystemSender &&
     !shouldStripAddressedAgentIds &&
@@ -109,7 +115,8 @@ function stripUntrustedMetadataKeys(
     !shouldStripEditedAt &&
     !shouldStripFirstChatOrientationContinuation &&
     !shouldStripFirstChatOrientation &&
-    !shouldStripFeishu
+    !shouldStripFeishu &&
+    !shouldStripRuntimeNotice
   ) {
     return meta;
   }
@@ -121,6 +128,7 @@ function stripUntrustedMetadataKeys(
         key !== CLI_BODY_ORIGIN_METADATA_KEY &&
         key !== "editedAt" &&
         key !== FIRST_CHAT_ORIENTATION_CONTINUATION_METADATA_KEY &&
+        key !== RUNTIME_NOTICE_METADATA_KEY &&
         (options.allowFeishuMetadata || key !== "feishu") &&
         (options.allowFirstChatOrientation || key !== FIRST_CHAT_ORIENTATION_METADATA_KEY) &&
         (options.allowSystemSender || key !== "systemSender"),
@@ -441,6 +449,17 @@ export type SendMessageOptions = {
   };
   /** Allow the trusted integration/CLI bridge to persist server-authored `metadata.feishu`. */
   allowFeishuMetadata?: boolean;
+  /**
+   * Trusted runtime-notice write, set only by
+   * `POST /agent/chats/:chatId/runtime-notices`. The service stamps
+   * `metadata.runtimeNotice` itself; ordinary sends cannot mint the marker
+   * because `stripUntrustedMetadataKeys` always removes an inbound copy.
+   *
+   * The marker is what exempts a message from the Feishu-bridged chat write
+   * boundary, so it is a capability, not a label — which is exactly why it is
+   * a trusted option rather than a request field.
+   */
+  runtimeNotice?: boolean;
   /**
    * Trusted internal delivery mode that persists an explicitly addressed
    * message as replayable context without waking any recipient. The ordinary
@@ -849,21 +868,27 @@ export function preflightMessageSendIntent(input: {
   // The flag is SERVER-OWNED:
   //   1. strip any inbound client-supplied value, then
   //   2. set it true ONLY for a genuine mirror — a NON-HUMAN sender with the
-  //      final-text purpose, excluding `metadata.runtimeNotice=true`.
+  //      final-text purpose, excluding a runtime notice.
   // `purpose` rides the shared send schema, so a human/web send can carry it
   // (and gets the silent enforcement profile above) — but it must never be
   // persisted as a mirror, matching the unread-projection's
   // `senderRow.type !== "human"` gate. The staging-only "hide agent final
   // text" toggle filters on this flag.
-  const isRuntimeNotice = metadataToStore[RUNTIME_NOTICE_METADATA_KEY] === true;
+  // Server-owned too — `stripUntrustedMetadataKeys` has already removed any
+  // inbound copy, so the only way this is true is the dedicated runtime-notice
+  // route asking for it.
+  const isRuntimeNotice = options.runtimeNotice === true;
   const isAgentFinalTextMirror = isAgentFinalText && senderType !== "human" && !isRuntimeNotice;
   const metadataSansFlag =
     AGENT_FINAL_TEXT_METADATA_KEY in metadataToStore
       ? Object.fromEntries(Object.entries(metadataToStore).filter(([key]) => key !== AGENT_FINAL_TEXT_METADATA_KEY))
       : metadataToStore;
-  const storedMetadata = isAgentFinalTextMirror
+  const metadataWithFinalTextFlag = isAgentFinalTextMirror
     ? { ...metadataSansFlag, [AGENT_FINAL_TEXT_METADATA_KEY]: true }
     : metadataSansFlag;
+  const storedMetadata = isRuntimeNotice
+    ? { ...metadataWithFinalTextFlag, [RUNTIME_NOTICE_METADATA_KEY]: true }
+    : metadataWithFinalTextFlag;
 
   return {
     content: outboundContent,

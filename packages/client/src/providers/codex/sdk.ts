@@ -5,7 +5,6 @@ import {
   deriveRepoLocalPath,
   encodeProviderRetryEventMessage,
   isLandingCampaignTrialAgentMetadata,
-  RUNTIME_NOTICE_METADATA_KEY,
   runtimeProviderSchema,
   type SessionEvent,
   type ToolFileRef,
@@ -1129,16 +1128,11 @@ export const createCodexSdkHandler: HandlerFactory = (config) => {
       // sees WHY their message got no reply, rather than digging through codex
       // rollout files. This is a deliberate, EXPLICIT send — NOT the retired
       // final-text forward (`forwardResult` no longer delivers anything). It
-      // rides the `agent-final-text` purpose only for its delivery profile
-      // (recipientless, notify=false, bypasses the group @mention guard).
+      // goes through the dedicated runtime-notice endpoint, which owns the
+      // recipientless notify=false delivery profile and the server-side
+      // `runtimeNotice` marker.
       try {
-        await sessionCtx.sdk.sendMessage(sessionCtx.chatId, {
-          source: "api",
-          format: "text",
-          content: USAGE_LIMIT_NOTICE,
-          metadata: { [RUNTIME_NOTICE_METADATA_KEY]: true },
-          purpose: "agent-final-text",
-        });
+        await sessionCtx.sdk.postRuntimeNotice(sessionCtx.chatId, USAGE_LIMIT_NOTICE);
         consumedErrorReason = "usage_limit_notice_posted";
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

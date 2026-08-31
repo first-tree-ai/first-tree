@@ -183,6 +183,7 @@ function mockSdk(): FirstTreeHubSDK {
     serverUrl: "https://first-tree.example.test",
     register: vi.fn(),
     sendMessage: vi.fn().mockResolvedValue({ id: "msg-reply" }),
+    postRuntimeNotice: vi.fn().mockResolvedValue({ id: "runtime-notice" }),
     sendToAgent: vi.fn().mockResolvedValue({ id: "msg-dm" }),
     listChatParticipants: vi.fn().mockResolvedValue([
       { agentId: "sender-1", role: "member", mode: "full", name: "alice", displayName: "Alice", type: "human" },
@@ -1881,7 +1882,7 @@ describe("SessionRuntime edge coverage", () => {
     let enteredToken: Parameters<AgentHandler["inject"]>[1] | undefined;
     let enteredMessage: SessionMessage | undefined;
     let injectCount = 0;
-    const sendMessage = vi.fn().mockResolvedValue({ id: "runtime-notice-inject-tail" });
+    const postRuntimeNotice = vi.fn().mockResolvedValue({ id: "runtime-notice-inject-tail" });
     const activeHandler = handler({
       start: vi.fn().mockImplementation(async (message, ctx) => {
         initialCtx = ctx;
@@ -1929,7 +1930,7 @@ describe("SessionRuntime edge coverage", () => {
     });
     const ackEntry = vi.fn<(entryId: number) => Promise<void>>().mockResolvedValue(undefined);
     const sdk = mockSdk();
-    vi.mocked(sdk.sendMessage).mockImplementation(sendMessage);
+    vi.mocked(sdk.postRuntimeNotice).mockImplementation(postRuntimeNotice);
     const sm = makeRuntime({
       handlers: [activeHandler],
       ackEntry,
@@ -1970,7 +1971,7 @@ describe("SessionRuntime edge coverage", () => {
       reason: "unsafe_replay",
     });
     expect(disposition).toBe("settled");
-    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(postRuntimeNotice).toHaveBeenCalledTimes(1);
     expect(ackEntry.mock.calls.filter((call) => call[0] === 2)).toHaveLength(1);
 
     await sm.handleCommand(chatId, "session:suspend");
@@ -2163,7 +2164,7 @@ describe("SessionRuntime edge coverage", () => {
     });
     const ackEntry = vi.fn<(entryId: number) => Promise<void>>().mockResolvedValue(undefined);
     const recoverChat = vi.fn<(chatId: string) => Promise<void>>().mockResolvedValue(undefined);
-    const sendMessage = vi.fn().mockImplementation(async () => {
+    const postRuntimeNotice = vi.fn().mockImplementation(async () => {
       signalNoticeStarted?.();
       await noticeGate;
       return { id: "runtime-notice-message" };
@@ -2172,7 +2173,7 @@ describe("SessionRuntime edge coverage", () => {
       handlers: [routedHandler],
       ackEntry,
       recoverChat,
-      sdk: { ...mockSdk(), sendMessage } as unknown as FirstTreeHubSDK,
+      sdk: { ...mockSdk(), postRuntimeNotice } as unknown as FirstTreeHubSDK,
     });
     const i = internals(sm);
     const chatId = "chat-stale-notice-post";
@@ -3464,8 +3465,8 @@ describe("SessionRuntime edge coverage", () => {
     });
     const ackEntry = vi.fn<(entryId: number) => Promise<void>>().mockResolvedValue(undefined);
     const recoverChat = vi.fn<(chatId: string) => Promise<void>>().mockResolvedValue(undefined);
-    const sendMessage = vi.fn().mockResolvedValue({ id: "runtime-notice-after-timeout" });
-    const sdk = { ...mockSdk(), sendMessage } as unknown as FirstTreeHubSDK;
+    const postRuntimeNotice = vi.fn().mockResolvedValue({ id: "runtime-notice-after-timeout" });
+    const sdk = { ...mockSdk(), postRuntimeNotice } as unknown as FirstTreeHubSDK;
     const sm = makeRuntime({ handlers: [oldHandler], ackEntry, recoverChat, sdk });
     const i = internals(sm);
     const chatId = "chat-timeout-terminal-notice-debt";
@@ -3486,16 +3487,16 @@ describe("SessionRuntime edge coverage", () => {
     // the retained notice debt without re-entering the provider.
     await sm.dispatch(headEntry);
     expect(recoverChat).toHaveBeenCalledTimes(1);
-    expect(sendMessage).not.toHaveBeenCalled();
+    expect(postRuntimeNotice).not.toHaveBeenCalled();
     expect(ackEntry).not.toHaveBeenCalled();
 
     await sm.dispatch(headEntry);
     await vi.waitFor(() => expect(ackEntry).toHaveBeenCalledTimes(1));
 
-    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(postRuntimeNotice).toHaveBeenCalledTimes(1);
     expect(ackEntry).toHaveBeenCalledWith(9110);
     expect(oldHandler.start).toHaveBeenCalledTimes(1);
-    const noticeOrder = sendMessage.mock.invocationCallOrder[0];
+    const noticeOrder = postRuntimeNotice.mock.invocationCallOrder[0];
     const ackOrder = ackEntry.mock.invocationCallOrder[0];
     if (noticeOrder === undefined || ackOrder === undefined) throw new Error("expected notice and ACK order");
     expect(noticeOrder).toBeLessThan(ackOrder);
@@ -7402,8 +7403,8 @@ describe("SessionRuntime edge coverage", () => {
   it("retries consumed error completions when runtime notice delivery and failure-event emit both fail", async () => {
     const ackEntry = vi.fn<(entryId: number) => Promise<void>>().mockResolvedValue(undefined);
     const recoverChat = vi.fn<(chatId: string) => Promise<void>>().mockResolvedValue(undefined);
-    const sendMessage = vi.fn().mockRejectedValue(new Error("notice store offline"));
-    const sdk = { ...mockSdk(), sendMessage } as unknown as FirstTreeHubSDK;
+    const postRuntimeNotice = vi.fn().mockRejectedValue(new Error("notice store offline"));
+    const sdk = { ...mockSdk(), postRuntimeNotice } as unknown as FirstTreeHubSDK;
     let capturedToken: Parameters<AgentHandler["start"]>[2] | undefined;
     let capturedMessage: SessionMessage | undefined;
     const started = handler({
@@ -7444,7 +7445,7 @@ describe("SessionRuntime edge coverage", () => {
       reason: "provider_failed",
     });
 
-    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(postRuntimeNotice).toHaveBeenCalledTimes(1);
     expect(ackEntry).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(recoverChat).toHaveBeenCalledWith("chat-notice-emit-fail"));
     await sm.shutdown();

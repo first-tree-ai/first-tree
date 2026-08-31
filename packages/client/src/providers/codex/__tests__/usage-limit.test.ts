@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { RUNTIME_NOTICE_METADATA_KEY, type SessionEvent } from "@first-tree/shared";
+import type { SessionEvent } from "@first-tree/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mockCtxPlumbing } from "../../../__tests__/test-helpers.js";
 import type { ChatContext } from "../../../runtime/chat-context.js";
@@ -144,6 +144,7 @@ const trialAgentMetadata = {
 };
 
 type SendMessageMock = ReturnType<typeof vi.fn<(chatId: string, body: Record<string, unknown>) => Promise<unknown>>>;
+type RuntimeNoticeMock = ReturnType<typeof vi.fn<(chatId: string, content: string) => Promise<unknown>>>;
 
 function makeMessage(id: string, content: string, inboxEntryId?: number): SessionMessage {
   return {
@@ -161,6 +162,7 @@ function makeContext(
   onFinishTurn: (count?: number, outcome?: { status: "success" | "error"; reason?: string }) => void,
   opts: {
     sendMessage?: SendMessageMock;
+    postRuntimeNotice?: RuntimeNoticeMock;
     emitEvent?: SessionContext["emitEvent"];
     emitEventConfirmed?: SessionContext["emitEventConfirmed"];
     failSessionForRecovery?: SessionContext["failSessionForRecovery"];
@@ -172,6 +174,8 @@ function makeContext(
   const sendMessage =
     opts.sendMessage ??
     vi.fn<(chatId: string, body: Record<string, unknown>) => Promise<unknown>>().mockResolvedValue(undefined);
+  const postRuntimeNotice =
+    opts.postRuntimeNotice ?? vi.fn<(chatId: string, content: string) => Promise<unknown>>().mockResolvedValue({});
   return {
     agent: {
       agentId: AGENT_ID,
@@ -182,7 +186,7 @@ function makeContext(
       delegateMention: null,
       metadata: opts.agentMetadata ?? {},
     },
-    sdk: { serverUrl: "http://test", sendMessage } as unknown as SessionContext["sdk"],
+    sdk: { serverUrl: "http://test", sendMessage, postRuntimeNotice } as unknown as SessionContext["sdk"],
     chatId: "chat-usage-limit",
     log: opts.log ?? (() => {}),
     recordProviderActivity: () => {},
@@ -192,8 +196,8 @@ function makeContext(
     ...mockCtxPlumbing({ sendMessage }, "chat-usage-limit"),
     // Production-faithful: the final-text forward is retired, so it delivers
     // nothing. (mockCtxPlumbing's stub would proxy to sendMessage and mask
-    // that — the usage-limit notice is delivered by an EXPLICIT sdk.sendMessage
-    // in the handler, NOT through this path.)
+    // that — the usage-limit notice is delivered by an EXPLICIT
+    // sdk.postRuntimeNotice in the handler, NOT through this path.)
     forwardResult: async () => {},
     retryTurn: opts.retryTurn ?? (() => {}),
     finishTurn: async (messages, outcome) => {
@@ -225,6 +229,7 @@ describe("codex usage-limit empty-turn (issue #971)", () => {
     const sendMessage = vi
       .fn<(chatId: string, body: Record<string, unknown>) => Promise<unknown>>()
       .mockResolvedValue(undefined);
+    const postRuntimeNotice = vi.fn<(chatId: string, content: string) => Promise<unknown>>().mockResolvedValue({});
     const emitEvent = vi.fn<(event: SessionEvent) => void>();
     const handler = createCodexHandler({
       runtimeProvider: "codex",
@@ -233,6 +238,7 @@ describe("codex usage-limit empty-turn (issue #971)", () => {
     });
     const ctx = makeContext((count) => completedCounts.push(count), {
       sendMessage,
+      postRuntimeNotice,
       emitEvent,
       log: (message) => logs.push(message),
     });
@@ -241,13 +247,14 @@ describe("codex usage-limit empty-turn (issue #971)", () => {
 
     const events = emitEvent.mock.calls.map(([event]) => event);
 
-    // Layer 1-A: a chat-visible notice is posted by an EXPLICIT sdk.sendMessage
-    // (NOT the retired final-text forward), carrying the agent-final-text
-    // delivery profile so it lands recipientless without waking anyone.
-    expect(sendMessage).toHaveBeenCalledTimes(1);
-    expect(String(sendMessage.mock.calls[0]?.[1].content)).toContain("usage limit");
-    expect(sendMessage.mock.calls[0]?.[1].purpose).toBe("agent-final-text");
-    expect(sendMessage.mock.calls[0]?.[1].metadata).toMatchObject({ [RUNTIME_NOTICE_METADATA_KEY]: true });
+    // Layer 1-A: a chat-visible notice is posted by an EXPLICIT
+    // sdk.postRuntimeNotice (NOT the retired final-text forward, and NOT a
+    // decorated sendMessage). The dedicated endpoint authors the delivery
+    // profile server-side so it lands recipientless without waking anyone.
+    expect(postRuntimeNotice).toHaveBeenCalledTimes(1);
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(postRuntimeNotice.mock.calls[0]?.[0]).toBe("chat-usage-limit");
+    expect(String(postRuntimeNotice.mock.calls[0]?.[1])).toContain("usage limit");
 
     // Layer 2: an `error` event is emitted (daemon log + admin stream), and a
     // warn-style log line is recorded — not a phantom success.
@@ -287,6 +294,7 @@ describe("codex usage-limit empty-turn (issue #971)", () => {
     const sendMessage = vi
       .fn<(chatId: string, body: Record<string, unknown>) => Promise<unknown>>()
       .mockResolvedValue(undefined);
+    const postRuntimeNotice = vi.fn<(chatId: string, content: string) => Promise<unknown>>().mockResolvedValue({});
     const emitEvent = vi.fn<(event: SessionEvent) => void>();
     const handler = createCodexHandler({
       runtimeProvider: "codex",
@@ -295,6 +303,7 @@ describe("codex usage-limit empty-turn (issue #971)", () => {
     });
     const ctx = makeContext((count) => completedCounts.push(count), {
       sendMessage,
+      postRuntimeNotice,
       emitEvent,
       log: (message) => logs.push(message),
     });
@@ -304,6 +313,7 @@ describe("codex usage-limit empty-turn (issue #971)", () => {
     const events = emitEvent.mock.calls.map(([event]) => event);
 
     // No notice, no usage-limit error/log — a chosen silence is left alone.
+    expect(postRuntimeNotice).not.toHaveBeenCalled();
     expect(sendMessage).not.toHaveBeenCalled();
     expect(
       events.some((event) => event.kind === "error" && event.payload.message.includes("codex usage limit reached")),

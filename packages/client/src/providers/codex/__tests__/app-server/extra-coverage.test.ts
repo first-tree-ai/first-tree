@@ -295,6 +295,7 @@ function makeContext(
   const sendMessage = vi
     .fn<(chatId: string, body: Record<string, unknown>) => Promise<unknown>>()
     .mockResolvedValue(undefined);
+  const postRuntimeNotice = vi.fn<(chatId: string, content: string) => Promise<unknown>>().mockResolvedValue({});
   const createAgentOutboxToken = vi
     .fn<(chatId: string) => Promise<{ accessToken: string; expiresIn: number }>>()
     .mockResolvedValue({ accessToken: "scoped-outbox-token", expiresIn: 900 });
@@ -312,6 +313,7 @@ function makeContext(
     sdk: {
       serverUrl: "http://test",
       sendMessage,
+      postRuntimeNotice,
       createAgentOutboxToken,
       getAgentContextTreeConfig: async () =>
         opts.contextTreeRepoUrl
@@ -1018,8 +1020,8 @@ describe("codex app-server handler extra branches", () => {
     const successHandler = makeHandler(successFake);
     const successLog = vi.fn<(message: string) => void>();
     const successCtx = makeContext({ log: successLog });
-    const successSendMessage = vi.fn<SessionContext["sdk"]["sendMessage"]>().mockResolvedValue(sentMessageResponse());
-    successCtx.sdk.sendMessage = successSendMessage;
+    const successNotice = vi.fn<SessionContext["sdk"]["postRuntimeNotice"]>().mockResolvedValue(sentMessageResponse());
+    successCtx.sdk.postRuntimeNotice = successNotice;
 
     const successStart = successHandler.start(makeMessage("m1", "first"), successCtx, successToken);
     await waitFor(() => successFake.requests.some((request) => request.method === "turn/start"), "usage turn/start");
@@ -1034,15 +1036,9 @@ describe("codex app-server handler extra branches", () => {
     });
     await successStart;
 
-    expect(successSendMessage).toHaveBeenCalledWith(
-      "chat-app-server-extra",
-      expect.objectContaining({
-        source: "api",
-        format: "text",
-        purpose: "agent-final-text",
-        metadata: { runtimeNotice: true },
-      }),
-    );
+    // The notice takes the dedicated runtime-notice route, which authors the
+    // delivery profile and the stored marker server-side.
+    expect(successNotice).toHaveBeenCalledWith("chat-app-server-extra", expect.stringContaining("usage limit"));
     expect(successToken.complete).toHaveBeenCalledWith([makeMessage("m1", "first")], {
       status: "error",
       terminal: true,
@@ -1062,7 +1058,7 @@ describe("codex app-server handler extra branches", () => {
     const failureToken = makeDeliveryToken();
     const failureHandler = makeHandler(failureFake);
     const failureCtx = makeContext();
-    failureCtx.sdk.sendMessage = vi.fn<SessionContext["sdk"]["sendMessage"]>(async () => {
+    failureCtx.sdk.postRuntimeNotice = vi.fn<SessionContext["sdk"]["postRuntimeNotice"]>(async () => {
       throw new Error("chat write failed");
     });
 
