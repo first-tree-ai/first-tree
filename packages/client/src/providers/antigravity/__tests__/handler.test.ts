@@ -196,10 +196,16 @@ function createControlledSupervisor(
   specs: ProviderProcessSpec[],
   inputs: string[],
   outputLines: readonly string[],
+  outputLinesByTurn: readonly (readonly string[])[] = [],
+  closeAfterTurn: readonly boolean[] = [],
 ): ProviderProcessSupervisor {
+  let turn = 0;
   return {
     spawn(spec) {
       specs.push(spec);
+      const currentOutputLines = outputLinesByTurn[turn] ?? outputLines;
+      const shouldCloseAfterOutput = closeAfterTurn[turn] ?? false;
+      turn += 1;
       const stdin = new PassThrough();
       const stdout = new PassThrough();
       const stderr = new PassThrough();
@@ -210,6 +216,13 @@ function createControlledSupervisor(
         stdout.end();
         stderr.end();
         queueMicrotask(() => child.emit("close", null, "SIGTERM"));
+      };
+      const complete = (): void => {
+        if (closed) return;
+        closed = true;
+        stdout.end();
+        stderr.end();
+        queueMicrotask(() => child.emit("close", 0, null));
       };
       const child = Object.assign(new EventEmitter(), {
         pid: undefined,
@@ -227,7 +240,8 @@ function createControlledSupervisor(
         return Reflect.apply(write, stdin, [chunk, ...args]);
       }) as typeof stdin.write;
       setImmediate(() => {
-        for (const line of outputLines) stdout.write(`${line}\n`);
+        for (const line of currentOutputLines) stdout.write(`${line}\n`);
+        if (shouldCloseAfterOutput) complete();
       });
       return { child, exited: new Promise<void>((resolve) => child.once("close", () => resolve())) };
     },
@@ -473,6 +487,86 @@ process.stdin.on("end", () => {
       expect.anything(),
       expect.objectContaining({ status: "error", completion: "consumed", reason: "unsafe_replay" }),
     );
+    await handler.shutdown();
+  });
+
+  it.each([
+    "suspend",
+    "shutdown",
+  ] as const)("preserves the exact conversation and consumes a mutating first turn on lifecycle %s", async (lifecycle) => {
+    const root = mkdtempSync(join(tmpdir(), `ft-antigravity-lifecycle-${lifecycle}-`));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const lifecycleOutput = [
+      JSON.stringify({ event: "init", conversation_id: "conversation-lifecycle" }),
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "conversation-lifecycle",
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "run_command",
+          tool_call_id: "call-lifecycle",
+          tool_info: { parameters: { command: "touch side-effect-marker" } },
+        },
+      }),
+    ];
+    const recoveredOutput = [
+      JSON.stringify({ event: "init", conversation_id: "conversation-lifecycle" }),
+      JSON.stringify({
+        event: "result",
+        result: { conversation_id: "conversation-lifecycle", status: "SUCCESS", response: "recovered" },
+      }),
+    ];
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(
+        specs,
+        inputs,
+        lifecycleOutput,
+        [lifecycleOutput, recoveredOutput],
+        [false, true],
+      ),
+      antigravityTurnTimeoutMs: 5_000,
+    });
+    const token = deliveryToken();
+    const startPromise = handler.start(message("m-lifecycle", "mutate this"), sessionCtx, token);
+
+    await vi.waitFor(() => expect(specs).toHaveLength(1), { timeout: 3_000 });
+    await vi.waitFor(() =>
+      expect(events.some((event) => (event as { kind?: string }).kind === "tool_call")).toBe(true),
+    );
+    if (lifecycle === "suspend") await handler.suspend("test lifecycle suspend");
+    else await handler.shutdown("test lifecycle shutdown");
+
+    const started = await startPromise;
+    expect(started.sessionId).toBe("conversation-lifecycle");
+    expect(token.retry).not.toHaveBeenCalled();
+    expect(token.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "error", completion: "consumed", reason: "unsafe_replay" }),
+    );
+
+    const recoveryToken = deliveryToken();
+    const resumed = await handler.resume(
+      message("m-recovery", "recover without replay"),
+      started.sessionId,
+      sessionCtx,
+      recoveryToken,
+    );
+    expect(resumed.sessionId).toBe("conversation-lifecycle");
+    expect(specs).toHaveLength(2);
+    expect(specs[1]?.args).toEqual(expect.arrayContaining(["--conversation", "conversation-lifecycle"]));
+    expect(recoveryToken.complete).toHaveBeenCalledWith(expect.anything(), { status: "success" });
+    expect(forwarded).toEqual(["recovered"]);
     await handler.shutdown();
   });
 

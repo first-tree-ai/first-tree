@@ -231,6 +231,10 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
   let binary: string | null = null;
   let providerSessionId: string | null = null;
   let pendingSyntheticId: string | null = null;
+  // A lifecycle fence can finish an in-flight first turn after shutdown has
+  // cleared the live handler state. Keep an exact provider ID just long
+  // enough for start()/resume() to return it to SessionRuntime.
+  let pendingLifecycleSessionId: string | null = null;
   let sessionActive = false;
   let initialTurnPreparing = false;
   let currentAbort: AbortController | null = null;
@@ -736,6 +740,28 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
         }
 
         if (generation !== turnGeneration || !sessionActive) {
+          const lifecycleObservedId = adoptObservedSessionId(
+            sessionCtx,
+            state.sessionIds,
+            expectedSessionId,
+            state.usage,
+          );
+          if (lifecycleObservedId) pendingLifecycleSessionId = lifecycleObservedId;
+          if (state.sawUnsafeTool) {
+            const lifecycleError = new Error(
+              "Antigravity turn cancelled during a lifecycle transition after a mutating tool",
+            );
+            lifecycleError.name = "AbortError";
+            return settleFailure({
+              failure: lifecycleError.message,
+              spawnError: lifecycleError,
+              state,
+              sessionCtx,
+              messages,
+              token,
+              turnGeneration,
+            });
+          }
           token.retry(messages, "antigravity_turn_aborted_or_timed_out");
           return false;
         }
@@ -1029,6 +1055,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
 
   return {
     async start(message, sessionCtx, token) {
+      pendingLifecycleSessionId = null;
       initialTurnPreparing = true;
       let delivered = false;
       let briefing: string;
@@ -1040,14 +1067,18 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
         initialTurnPreparing = false;
         if (delivered) scheduleDrain();
       }
-      if (!providerSessionId) pendingSyntheticId = `${ANTIGRAVITY_PENDING_SESSION_PREFIX}${randomUUID()}`;
-      const sessionId = providerSessionId ?? pendingSyntheticId;
+      if (!providerSessionId && !pendingLifecycleSessionId) {
+        pendingSyntheticId = `${ANTIGRAVITY_PENDING_SESSION_PREFIX}${randomUUID()}`;
+      }
+      const sessionId = providerSessionId ?? pendingLifecycleSessionId ?? pendingSyntheticId;
       if (!sessionId) throw new Error("Antigravity conversation ID unresolved");
+      pendingLifecycleSessionId = null;
       if (delivered) writeSessionBriefingFingerprint(workspaceCwd, sessionId, computeBriefingFingerprint(briefing));
       return { sessionId, route: { kind: "owned", mode: "processing" } };
     },
 
     async resume(message, sessionId, sessionCtx, token) {
+      pendingLifecycleSessionId = null;
       const deliveryToken = message ? requireDeliveryToken(token, "messageful resume") : noopDeliveryToken();
       initialTurnPreparing = true;
       let briefing: string;
