@@ -236,6 +236,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
   // cleared the live handler state. Keep an exact provider ID just long
   // enough for start()/resume() to return it to SessionRuntime.
   let pendingLifecycleSessionId: string | null = null;
+  let pendingLifecycleRecovery: { sessionId: string; continuation?: "unsafe_turn" } | null = null;
   let sessionActive = false;
   // Lifecycle calls may overlap. Once an operator/full-drain caller grants
   // settlement for the current turn, a plain teardown must not revoke it.
@@ -671,6 +672,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
     sessionCtx: SessionContext,
     messages: readonly SessionMessage[],
     token: DeliveryToken,
+    requiresUnsafeContinuation = false,
   ): Promise<boolean> {
     const workspaceCwd = cwd;
     const activeBinary = binary;
@@ -750,7 +752,15 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
             expectedSessionId,
             state.usage,
           );
-          if (lifecycleObservedId) pendingLifecycleSessionId = lifecycleObservedId;
+          if (lifecycleObservedId) {
+            pendingLifecycleSessionId = lifecycleObservedId;
+            pendingLifecycleRecovery = {
+              sessionId: lifecycleObservedId,
+              ...((state.sawUnsafeTool || requiresUnsafeContinuation) && !settleProviderEntered
+                ? { continuation: "unsafe_turn" as const }
+                : {}),
+            };
+          }
           if (drainingBatch?.some((entry) => entry.token === token)) drainingBatch = null;
           if (state.sawUnsafeTool && settleProviderEntered) {
             const lifecycleError = new Error(
@@ -1062,6 +1072,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
   return {
     async start(message, sessionCtx, token) {
       pendingLifecycleSessionId = null;
+      pendingLifecycleRecovery = null;
       initialTurnPreparing = true;
       let delivered = false;
       let briefing: string;
@@ -1078,13 +1089,20 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
       }
       const sessionId = providerSessionId ?? pendingLifecycleSessionId ?? pendingSyntheticId;
       if (!sessionId) throw new Error("Antigravity conversation ID unresolved");
+      const recovery = pendingLifecycleRecovery;
       pendingLifecycleSessionId = null;
+      pendingLifecycleRecovery = null;
       if (delivered) writeSessionBriefingFingerprint(workspaceCwd, sessionId, computeBriefingFingerprint(briefing));
-      return { sessionId, route: { kind: "owned", mode: "processing" } };
+      return {
+        sessionId,
+        route: { kind: "owned", mode: "processing" },
+        ...(recovery ? { recovery } : {}),
+      };
     },
 
     async resume(message, sessionId, sessionCtx, token) {
       pendingLifecycleSessionId = null;
+      pendingLifecycleRecovery = null;
       const deliveryToken = message ? requireDeliveryToken(token, "messageful resume") : noopDeliveryToken();
       initialTurnPreparing = true;
       let briefing: string;
@@ -1104,12 +1122,13 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
       }
       if (message) {
         try {
-          let prompt = await sessionCtx.formatInboundContent(message);
+          const continuation = sessionCtx.providerRecoveryContinuation?.(message) ?? null;
+          let prompt = continuation ?? (await sessionCtx.formatInboundContent(message));
           const fingerprint = computeBriefingFingerprint(briefing);
           if (readSessionBriefingFingerprint(workspaceCwd, sessionId) !== fingerprint) {
             prompt = `${buildBriefingUpdateNotice(join(workspaceCwd, "AGENTS.md"))}\n\n${prompt}`;
           }
-          await runTurn(prompt, sessionCtx, [message], deliveryToken);
+          await runTurn(prompt, sessionCtx, [message], deliveryToken, continuation !== null);
         } finally {
           initialTurnPreparing = false;
           scheduleDrain();
@@ -1119,10 +1138,13 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
         scheduleDrain();
       }
       const resolvedSessionId = providerSessionId ?? pendingLifecycleSessionId ?? pendingSyntheticId ?? sessionId;
+      const recovery = pendingLifecycleRecovery;
       pendingLifecycleSessionId = null;
+      pendingLifecycleRecovery = null;
       return {
         sessionId: resolvedSessionId,
         route: message ? { kind: "owned", mode: "processing" } : null,
+        ...(recovery ? { recovery } : {}),
       };
     },
 

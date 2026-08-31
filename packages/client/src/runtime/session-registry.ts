@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { createLogger } from "../cloud/observability/logger.js";
+import type { ProviderRecoveryMarker } from "./handler.js";
 
 const REGISTRY_VERSION = 1;
 
@@ -9,6 +10,7 @@ type PersistedEntry = {
   claudeSessionId: string;
   lastActivity: string; // ISO 8601
   status: "active" | "suspended" | "evicted";
+  providerRecovery?: ProviderRecoveryMarker;
 };
 
 type RegistryData = {
@@ -24,7 +26,12 @@ type RegistryData = {
   freshStartNonces?: Record<string, string>;
 };
 
-export type RegistryEntry = { claudeSessionId: string; lastActivity: number; status: string };
+export type RegistryEntry = {
+  claudeSessionId: string;
+  lastActivity: number;
+  status: string;
+  providerRecovery?: ProviderRecoveryMarker;
+};
 
 export type RegistrySnapshot = {
   entries: Map<string, RegistryEntry>;
@@ -94,6 +101,11 @@ export class SessionRegistry {
           claudeSessionId: entry.claudeSessionId,
           lastActivity: new Date(entry.lastActivity).getTime(),
           status: entry.status,
+          ...(entry.providerRecovery?.continuation === "unsafe_turn" &&
+          typeof entry.providerRecovery.messageId === "string" &&
+          entry.providerRecovery.messageId.length > 0
+            ? { providerRecovery: { ...entry.providerRecovery } }
+            : {}),
         });
       }
       if (data.freshStartNonces && typeof data.freshStartNonces === "object") {
@@ -201,6 +213,7 @@ export class SessionRegistry {
         claudeSessionId: entry.claudeSessionId,
         lastActivity: new Date(entry.lastActivity).toISOString(),
         status: entry.status as PersistedEntry["status"],
+        ...(entry.providerRecovery ? { providerRecovery: { ...entry.providerRecovery } } : {}),
       };
     }
 

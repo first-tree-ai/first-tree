@@ -1,6 +1,6 @@
 import type { RuntimeState, SessionState } from "@first-tree/shared";
 import type { pino } from "../cloud/observability/logger.js";
-import type { SessionMessage } from "./handler.js";
+import type { ProviderRecoveryMarker, SessionMessage } from "./handler.js";
 import type { Trigger } from "./result-sink.js";
 import { SessionRegistry } from "./session-registry.js";
 
@@ -45,11 +45,20 @@ export type SessionProjectionSessionFields = {
   handlerSourceKey: string;
   status: SessionState;
   lastActivity: number;
+  providerRecovery: ProviderRecoveryMarker | null;
 };
 
 export type EvictedMappingSnapshot = {
   readonly claudeSessionId: string;
   readonly lastActivity: number;
+  readonly providerRecoveryMessageId: string | null;
+  readonly providerRecoveryContinuation: "unsafe_turn" | null;
+};
+
+type EvictedMappingRecord = {
+  readonly claudeSessionId: string;
+  readonly lastActivity: number;
+  readonly providerRecovery: ProviderRecoveryMarker | null;
 };
 
 export type SessionProjectionAuthorityDeps = {
@@ -91,7 +100,7 @@ export class SessionProjectionAuthority<
   TSession extends SessionProjectionSessionFields = SessionProjectionSessionFields,
 > {
   private readonly sessions = new Map<string, TSession>();
-  private readonly evictedMappings = new Map<string, { claudeSessionId: string; lastActivity: number }>();
+  private readonly evictedMappings = new Map<string, EvictedMappingSnapshot>();
   /**
    * Current trigger (messageId + senderId) per chat — the message that kicked
    * off the current or most-recent turn. The result-sink clears it at turn end.
@@ -167,7 +176,12 @@ export class SessionProjectionAuthority<
     if (!stored) return null;
     const sessionId = resumableProviderSessionId(stored.claudeSessionId);
     if (!sessionId) return null;
-    return Object.freeze({ claudeSessionId: sessionId, lastActivity: stored.lastActivity });
+    return Object.freeze({
+      claudeSessionId: sessionId,
+      lastActivity: stored.lastActivity,
+      providerRecoveryMessageId: stored.providerRecoveryMessageId,
+      providerRecoveryContinuation: stored.providerRecoveryContinuation,
+    });
   }
 
   /**
@@ -222,7 +236,7 @@ export class SessionProjectionAuthority<
    * Eviction resume mapping transition: record a frozen copy, or drop the
    * mapping when the victim has no resumable provider session.
    */
-  recordEvictionResume(chatId: string, mapping: EvictedMappingSnapshot | null): void {
+  recordEvictionResume(chatId: string, mapping: EvictedMappingRecord | null): void {
     if (mapping) this.addEvictedMapping(chatId, mapping);
     else this.evictedMappings.delete(chatId);
   }
@@ -280,6 +294,7 @@ export class SessionProjectionAuthority<
       this.addEvictedMapping(chatId, {
         claudeSessionId: resumableSessionId,
         lastActivity: data.lastActivity,
+        providerRecovery: data.providerRecovery ? { ...data.providerRecovery } : null,
       });
       loadedCount++;
     }
@@ -292,7 +307,15 @@ export class SessionProjectionAuthority<
   persistRegistry(opts: { immediate?: boolean; throwOnFailure?: boolean } = {}): void {
     if (!this.registry) return;
 
-    const entries = new Map<string, { claudeSessionId: string; lastActivity: number; status: string }>();
+    const entries = new Map<
+      string,
+      {
+        claudeSessionId: string;
+        lastActivity: number;
+        status: string;
+        providerRecovery?: ProviderRecoveryMarker;
+      }
+    >();
     for (const [chatId, session] of this.sessions) {
       const resumableSessionId = resumableProviderSessionId(
         session.claudeSessionId,
@@ -303,6 +326,7 @@ export class SessionProjectionAuthority<
         claudeSessionId: resumableSessionId,
         lastActivity: session.lastActivity,
         status: session.status,
+        ...(session.providerRecovery ? { providerRecovery: { ...session.providerRecovery } } : {}),
       });
     }
     // Include evicted mappings for crash recovery
@@ -313,6 +337,14 @@ export class SessionProjectionAuthority<
         claudeSessionId: resumableSessionId,
         lastActivity: mapping.lastActivity,
         status: "evicted",
+        ...(mapping.providerRecoveryMessageId && mapping.providerRecoveryContinuation === "unsafe_turn"
+          ? {
+              providerRecovery: {
+                messageId: mapping.providerRecoveryMessageId,
+                continuation: mapping.providerRecoveryContinuation,
+              },
+            }
+          : {}),
       });
     }
     // On shutdown we MUST write synchronously: the alternative is
@@ -342,13 +374,18 @@ export class SessionProjectionAuthority<
   }
 
   /** Add an evicted mapping, pruning the oldest if over capacity. */
-  private addEvictedMapping(chatId: string, mapping: { claudeSessionId: string; lastActivity: number }): void {
+  private addEvictedMapping(chatId: string, mapping: EvictedMappingRecord): void {
     const resumableSessionId = resumableProviderSessionId(mapping.claudeSessionId);
     if (!resumableSessionId) {
       this.evictedMappings.delete(chatId);
       return;
     }
-    this.evictedMappings.set(chatId, { ...mapping, claudeSessionId: resumableSessionId });
+    this.evictedMappings.set(chatId, {
+      ...mapping,
+      claudeSessionId: resumableSessionId,
+      providerRecoveryMessageId: mapping.providerRecovery?.messageId ?? null,
+      providerRecoveryContinuation: mapping.providerRecovery?.continuation ?? null,
+    });
     if (this.evictedMappings.size > MAX_EVICTED_MAPPINGS) {
       // Map iteration order is insertion order — first key is the oldest
       const oldest = this.evictedMappings.keys().next().value;

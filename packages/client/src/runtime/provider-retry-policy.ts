@@ -686,9 +686,35 @@ function configurationReason(text: string, base: Classification, provider: Runti
 
 function isCodexServiceTierConfiguration(text: string): boolean {
   return (
-    /configured service tier .* is not advertised as supported .* will be omitted from requests/.test(text) ||
-    /configured service tier .* was not activated by codex .* will not be used for requests/.test(text)
+    containsOrderedFragmentsOnOneLine(text, [
+      "configured service tier ",
+      " is not advertised as supported ",
+      " will be omitted from requests",
+    ]) ||
+    containsOrderedFragmentsOnOneLine(text, [
+      "configured service tier ",
+      " was not activated by codex ",
+      " will not be used for requests",
+    ])
   );
+}
+
+/** Match a fixed same-line sequence without backtracking over provider-controlled text. */
+function containsOrderedFragmentsOnOneLine(text: string, fragments: readonly string[]): boolean {
+  for (const line of text.split("\n")) {
+    let offset = 0;
+    let matched = true;
+    for (const fragment of fragments) {
+      const index = line.indexOf(fragment, offset);
+      if (index === -1) {
+        matched = false;
+        break;
+      }
+      offset = index + fragment.length;
+    }
+    if (matched) return true;
+  }
+  return false;
 }
 
 function isDeterministicInput(text: string, base: Classification): boolean {

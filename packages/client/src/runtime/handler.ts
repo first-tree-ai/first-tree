@@ -90,9 +90,39 @@ export type HandlerRouteReceipt =
   | { kind: "owned"; mode: "queued" | "processing" }
   | { kind: "rejected"; reason: string; retryable: true };
 
+/**
+ * Explicit provider-safe recovery returned from start/resume when a live route
+ * may already have been invalidated. SessionRuntime adopts `sessionId` into the
+ * durable eviction mapping and, when `continuation` is set, substitutes a
+ * continuation prompt for the original inbox text on the same recovered row.
+ */
+export type ProviderTurnRecovery = {
+  /** Exact provider conversation to resume. Never a pending/synthetic id. */
+  sessionId: string;
+  /**
+   * Recovering this original inbox row must continue the interrupted turn
+   * instead of sending the original user prompt again.
+   */
+  continuation?: "unsafe_turn";
+};
+
+/** Durable recovery metadata bound to the original inbox row. */
+export type ProviderRecoveryMarker = {
+  readonly messageId: string;
+  readonly continuation: "unsafe_turn";
+};
+
+/**
+ * Continuation prompt for an inbox row whose previous provider turn already
+ * produced a mutating tool effect. Must not contain the original user text.
+ */
+export const PROVIDER_UNSAFE_TURN_CONTINUATION =
+  "<system-reminder> The previous provider turn for this inbox row was interrupted after a mutating tool already ran. Continue from the existing conversation state. Do not repeat the original user request or redo completed tool work. </system-reminder>";
+
 export type StartReceipt = {
   sessionId: string;
   route: Extract<HandlerRouteReceipt, { kind: "owned" }>;
+  recovery?: ProviderTurnRecovery;
 };
 
 export type StartResult = StartReceipt;
@@ -100,6 +130,7 @@ export type StartResult = StartReceipt;
 export type ResumeReceipt = {
   sessionId: string;
   route: Extract<HandlerRouteReceipt, { kind: "owned" }> | null;
+  recovery?: ProviderTurnRecovery;
 };
 
 export type ResumeResult = ResumeReceipt;
@@ -237,6 +268,14 @@ export type SessionContext = HandlerContext & {
    * turn under a fresh provider thread.
    */
   replaceSessionId?: (sessionId: string, reason: string) => void;
+
+  /**
+   * When this inbound row is a server-faithful recovery of a turn that already
+   * entered the provider and produced a mutating tool, return a continuation
+   * prompt that must not contain the original user text. Returns null for
+   * ordinary deliveries so handlers keep formatInboundContent().
+   */
+  providerRecoveryContinuation?: (message: SessionMessage) => string | null;
 
   /**
    * Build env for CLI sub-processes that shell out to the First Tree CLI.

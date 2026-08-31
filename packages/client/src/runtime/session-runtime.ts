@@ -47,19 +47,22 @@ import {
 } from "./context-source.js";
 import type { SelfFence } from "./doc-snapshots.js";
 import { clampRetryAttempt } from "./error-taxonomy.js";
-import type {
-  AgentHandler,
-  AgentIdentity,
-  DeliveryCompletionDisposition,
-  DeliveryToken,
-  HandlerConfig,
-  HandlerFactory,
-  HandlerRouteReceipt,
-  ResumeResult,
-  SessionContext,
-  SessionMessage,
-  StartResult,
-  TurnOutcome,
+import {
+  type AgentHandler,
+  type AgentIdentity,
+  type DeliveryCompletionDisposition,
+  type DeliveryToken,
+  type HandlerConfig,
+  type HandlerFactory,
+  type HandlerRouteReceipt,
+  PROVIDER_UNSAFE_TURN_CONTINUATION,
+  type ProviderRecoveryMarker,
+  type ProviderTurnRecovery,
+  type ResumeResult,
+  type SessionContext,
+  type SessionMessage,
+  type StartResult,
+  type TurnOutcome,
 } from "./handler.js";
 import { findImagePath, writeImage } from "./image-store.js";
 import { type DeliveryRouteOwnership, InboxDeliveryCoordinator } from "./inbox-delivery-coordinator.js";
@@ -146,6 +149,8 @@ type SessionEntry = {
    * delivery on the same session.
    */
   pendingRuntimeFailureNotice: ProviderRetryEventPayload | null;
+  /** Durable same-row provider continuation, if recovery must not replay input. */
+  providerRecovery: ProviderRecoveryMarker | null;
 };
 
 type SessionFailureHandling =
@@ -450,6 +455,7 @@ function asTerminateError(kind: "suspend" | "teardown", error: unknown): Error {
 function normalizeStartReceipt(result: StartResult): {
   sessionId: string;
   route: Extract<HandlerRouteReceipt, { kind: "owned" }>;
+  recovery?: ProviderTurnRecovery;
 } {
   return result;
 }
@@ -457,6 +463,7 @@ function normalizeStartReceipt(result: StartResult): {
 function normalizeResumeReceipt(result: ResumeResult): {
   sessionId: string;
   route: Extract<HandlerRouteReceipt, { kind: "owned" }> | null;
+  recovery?: ProviderTurnRecovery;
 } {
   return result;
 }
@@ -600,6 +607,40 @@ export class SessionRuntime {
     if (markers.size === 0) this.fenceRecoveryAttempts.delete(chatId);
   }
 
+  private providerRecoveryContinuation(chatId: string, message: SessionMessage): string | null {
+    const marker = this.projection.getSession(chatId)?.providerRecovery;
+    return marker?.messageId === message.id && marker.continuation === "unsafe_turn"
+      ? PROVIDER_UNSAFE_TURN_CONTINUATION
+      : null;
+  }
+
+  /**
+   * Adopt an explicit provider recovery contract from a start/resume that
+   * returned after its route was already invalidated. Generic receipts without
+   * `recovery` stay unchanged (fresh start after a canceled producer).
+   */
+  private adoptStaleProviderRecovery(
+    chatId: string,
+    message: SessionMessage | null | undefined,
+    recovery: ProviderTurnRecovery | undefined,
+  ): void {
+    const resumeSessionId = resumableProviderSessionId(recovery?.sessionId);
+    if (!resumeSessionId) return;
+    this.projection.recordEvictionResume(chatId, {
+      claudeSessionId: resumeSessionId,
+      lastActivity: Date.now(),
+      providerRecovery:
+        recovery?.continuation === "unsafe_turn" && message
+          ? { messageId: message.id, continuation: "unsafe_turn" }
+          : null,
+    });
+    this.projection.persistRegistry();
+    this.config.log.info(
+      { chatId, sessionId: resumeSessionId, continuation: recovery?.continuation ?? null },
+      "adopted provider recovery mapping from stale route completion",
+    );
+  }
+
   constructor(config: SessionRuntimeConfig) {
     this.config = config;
     this.projection = new SessionProjectionAuthority<SessionEntry>(
@@ -725,6 +766,8 @@ export class SessionRuntime {
       runtimeProvider: () => this.runtimeProvider(),
       normalizeResumeReceipt,
       normalizeStartReceipt,
+      adoptStaleProviderRecovery: (chatId, message, recovery) =>
+        this.adoptStaleProviderRecovery(chatId, message, recovery),
       recordEvictionResume: (chatId, mapping) => this.projection.recordEvictionResume(chatId, mapping),
       getSessionRuntimeState: (chatId) => this.projection.getSessionRuntimeState(chatId),
       recomputeRuntimeState: () => this.projection.recomputeRuntimeState(),
@@ -1708,6 +1751,7 @@ export class SessionRuntime {
       this.projection.recordEvictionResume(chatId, {
         claudeSessionId: resumeSessionId,
         lastActivity: entry.lastActivity,
+        providerRecovery: entry.providerRecovery ? { ...entry.providerRecovery } : null,
       });
     }
     this.slotScheduler.releaseActiveSlot(entry);
@@ -1798,6 +1842,7 @@ export class SessionRuntime {
       this.projection.recordEvictionResume(chatId, {
         claudeSessionId: resumeSessionId,
         lastActivity: entry.lastActivity,
+        providerRecovery: entry.providerRecovery ? { ...entry.providerRecovery } : null,
       });
     }
     this.slotScheduler.releaseActiveSlot(entry);
@@ -1899,6 +1944,17 @@ export class SessionRuntime {
     // the ledger through a confirmed ACK; recovery debt, prefix gaps, and
     // ACK rejections keep custody and surface as "retry".
     const disposition = await this.inboxDelivery.finishTurn(chatId, messages, outcome);
+    if (disposition === "settled") {
+      const entry = this.projection.getSession(chatId);
+      const settledMessages = Array.isArray(messages) ? messages : [messages];
+      if (
+        entry?.providerRecovery &&
+        settledMessages.some((message) => message.id === entry.providerRecovery?.messageId)
+      ) {
+        entry.providerRecovery = null;
+        this.projection.persistRegistry();
+      }
+    }
     this.projection.projectSessionRuntime(chatId);
     return disposition;
   }
@@ -2274,11 +2330,29 @@ export class SessionRuntime {
       handlerStoppedBySuspend: null,
       teardownError: null,
       pendingRuntimeFailureNotice: null,
+      providerRecovery: null,
     };
 
     const evicted = this.projection.activateLiveSession(entry);
-    if (evicted) entry.claudeSessionId = evicted.claudeSessionId;
-    this.slotScheduler.attachLiveSession(entry, { resumeFromEvicted: evicted });
+    if (evicted) {
+      entry.claudeSessionId = evicted.claudeSessionId;
+      entry.providerRecovery =
+        evicted.providerRecoveryMessageId && evicted.providerRecoveryContinuation === "unsafe_turn"
+          ? {
+              messageId: evicted.providerRecoveryMessageId,
+              continuation: evicted.providerRecoveryContinuation,
+            }
+          : null;
+    }
+    this.slotScheduler.attachLiveSession(entry, {
+      resumeFromEvicted: evicted
+        ? {
+            claudeSessionId: evicted.claudeSessionId,
+            lastActivity: evicted.lastActivity,
+            providerRecovery: entry.providerRecovery ? { ...entry.providerRecovery } : null,
+          }
+        : null,
+    });
     this.routeTeardown.attachLiveSession(entry);
     this.slotScheduler.claimActiveSlot(entry);
     const transition = this.routeTeardown.beginRouteTransition(entry, handler, evicted ? "resume" : "start");
@@ -2304,9 +2378,12 @@ export class SessionRuntime {
       settleRouteProducer = this.routeTeardown.registerRouteProducer(chatId);
       this.projection.setCurrentTrigger(chatId, message);
       const token = this.createDeliveryToken(chatId, routeLeases);
+      let recovery: ProviderTurnRecovery | undefined;
       if (evicted) {
         const receipt = normalizeResumeReceipt(await handler.resume(message, evicted.claudeSessionId, ctx, token));
+        recovery = receipt.recovery;
         if (!this.routeTeardown.isCurrentRouteTransition(entry, transition)) {
+          this.adoptStaleProviderRecovery(chatId, message, recovery);
           this.routeTeardown.discardStaleRouteTransition(
             entry.chatId,
             transition,
@@ -2318,7 +2395,9 @@ export class SessionRuntime {
         this.config.log.info({ chatId, sessionId: entry.claudeSessionId }, "session resumed from eviction");
       } else {
         const receipt = normalizeStartReceipt(await handler.start(message, ctx, token));
+        recovery = receipt.recovery;
         if (!this.routeTeardown.isCurrentRouteTransition(entry, transition)) {
+          this.adoptStaleProviderRecovery(chatId, message, recovery);
           this.routeTeardown.discardStaleRouteTransition(entry.chatId, transition, "session_start_stale_completion");
           return;
         }
@@ -2330,6 +2409,7 @@ export class SessionRuntime {
         this.config.log.info({ chatId, sessionId: entry.claudeSessionId }, "session created");
       }
       if (!this.routeTeardown.completeRouteTransition(entry, transition)) {
+        this.adoptStaleProviderRecovery(chatId, message, recovery);
         this.routeTeardown.discardStaleRouteTransition(entry.chatId, transition, "session_start_stale_adoption");
         return;
       }
@@ -2550,13 +2630,15 @@ export class SessionRuntime {
       const resumeResult = token
         ? await routeHandler.resume(message ?? undefined, entry.claudeSessionId, ctx, token)
         : await routeHandler.resume(message ?? undefined, entry.claudeSessionId, ctx);
+      const receipt = normalizeResumeReceipt(resumeResult);
       if (!this.routeTeardown.isCurrentRouteTransition(entry, transition)) {
+        this.adoptStaleProviderRecovery(entry.chatId, message, receipt.recovery);
         this.routeTeardown.discardStaleRouteTransition(entry.chatId, transition, "session_resume_stale_completion");
         return;
       }
-      const receipt = normalizeResumeReceipt(resumeResult);
       if (!this.adoptResumeReceipt(entry, message, receipt, "session_resume_unowned_delivery")) return;
       if (!this.routeTeardown.completeRouteTransition(entry, transition)) {
+        this.adoptStaleProviderRecovery(entry.chatId, message, receipt.recovery);
         this.routeTeardown.discardStaleRouteTransition(entry.chatId, transition, "session_resume_stale_adoption");
         return;
       }
@@ -3324,6 +3406,7 @@ export class SessionRuntime {
         this.config.log.info({ chatId, previousSessionId, sessionId, reason }, "session id replaced by handler");
         this.projection.persistRegistry();
       },
+      providerRecoveryContinuation: (message) => this.providerRecoveryContinuation(chatId, message),
       buildAgentEnv: (parentEnv) => buildAgentEnv(parentEnv, envCtx),
       publishTeamSkillCommands: (commands, provenVersion) => {
         // `null` commands = unknown/unpublished: strict slash commands fail

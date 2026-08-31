@@ -6,6 +6,8 @@ import type {
   AgentHandler,
   DeliveryToken,
   HandlerRouteReceipt,
+  ProviderRecoveryMarker,
+  ProviderTurnRecovery,
   ResumeResult,
   SessionContext,
   SessionMessage,
@@ -32,6 +34,7 @@ export type PendingMessage = {
 export type EvictedResumeMapping = {
   readonly claudeSessionId: string;
   readonly lastActivity: number;
+  readonly providerRecovery: ProviderRecoveryMarker | null;
 };
 
 /**
@@ -45,6 +48,7 @@ export type SlotSchedulerSessionEntry = {
   handler: AgentHandler;
   status: SessionState;
   lastActivity: number;
+  providerRecovery: ProviderRecoveryMarker | null;
   suspending: Promise<void> | null;
   handlerStoppedBySuspend: AgentHandler | null;
 };
@@ -60,7 +64,7 @@ type SlotState = {
   lastRetryRawError: string | null;
   retryHeadMessage: SessionMessage | null;
   deferredMessages: SessionMessage[];
-  retryFromEvicted: { claudeSessionId: string; lastActivity: number } | null;
+  retryFromEvicted: EvictedResumeMapping | null;
 };
 
 function emptySlotState(resumeFromEvicted: EvictedResumeMapping | null): SlotState {
@@ -76,7 +80,11 @@ function emptySlotState(resumeFromEvicted: EvictedResumeMapping | null): SlotSta
     retryHeadMessage: null,
     deferredMessages: [],
     retryFromEvicted: resumeFromEvicted
-      ? { claudeSessionId: resumeFromEvicted.claudeSessionId, lastActivity: resumeFromEvicted.lastActivity }
+      ? {
+          claudeSessionId: resumeFromEvicted.claudeSessionId,
+          lastActivity: resumeFromEvicted.lastActivity,
+          providerRecovery: resumeFromEvicted.providerRecovery ? { ...resumeFromEvicted.providerRecovery } : null,
+        }
       : null,
   };
 }
@@ -172,11 +180,18 @@ export type SlotSchedulerAuthorityDeps = {
   normalizeResumeReceipt: (result: ResumeResult) => {
     sessionId: string;
     route: Extract<HandlerRouteReceipt, { kind: "owned" }> | null;
+    recovery?: ProviderTurnRecovery;
   };
   normalizeStartReceipt: (result: StartResult) => {
     sessionId: string;
     route: Extract<HandlerRouteReceipt, { kind: "owned" }>;
+    recovery?: ProviderTurnRecovery;
   };
+  adoptStaleProviderRecovery: (
+    chatId: string,
+    message: SessionMessage | null | undefined,
+    recovery: ProviderTurnRecovery | undefined,
+  ) => void;
   recordEvictionResume: (chatId: string, mapping: EvictedResumeMapping | null) => void;
   getSessionRuntimeState: (chatId: string) => RuntimeState | undefined;
   recomputeRuntimeState: () => void;
@@ -682,11 +697,15 @@ export class SlotSchedulerAuthority {
       settleRouteProducer = this.deps.routeTeardown.registerRouteProducer(chatId);
       if (retryHeadMessage) this.deps.setCurrentTrigger(chatId, retryHeadMessage);
       const token = retryHeadMessage ? this.deps.createDeliveryToken(chatId, routeLeases) : undefined;
+      let recovery: ProviderTurnRecovery | undefined;
       if (retryRoute.kind === "resume") {
         const resumeResult = token
           ? await newHandler.resume(retryHeadMessage ?? undefined, retryRoute.previousSessionId, ctx, token)
           : await newHandler.resume(undefined, retryRoute.previousSessionId, ctx);
+        const receipt = this.deps.normalizeResumeReceipt(resumeResult);
+        recovery = receipt.recovery;
         if (!this.deps.routeTeardown.isCurrentRouteTransition(entry, transition)) {
+          this.deps.adoptStaleProviderRecovery(chatId, retryHeadMessage, recovery);
           this.deps.routeTeardown.discardStaleRouteTransition(
             entry.chatId,
             transition,
@@ -694,7 +713,6 @@ export class SlotSchedulerAuthority {
           );
           return;
         }
-        const receipt = this.deps.normalizeResumeReceipt(resumeResult);
         if (!this.deps.adoptResumeReceipt(entry, retryHeadMessage, receipt, "session_retry_resume_unowned_delivery")) {
           return;
         }
@@ -702,7 +720,9 @@ export class SlotSchedulerAuthority {
         const receipt = this.deps.normalizeStartReceipt(
           await newHandler.start(retryRoute.message, ctx, this.deps.createDeliveryToken(chatId, routeLeases)),
         );
+        recovery = receipt.recovery;
         if (!this.deps.routeTeardown.isCurrentRouteTransition(entry, transition)) {
+          this.deps.adoptStaleProviderRecovery(chatId, retryRoute.message, recovery);
           this.deps.routeTeardown.discardStaleRouteTransition(
             entry.chatId,
             transition,
@@ -721,6 +741,11 @@ export class SlotSchedulerAuthority {
         slot.lastRetryScope ?? (this.hasResumableProviderSession(entry) ? "session_resume" : "session_start");
       const succeededClassification = this.retryClassificationForEntry(entry);
       if (!this.deps.routeTeardown.completeRouteTransition(entry, transition)) {
+        this.deps.adoptStaleProviderRecovery(
+          chatId,
+          retryRoute.kind === "resume" ? retryHeadMessage : retryRoute.message,
+          recovery,
+        );
         this.deps.routeTeardown.discardStaleRouteTransition(entry.chatId, transition, "session_retry_stale_adoption");
         return;
       }
@@ -1048,6 +1073,7 @@ export class SlotSchedulerAuthority {
         this.deps.recordEvictionResume(candidate.key, {
           claudeSessionId: resumableSessionId,
           lastActivity: candidate.session.lastActivity,
+          providerRecovery: candidate.session.providerRecovery ? { ...candidate.session.providerRecovery } : null,
         });
       } else {
         this.deps.recordEvictionResume(candidate.key, null);
