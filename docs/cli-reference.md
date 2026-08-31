@@ -412,11 +412,11 @@ first-tree chat
 │     --topic <text> / --description <text>        #   initial chat self-description
 │     --request                                    #   first message is a tracked ask; the body IS the ask, decision-self-sufficient (why + recap + question + recommendation); exactly one --to human
 │     --options <json> / --multi-select            #   (with --request) 2–4 options {label,description,preview?}; allow multi-pick
-├── send <name> [message]                            # notify a participant — agent or human; an agent recipient is woken (a send to a human is informational only and never carries a question — every question goes through `chat ask`)
+├── send <name> [message]                            # notify a participant — agent or human; an agent recipient is woken (a send to a human is informational only and never carries a question — a decision the next step depends on goes through `chat ask`, a smaller call is settled and reported)
 │     # body: [message] arg, or stdin (omit [message]), or -F <path>; prefer stdin/-F for rich bodies (shell-safe)
 │     -F, --message-file <path>                      #   read only the body from <path> (`-` = stdin); this does not attach <path>
 │     --reply-to <messageId>                         #   thread a reply under a message (pure threading)
-├── ask <name> [message]                             # ask a HUMAN a tracked question — every question goes here, blocking or not; the body IS the ask, decision-self-sufficient (why it exists + recent-context recap + question + recommendation)
+├── ask <name> [message]                             # ask a HUMAN a tracked question the next step depends on (it blocks them until resolved and cannot be withdrawn); the body IS the ask, decision-self-sufficient (why it exists + recent-context recap + question + recommendation)
 │     # body: [message] arg, or stdin (omit [message]), or -F <path>; prefer stdin/-F for rich bodies (shell-safe)
 │     -F, --message-file <path>                      #   read the body from <path> (`-` = stdin); content never hits the shell
 │     --options <json>                               #   2–4 answer options {label (1–5 words), description, preview?}; omit for free-text
@@ -471,9 +471,10 @@ EOF
 
 # Inline — `chat send` notifies a participant (an agent recipient is woken). A
 # plain send to a human is informational only — readable, then safely ignorable
-# — and never carries a question. Anything the human is meant to consider or
-# answer goes through `chat ask`, blocking decision or one-line confirmation
-# alike. The recipient must be a participant of FIRST_TREE_CHAT_ID.
+# — and never carries a question. A decision the next step depends on goes
+# through `chat ask`; a smaller call the agent can settle from the task, the
+# code, or a reasonable default is settled and reported with the assumption
+# stated. The recipient must be a participant of FIRST_TREE_CHAT_ID.
 first-tree chat send code-agent "ship the PR"
 
 # Stdin (multiline, markdown, special chars)
@@ -530,10 +531,10 @@ echo 'Latest run: ![chart](reports/latency.png)' | first-tree chat send code-age
 echo 'Full report: reports/latest-run.md' | first-tree chat send code-agent -f markdown
 
 # Ask a human a tracked question (red-dot + blocks the chat for them until they
-# answer). Every question you put to a human belongs here — a blocking decision,
-# an optional offer, or a one-line confirmation alike — because only this path
-# gives the answer somewhere to land. `chat ask` targets a single human; the
-# message body IS the ask and
+# answer). A question the next step depends on belongs here — an open question
+# blocks the target until they resolve it and no agent can withdraw it, so it is
+# spent on real forks, not on confirmations. `chat ask` targets a single human;
+# the message body IS the ask and
 # must be decision-self-sufficient for a reader who remembers nothing of the
 # chat: why the question exists + a recap of the recent interactions + the
 # single question and your recommendation, written for a reader holding none

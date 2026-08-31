@@ -165,8 +165,7 @@ describe("chat command behavior", () => {
     // duplicated "first)." fragment before this assertion existed.
     expect(help).toContain("an agent recipient is woken, a human is not");
     expect(help).toContain("a send never carries a question");
-    expect(help).toContain("a blocking decision, an optional offer, or a one-line confirmation alike");
-    expect(help).not.toContain("any question your next step depends on");
+    expect(help).toContain("settled and reported, not asked");
     expect(help).toContain("`chat invite` an agent first). A plain send to a human is informational only");
     expect(help).not.toMatch(/first\)\. first\)\./u);
   });
