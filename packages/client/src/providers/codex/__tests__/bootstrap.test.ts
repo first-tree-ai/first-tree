@@ -140,8 +140,9 @@ describe("bootstrapWorkspace — codex briefing + workspace marker", () => {
     expect(briefing).toContain("# Working in First Tree");
     // The CLI decision guide stays inline because tree-less agents
     // do not have First Tree family skill payloads installed.
-    expect(briefing).toContain("## First Tree CLI");
-    expect(briefing).toContain("**Command surface.**");
+    expect(briefing).toContain("## CLI Overview");
+    expect(briefing).toContain("## Communication");
+    expect(briefing).toContain("## Task Management");
     expect(briefing).toContain("first-tree-staging chat --help");
     expect(briefing).toContain("first-tree-staging chat send");
     // `chat send` reaches any teammate — agent or human; a human also has
