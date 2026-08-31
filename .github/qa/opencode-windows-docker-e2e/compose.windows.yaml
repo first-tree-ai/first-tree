@@ -1,0 +1,12 @@
+services:
+  windows-job:
+    build:
+      context: .
+      dockerfile: Dockerfile.windows
+    isolation: ${FTQA_WINDOWS_ISOLATION:-process}
+    environment:
+      FTQA_EVIDENCE_DIR: 'C:\artifacts'
+    volumes:
+      - type: bind
+        source: ${FTQA_EVIDENCE_DIR:?set FTQA_EVIDENCE_DIR to an absolute run-local Windows path}
+        target: 'C:\artifacts'
