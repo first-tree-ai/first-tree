@@ -95,7 +95,7 @@ describe("buildAgentBriefing — generated skeleton", () => {
 
     for (const marker of [
       "You are running inside **First Tree**",
-      "Blocking questions never ride inside plain `chat send`",
+      "A question never rides inside plain `chat send`",
       "## GitLab Working Posture",
       "# Skills (First Tree Managed)",
     ]) {
@@ -201,7 +201,7 @@ describe("buildAgentBriefing — generated skeleton", () => {
     // other consumer — CLI help, docs, SDK/schema comments — points here, so
     // the budget buys prose the agent actually needs on every turn.
     expect(lineCount(topLevelSection(briefing, "# Working in First Tree (First Tree Managed)"))).toBeLessThanOrEqual(
-      284,
+      302,
     );
     expect(briefing).not.toContain("# Required Reading (First Tree Managed)");
     // Raised from 210 when the declared-identity guard bullet joined the bound
@@ -210,9 +210,11 @@ describe("buildAgentBriefing — generated skeleton", () => {
     expect(lineCount(topLevelSection(briefing, "# Skills (First Tree Managed)"))).toBeLessThanOrEqual(20);
     // Tracks the same +16 and +10 the Summary authoring contract and the
     // Capability Degradation baseline add above, +4 for the identity guard, and
-    // +28 for the regrouped CLI sections and the `chat create` wake rule, and
-    // +7 for the review follow-ups (what "woken" means, the manager-mix trap).
-    expect(lineCount(briefing)).toBeLessThanOrEqual(647);
+    // +28 for the regrouped CLI sections and the `chat create` wake rule, +7
+    // for the review follow-ups (what "woken" means, the manager-mix trap), and
+    // +12 for the send/ask rule: a send never carries a question, and a call
+    // the agent can settle is settled and reported rather than asked.
+    expect(lineCount(briefing)).toBeLessThanOrEqual(665);
   });
 
   it("renders identity from visibility", () => {
@@ -450,6 +452,12 @@ describe("buildAgentBriefing — Working in First Tree hard rules", () => {
     expect(briefing).toContain("first-tree chat ask");
     expect(briefing).toContain("first-tree chat update --description");
     expect(briefing).toMatch(/Human message: finish with one/);
+    // The intro is read first, so it must carry both halves of the rule: a
+    // send never asks, AND a call the agent can settle is settled rather than
+    // escalated into a tracked question.
+    expect(briefing).toMatch(/a reply, report, or status, never a question/);
+    expect(briefing).toMatch(/a smaller call you can\n {2}settle yourself is settled, not asked/);
+    expect(briefing).not.toContain("unless blocked\n  on a human decision");
     expect(briefing).toMatch(/Agent handoff: `first-tree chat send <agent>`/);
     expect(briefing).toMatch(/Do not send\s+courtesy acknowledgements to agents/);
     expect(briefing).toContain("-F <file>");
@@ -616,7 +624,7 @@ describe("buildAgentBriefing — Working in First Tree hard rules", () => {
     expect(communication).toMatch(/business action changes the workspace\s+or outside world/);
     expect(communication).toContain("Replying to a human is required, not optional");
     expect(communication).toContain("never to a\nfresh human-directed message");
-    expect(communication).toContain("Blocking questions never ride inside plain `chat send`");
+    expect(communication).toContain("A question never rides inside a `chat send`");
     expect(communication).toContain("route by dependency, not importance");
     expect(communication).toContain("chat update --description -");
     expect(communication).toContain("Do not send courtesy acknowledgements");
@@ -688,13 +696,36 @@ describe("buildAgentBriefing — Working in First Tree hard rules", () => {
 });
 
 describe("buildAgentBriefing — asking humans, GitHub, and CLI overview", () => {
-  it("keeps chat ask dependency routing and self-sufficient body requirements", () => {
+  it("routes every human-directed question through chat ask, never a send", () => {
+    const briefing = buildAgentBriefing(makeOpts());
+    const communication = briefing.slice(briefing.indexOf("## Communication"), briefing.indexOf("## Task Management"));
+    const asking = briefing.slice(briefing.indexOf("## Asking Humans"));
+
+    // A send states; a question always carries a tracked answer slot. The
+    // failure this guards is a small offer ("want me to open the PR?") riding
+    // inside a plain send, where the answer has nowhere to land.
+    expect(communication).toContain("A send states; it never asks");
+    expect(communication).toContain(
+      "**A `chat send` never carries a question, and most small questions should not\nexist.**",
+    );
+    expect(communication).toContain("decide it with the best available default");
+    // The tracked slot is a real cost for the human: it blocks them and no
+    // agent can withdraw it, which is why small calls are decided, not asked.
+    expect(communication).toContain("no agent can\nwithdraw it");
+    expect(asking).toContain("The routing test is **dependency, not importance**");
+    expect(asking).toContain("the prior question is\n**whether to ask at all**");
+    expect(asking).toContain("Default to deciding");
+    expect(asking).toContain("reported with the assumption stated — not asked");
+  });
+
+  it("keeps chat ask routing and self-sufficient body requirements", () => {
     const briefing = buildAgentBriefing(makeOpts());
     const asking = briefing.slice(briefing.indexOf("## Asking Humans"));
 
     expect(asking).toContain("raises a tracked open question");
-    expect(asking).toContain("The routing test is **dependency, not importance**");
-    expect(asking).toContain("genuinely the user's to make");
+    expect(asking).toContain("A question never rides inside plain `chat send`");
+    expect(asking).toContain("no agent can withdraw it");
+    expect(asking).toContain("what you can settle from the");
     expect(asking).toContain("Do NOT manufacture");
     expect(asking).toContain("can I continue?");
     expect(asking).toContain("can cite them");
