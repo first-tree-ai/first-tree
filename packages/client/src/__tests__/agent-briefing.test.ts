@@ -456,7 +456,7 @@ describe("buildAgentBriefing — Working in First Tree hard rules", () => {
     // send never asks, AND a call the agent can settle is settled rather than
     // escalated into a tracked question.
     expect(briefing).toMatch(/a reply, report, or status, never a question/);
-    expect(briefing).toMatch(/a smaller call you can\n  settle yourself is settled, not asked/);
+    expect(briefing).toMatch(/a smaller call you can\n {2}settle yourself is settled, not asked/);
     expect(briefing).not.toContain("unless blocked\n  on a human decision");
     expect(briefing).toMatch(/Agent handoff: `first-tree chat send <agent>`/);
     expect(briefing).toMatch(/Do not send\s+courtesy acknowledgements to agents/);
@@ -705,7 +705,9 @@ describe("buildAgentBriefing — asking humans, GitHub, and CLI overview", () =>
     // failure this guards is a small offer ("want me to open the PR?") riding
     // inside a plain send, where the answer has nowhere to land.
     expect(communication).toContain("A send states; it never asks");
-    expect(communication).toContain("**A `chat send` never carries a question, and most small questions should not\nexist.**");
+    expect(communication).toContain(
+      "**A `chat send` never carries a question, and most small questions should not\nexist.**",
+    );
     expect(communication).toContain("decide it with the best available default");
     // The tracked slot is a real cost for the human: it blocks them and no
     // agent can withdraw it, which is why small calls are decided, not asked.
