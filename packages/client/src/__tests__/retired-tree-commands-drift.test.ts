@@ -266,7 +266,9 @@ describe("retired tree subcommand drift guard", () => {
     expect(overviewStart, "CLI Overview section must be present").toBeGreaterThanOrEqual(0);
     // CLI Overview ends at the next section heading; scope the check to
     // just that section so unrelated documentation prose in later
-    // sections doesn't false-positive.
+    // sections doesn't false-positive. Renaming that next heading widens the
+    // slice to the rest of the briefing rather than narrowing it — noisy, not
+    // silent, so the drift guard still fails closed.
     const overviewEnd = briefing.indexOf("\n## Agent Identity & Config", overviewStart);
     const overview = briefing.slice(overviewStart, overviewEnd === -1 ? undefined : overviewEnd);
 
