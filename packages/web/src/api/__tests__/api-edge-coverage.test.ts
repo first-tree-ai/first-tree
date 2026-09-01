@@ -74,6 +74,14 @@ describe("attachment API helpers", () => {
     await expect(new Response(init.body).text()).resolves.toBe("abc");
   });
 
+  it("rejects overlong attachment filenames before upload transport", async () => {
+    const { uploadAttachment } = await import("../attachments.js");
+    await expect(uploadAttachment(new Blob(["x"]), ";".repeat(256))).rejects.toThrow(
+      "Attachment filename exceeds maximum length",
+    );
+    expect(rawMock).not.toHaveBeenCalled();
+  });
+
   it("downloads attachment bytes as base64, text, and a browser save", async () => {
     rawMock
       .mockResolvedValueOnce(new Response(new Blob(["hello"], { type: "text/plain" })))

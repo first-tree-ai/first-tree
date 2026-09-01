@@ -1,6 +1,7 @@
 import {
   ATTACHMENT_FILENAME_HEADER,
   ATTACHMENT_MIME_HEADER,
+  getAttachmentFilenameError,
   type UploadAttachmentResponse,
   uploadAttachmentResponseSchema,
 } from "@first-tree/shared";
@@ -31,6 +32,8 @@ export function uploadMimeFor(file: Blob): string {
 export async function uploadAttachment(file: Blob, filename?: string): Promise<UploadAttachmentResponse> {
   const inferredName =
     filename ?? ("name" in file && typeof file.name === "string" && file.name.trim().length > 0 ? file.name : "blob");
+  const filenameError = getAttachmentFilenameError(inferredName);
+  if (filenameError) throw new TypeError(filenameError);
   const res = await apiFetchRaw(withOrg("/attachments"), {
     method: "POST",
     // Passing the Blob directly lets fetch stream it; do not materialize a

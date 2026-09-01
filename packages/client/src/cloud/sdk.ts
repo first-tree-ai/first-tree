@@ -68,6 +68,7 @@ import {
   followGithubEntityConflictSchema,
   type GithubTaskReplyRequest,
   type GithubTaskReplyResponse,
+  getAttachmentFilenameError,
   type LegacyContextActivationRequest,
   type LegacyContextActivationResponse,
   type ListCronJobsResponse,
@@ -1045,6 +1046,8 @@ export class FirstTreeHubSDK {
    *
    * `orgId` is required: upload is org-scoped (`uploaded_by` resolves to the
    * caller's member identity in that org), so the org rides in the path.
+   * The filename is percent-encoded because it travels in an HTTP header; the
+   * Server decodes it before applying the canonical filename validation.
    */
   public async uploadAttachment(opts: {
     bytes: Uint8Array | Buffer;
@@ -1052,13 +1055,15 @@ export class FirstTreeHubSDK {
     filename: string;
     orgId: string;
   }): Promise<UploadAttachmentResponse> {
+    const filenameError = getAttachmentFilenameError(opts.filename);
+    if (filenameError) throw new TypeError(filenameError);
     const json = await this.requestJson<unknown>(`/api/v1/orgs/${encodeURIComponent(opts.orgId)}/attachments`, {
       method: "POST",
       body: opts.bytes,
       headers: {
         "Content-Type": "application/octet-stream",
         [ATTACHMENT_MIME_HEADER]: opts.mimeType,
-        [ATTACHMENT_FILENAME_HEADER]: opts.filename,
+        [ATTACHMENT_FILENAME_HEADER]: encodeURIComponent(opts.filename),
       },
     });
     return uploadAttachmentResponseSchema.parse(json);
@@ -1331,18 +1336,19 @@ function parseRetryAfterMs(value: string | undefined): number | undefined {
 }
 
 /**
- * Parse the `filename="..."` directive from a `Content-Disposition` header.
- * Returns `null` when the header is absent or has no filename. Handles only
- * the quoted-string form the attachment route emits — the unquoted /
- * RFC 5987 `filename*=UTF-8''...` forms are outside our wire contract.
+ * Parse the percent-encoded `filename="..."` directive from a
+ * `Content-Disposition` header. Returns `null` when the header is absent or
+ * has no filename. The server encodes the complete filename for an
+ * ASCII-only wire value; the unquoted / RFC 5987 `filename*` forms are
+ * outside our wire contract.
  */
 function parseContentDispositionFilename(header: string | null): string | null {
   if (!header) return null;
   const match = /filename="([^"]*)"/.exec(header);
   if (!match || !match[1]) return null;
-  // The server percent-encodes the limited set { CR, LF, ", \ } — reverse it
-  // so callers get a clean filename. decodeURIComponent throws on malformed
-  // sequences; fall back to the raw match in that case.
+  // Reverse the server's complete percent-encoding so callers get the stored
+  // filename. decodeURIComponent throws on malformed sequences; fall back to
+  // the raw match in that case.
   try {
     return decodeURIComponent(match[1]);
   } catch {

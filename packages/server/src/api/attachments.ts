@@ -1,3 +1,4 @@
+import { MAX_ATTACHMENT_FILENAME_BYTES } from "@first-tree/shared";
 import type { FastifyInstance } from "fastify";
 import { NotFoundError } from "../errors.js";
 import { loadAttachmentMeta, openAttachmentStream } from "../services/attachment.js";
@@ -66,5 +67,19 @@ export async function attachmentRoutes(app: FastifyInstance): Promise<void> {
  * and literal percent signs without introducing an ambiguous partial encoding.
  */
 function encodeRfc6266Filename(name: string): string {
-  return encodeURIComponent(name);
+  return encodeURIComponent(truncateUtf8(name, MAX_ATTACHMENT_FILENAME_BYTES));
+}
+
+/** Bound legacy rows created before filename ingress limits existed. */
+function truncateUtf8(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+  let result = "";
+  let bytes = 0;
+  for (const character of value) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (bytes + characterBytes > maxBytes) break;
+    result += character;
+    bytes += characterBytes;
+  }
+  return result || "attachment";
 }

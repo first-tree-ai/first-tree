@@ -469,7 +469,7 @@ describe("FirstTreeHubSDK comprehensive wrappers", () => {
       headers: expect.objectContaining({
         "Content-Type": "application/octet-stream",
         [ATTACHMENT_MIME_HEADER]: "image/png",
-        [ATTACHMENT_FILENAME_HEADER]: "screen shot.png",
+        [ATTACHMENT_FILENAME_HEADER]: "screen%20shot.png",
       }),
     });
   });
@@ -494,6 +494,19 @@ describe("FirstTreeHubSDK comprehensive wrappers", () => {
       message: "attachment missing",
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects overlong attachment filenames before upload transport", async () => {
+    const fetchMock = mockFetch();
+    await expect(
+      makeSdk().uploadAttachment({
+        orgId: "org-1",
+        bytes: new Uint8Array([1]),
+        mimeType: "text/plain",
+        filename: ";".repeat(256),
+      }),
+    ).rejects.toThrow("Attachment filename exceeds maximum length");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("parses SDK errors, Retry-After dates, invalid Retry-After values, and invalid success JSON", async () => {
