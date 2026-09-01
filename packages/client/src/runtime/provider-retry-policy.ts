@@ -59,6 +59,17 @@ const TRANSIENT_HTTP_CODE_RE = /\b(500|502|503|504)\b/;
 
 export const MANAGED_SKILLS_UNSAFE_DISCOVERY_REASON_CODE = "managed_skills_unsafe_discovery";
 
+export const PROVIDER_UNSAFE_REPLAY_NOTICE_UNSETTLED = "provider_unsafe_replay_notice_unsettled";
+
+/**
+ * Only providers that classify an interrupted turn with provider-entered
+ * activity as unrecoverably ambiguous may hold its row for terminal-notice
+ * custody. Other providers keep the generic notice-failure recovery behavior.
+ */
+export function requiresUnsafeReplayNoticeCustody(provider: RuntimeProvider): boolean {
+  return provider === "antigravity";
+}
+
 export function classifyProviderFailure(
   err: unknown,
   context: {

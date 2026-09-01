@@ -71,7 +71,9 @@ import {
   buildProviderRetryEvent,
   classifyProviderFailure,
   decideProviderRetry,
+  PROVIDER_UNSAFE_REPLAY_NOTICE_UNSETTLED,
   type ProviderFailureClassification,
+  requiresUnsafeReplayNoticeCustody,
 } from "./provider-retry-policy.js";
 import { isAttachmentGoneError } from "./provider-support/attachment-availability.js";
 import { isContextSourceTransitionError } from "./provider-support/preparation.js";
@@ -675,6 +677,9 @@ export class SessionRuntime {
         for (const messageId of messageIds) {
           this.clearFenceRecoveryAttempt(chatId, messageId);
           this.clearPendingFenceFormatFailure(chatId, messageId);
+        }
+        if (this.projection.clearProviderContinuationForAck(chatId, this.runtimeProvider(), messageIds)) {
+          this.projection.persistRegistry();
         }
       },
       log: config.log,
@@ -1998,6 +2003,20 @@ export class SessionRuntime {
         return "retry";
       }
       if (noticeResult.kind === "failed") {
+        // An unsafe provider turn has no safe retry content. Leave its ledger
+        // row in notice-only custody; fail-for-recovery then evicts the route
+        // and server redelivery can retry only this terminal disposition.
+        if (
+          outcome.completion === "consumed" &&
+          outcome.reason === "unsafe_replay" &&
+          requiresUnsafeReplayNoticeCustody(this.runtimeProvider())
+        ) {
+          const pending = this.projection.getSession(chatId)?.pendingRuntimeFailureNotice;
+          if (pending && shouldPostProviderFailureRuntimeNotice(pending)) {
+            this.inboxDelivery.markNoticeRequired(chatId, messages, pending);
+          }
+          return "retry";
+        }
         this.retryDeliveryTurn(chatId, messages, "runtime_failure_notice_delivery_failed");
         this.projection.projectSessionRuntime(chatId);
         return "retry";
@@ -2152,9 +2171,27 @@ export class SessionRuntime {
       }
     }
     entry.claudeSessionId = receipt.sessionId;
-    entry.providerContinuation =
-      continuationResumeOptions(receipt.continuation, message, receipt.sessionId, this.runtimeProvider())
-        ?.continuation ?? null;
+    const receiptContinuation = continuationResumeOptions(
+      receipt.continuation,
+      message,
+      receipt.sessionId,
+      this.runtimeProvider(),
+    )?.continuation;
+    // A fail-closed resume may intentionally leave the exact delivery in
+    // processing custody while it retries only the terminal notice/ACK. Keep
+    // the validated continuation in that case; a settled route deliberately
+    // retires it.
+    const retainedContinuation =
+      receiptContinuation ??
+      (receipt.route?.mode === "processing"
+        ? continuationResumeOptions(
+            entry.providerContinuation ?? undefined,
+            message,
+            receipt.sessionId,
+            this.runtimeProvider(),
+          )?.continuation
+        : undefined);
+    entry.providerContinuation = retainedContinuation ?? null;
     return true;
   }
 
@@ -3055,6 +3092,25 @@ export class SessionRuntime {
     const routeLease = this.routeTeardown.currentRouteLease(entry);
     const mutationValid = () => this.routeTeardown.isRouteAdoptionValid(entry, routeLease);
     const settlementValid = () => this.routeTeardown.isDeliverySettlementLeaseValid(entry, routeLease);
+    const continuation = entry.providerContinuation;
+    if (
+      continuation &&
+      continuation.provider === this.runtimeProvider() &&
+      continuation.sessionId === entry.claudeSessionId &&
+      continuation.messageId === message.id &&
+      this.inboxDelivery.hasNoticeRequiredDelivery(chatId)
+    ) {
+      // A provider-entered unsafe row marked for durable notice custody can
+      // never become a second provider turn. Retire the ambiguous live route
+      // and let the durable custody path retry only the terminal disposition.
+      this.failSessionForRecovery(
+        chatId,
+        PROVIDER_UNSAFE_REPLAY_NOTICE_UNSETTLED,
+        continuation.sessionId,
+        continuation,
+      );
+      return;
+    }
     if (!mutationValid()) {
       this.retryDeliveryTurn(chatId, message, "active_inject_route_invalidated");
       return;

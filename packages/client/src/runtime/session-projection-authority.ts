@@ -249,6 +249,37 @@ export class SessionProjectionAuthority<
     else this.evictedMappings.delete(chatId);
   }
 
+  /**
+   * Retire an unsafe-provider custody marker only after its exact delivery is
+   * durably committed. The marker can live in either the active projection or
+   * an eviction mapping depending on whether notice/ACK retry evicted the route.
+   */
+  clearProviderContinuationForAck(
+    chatId: string,
+    provider: ProviderContinuation["provider"],
+    messageIds: readonly string[],
+  ): boolean {
+    const matches = (continuation: ProviderContinuation): boolean =>
+      continuation.provider === provider && messageIds.includes(continuation.messageId);
+
+    let changed = false;
+    const session = this.sessions.get(chatId);
+    if (session?.providerContinuation && matches(session.providerContinuation)) {
+      session.providerContinuation = null;
+      changed = true;
+    }
+
+    const mapping = this.evictedMappings.get(chatId);
+    if (mapping?.continuation && matches(mapping.continuation)) {
+      this.recordEvictionResume(chatId, {
+        claudeSessionId: mapping.claudeSessionId,
+        lastActivity: mapping.lastActivity,
+      });
+      changed = true;
+    }
+    return changed;
+  }
+
   getLastTreeResolveAttemptAt(): number {
     return this.lastTreeResolveAttemptAt;
   }

@@ -165,6 +165,7 @@ type SessionRuntimeInternals = {
     prepareOperatorSuspend(chatId: string): Promise<void>;
     drainForTerminate(chatId: string): Promise<void>;
     hasRecoveryDebt(chatId: string): boolean;
+    hasNoticeRequiredDelivery(chatId: string): boolean;
     hasUnsettledWork(chatId: string): boolean;
     snapshot(chatId: string): {
       entries: Array<{ entryId: number; messageId: string; phase: string }>;
@@ -426,7 +427,7 @@ function requireSession(i: SessionRuntimeInternals, chatId: string): SessionReco
 }
 
 async function exerciseAntigravityRecovery(
-  mode: "concurrency_protection" | "forced_route_retirement" | "provider_retryable_failure",
+  mode: "concurrency_protection" | "forced_route_retirement" | "provider_retryable_failure" | "unsafe_notice_failure",
 ): Promise<void> {
   const chatId = `chat-antigravity-${mode}`;
   const conversationId = "conversation-lifecycle";
@@ -459,7 +460,10 @@ async function exerciseAntigravityRecovery(
   const providerSettled = new Promise<void>((resolve) => {
     resolveProviderSettled = resolve;
   });
-
+  const sendMessage = vi
+    .fn<(chatId: string, input: unknown) => Promise<unknown>>()
+    .mockRejectedValueOnce(new Error("notice delivery unavailable"))
+    .mockImplementation(async () => ({ id: "unsafe-notice" }));
   const oldHandler = handler({
     start: vi.fn(async (message: SessionMessage, ctx: SessionContext, token: DeliveryToken) => {
       originalMessage = message;
@@ -477,6 +481,36 @@ async function exerciseAntigravityRecovery(
         ctx.failSessionForRecovery?.("provider_retryable_failure", conversationId, continuation);
         token.retry(message, "provider_retryable_failure");
       } else {
+        if (mode === "unsafe_notice_failure") {
+          providerTurnActive = false;
+          ctx.emitEvent({
+            kind: "error",
+            payload: {
+              source: "runtime",
+              message: encodeProviderRetryEventMessage({
+                event: "provider_failure_terminal",
+                provider: "antigravity",
+                scope: "provider_turn",
+                category: "unknown",
+                reasonCode: "unsafe_replay",
+                replaySafety: "unsafe",
+                userSeverity: "error",
+                messagePreview: "provider lost the terminal event",
+              }),
+            },
+          });
+          await token.complete(message, {
+            status: "error",
+            completion: "consumed",
+            reason: "unsafe_replay",
+          });
+          ctx.failSessionForRecovery?.("antigravity_unsafe_replay_notice_unsettled", conversationId, continuation);
+          resolveStart?.();
+          return {
+            sessionId: conversationId,
+            route: { kind: "owned" as const, mode: "processing" as const },
+          };
+        }
         providerTurnActive = false;
         if (mode === "forced_route_retirement") resolveProviderSettled?.();
         if (mode === "concurrency_protection") {
@@ -521,6 +555,37 @@ async function exerciseAntigravityRecovery(
         prompt: opts?.continuation ? "provider-continuation" : String(message.content),
       });
       token.processingStarted(message);
+      if (mode === "unsafe_notice_failure" && opts?.continuation) {
+        ctx.emitEvent({
+          kind: "error",
+          payload: {
+            source: "runtime",
+            message: encodeProviderRetryEventMessage({
+              event: "provider_failure_terminal",
+              provider: "antigravity",
+              scope: "provider_turn",
+              category: "unknown",
+              reasonCode: "unsafe_replay",
+              replaySafety: "unsafe",
+              userSeverity: "error",
+              messagePreview: "replacement custody still unsettled",
+            }),
+          },
+        });
+        const completion = await token.complete(message, {
+          status: "error",
+          completion: "consumed",
+          reason: "unsafe_replay",
+        });
+        if (completion === "retry") {
+          ctx.failSessionForRecovery?.("antigravity_unsafe_replay_notice_unsettled", conversationId, opts.continuation);
+          return {
+            sessionId: conversationId,
+            route: { kind: "owned" as const, mode: "processing" as const },
+            continuation: opts.continuation,
+          };
+        }
+      }
       return { sessionId: conversationId, route: { kind: "owned" as const, mode: "processing" as const } };
     },
   );
@@ -538,6 +603,7 @@ async function exerciseAntigravityRecovery(
     concurrency: 1,
     ackEntry,
     recoverChat,
+    ...(mode === "unsafe_notice_failure" ? { sdk: { ...mockSdk(), sendMessage } as unknown as FirstTreeHubSDK } : {}),
   });
   const i = internals(sm);
 
@@ -569,6 +635,36 @@ async function exerciseAntigravityRecovery(
     originalContext.failSessionForRecovery?.("forced_route_retirement", conversationId, continuation);
     expect(oldHandler.shutdown).not.toHaveBeenCalled();
     expect(ackEntry).not.toHaveBeenCalledWith(headEntry.id);
+  }
+
+  if (mode === "unsafe_notice_failure") {
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    resolveStart?.();
+    await originalDispatch;
+    await vi.waitFor(() => expect(i.inboxDelivery.hasNoticeRequiredDelivery(chatId)).toBe(true));
+    await vi.waitFor(() => expect(i.inboxDelivery.snapshot(chatId).recoveryDebt).toBe("none"));
+
+    await vi.waitFor(() => expect(oldHandler.shutdown).toHaveBeenCalled());
+    expect(ackEntry).not.toHaveBeenCalledWith(headEntry.id);
+    expect(i.projection.evictedMappings.get(chatId)).toEqual(
+      expect.objectContaining({
+        claudeSessionId: conversationId,
+        continuation,
+      }),
+    );
+    // The same server row is the redelivery boundary. It must retry only the
+    // required terminal notice/ACK — never create another provider turn.
+    await sm.dispatch(headEntry);
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(ackEntry).toHaveBeenCalledWith(headEntry.id));
+    expect(recoveryResume).not.toHaveBeenCalled();
+    expect(recoveryHandler.start).not.toHaveBeenCalled();
+    expect(providerPrompts).toEqual([{ kind: "start", prompt: "mutating original" }]);
+    expect(toolCalls).toEqual(["run_command"]);
+    expect(i.projection.evictedMappings.get(chatId)?.continuation).toBeUndefined();
+
+    await sm.shutdown();
+    return;
   }
 
   resolveStart?.();
@@ -4794,6 +4890,7 @@ describe("SessionRuntime edge coverage", () => {
     ["working concurrency preemption", "concurrency_protection"],
     ["forced route retirement", "forced_route_retirement"],
     ["provider retryable failure", "provider_retryable_failure"],
+    ["unsafe notice ACK retry", "unsafe_notice_failure"],
   ] as const)("protects an Antigravity provider-entered first turn through %s", async (_label, mode) => {
     await exerciseAntigravityRecovery(mode);
   });

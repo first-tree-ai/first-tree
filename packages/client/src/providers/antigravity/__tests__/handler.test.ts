@@ -490,6 +490,104 @@ process.stdin.on("end", () => {
     await handler.shutdown();
   });
 
+  it("retains unsafe custody when the required replay notice cannot be ACKed", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-unsafe-notice-retry-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const unsafeOutput = [
+      JSON.stringify({ event: "init", conversation_id: "conversation-notice-retry" }),
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "conversation-notice-retry",
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "run_command",
+          tool_call_id: "call-notice-retry",
+          tool_info: { parameters: { command: "touch side-effect-marker" } },
+        },
+      }),
+    ];
+    const originalHandler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(specs, inputs, unsafeOutput),
+      antigravityTurnTimeoutMs: 50,
+      antigravityRetrySleep: vi.fn(async () => true),
+    });
+    const token = {
+      ...deliveryToken(),
+      complete: vi.fn().mockResolvedValueOnce("retry").mockResolvedValueOnce("settled"),
+    } satisfies DeliveryToken;
+
+    const started = await originalHandler.start(message("m-notice-retry", "mutate this"), sessionCtx, token);
+
+    expect(started.sessionId).toBe("conversation-notice-retry");
+    expect(token.retry).not.toHaveBeenCalled();
+    expect(token.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "error", completion: "consumed", reason: "unsafe_replay" }),
+    );
+    expect(sessionCtx.failSessionForRecovery).toHaveBeenCalledWith(
+      "antigravity_unsafe_replay_notice_unsettled",
+      "conversation-notice-retry",
+      {
+        kind: "provider_continuation",
+        provider: "antigravity",
+        sessionId: "conversation-notice-retry",
+        messageId: "m-notice-retry",
+      },
+    );
+
+    await originalHandler.shutdown("replaced after unresolved notice");
+    const replacementHandler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(specs, inputs, []),
+      antigravityTurnTimeoutMs: 5_000,
+    });
+    const recoveryToken = deliveryToken();
+    const resumed = await replacementHandler.resume(
+      message("m-notice-retry", "mutate this"),
+      started.sessionId,
+      sessionCtx,
+      recoveryToken,
+      {
+        continuation: {
+          kind: "provider_continuation",
+          provider: "antigravity",
+          sessionId: "conversation-notice-retry",
+          messageId: "m-notice-retry",
+        },
+      },
+    );
+
+    expect(resumed).toEqual({
+      sessionId: "conversation-notice-retry",
+      route: null,
+    });
+    expect(specs).toHaveLength(1);
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]).toContain("mutate this");
+    expect(events.filter((event) => (event as { kind?: string }).kind === "tool_call")).toHaveLength(1);
+    expect(recoveryToken.retry).not.toHaveBeenCalled();
+    expect(recoveryToken.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "error", completion: "consumed", reason: "unsafe_replay" }),
+    );
+    await replacementHandler.shutdown();
+  });
+
   it("keeps queued rows separate when a provider-entered turn fails retryably", async () => {
     const root = mkdtempSync(join(tmpdir(), "ft-antigravity-queued-custody-"));
     roots.push(root);

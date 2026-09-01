@@ -15,6 +15,7 @@ import type {
   DeliveryToken,
   HandlerFactory,
   HandlerShutdownOptions,
+  ProviderContinuation,
   SessionContext,
   SessionMessage,
   TurnConsumedErrorReason,
@@ -680,7 +681,17 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
       input.messages,
       consumedErrorOutcome(settlement.decision.reasonCode as TurnConsumedErrorReason),
     );
-    if (completion === "retry") return false;
+    if (completion === "retry") {
+      if (replaySafety === "unsafe" && providerSessionId && input.messages.length === 1) {
+        input.sessionCtx.failSessionForRecovery?.("antigravity_unsafe_replay_notice_unsettled", providerSessionId, {
+          kind: "provider_continuation",
+          provider: runtimeProvider,
+          sessionId: providerSessionId,
+          messageId: input.messages[0]?.id ?? "",
+        });
+      }
+      return false;
+    }
     providerTurnFailureAttempts.delete(key);
     pendingChatContextPrompt = null;
     return true;
@@ -1034,15 +1045,25 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
     sessionId: string,
     token: DeliveryToken,
     reason: string,
-  ): Promise<boolean> {
+  ): Promise<boolean | ProviderContinuation> {
+    const continuation: ProviderContinuation = {
+      kind: "provider_continuation",
+      provider: runtimeProvider,
+      sessionId,
+      messageId: message.id,
+    };
     const completion = await token.complete([message], consumedErrorOutcome("unsafe_replay"));
     if (completion !== "retry") {
       ambiguousProviderTurnKeys.delete(`${AMBIGUOUS_PROVIDER_TURN_KEY_PREFIX}${sessionId}:${message.id}`);
       pendingChatContextPrompt = null;
       return true;
     }
+    // Keep the exact custody marker on the receipt as well as the handler set.
+    // SessionRuntime preserves it while the required terminal notice/ACK is
+    // still retrying; a replacement or restarted handler then receives the
+    // same fail-closed path instead of serializing the original message.
     ctx?.log(`Antigravity failed-closed recovery notice could not be posted: ${reason}`);
-    return false;
+    return continuation;
   }
 
   function scheduleDrain(): void {
@@ -1146,9 +1167,11 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
       const ambiguousKey = `${AMBIGUOUS_PROVIDER_TURN_KEY_PREFIX}${sessionId}:${message?.id ?? ""}`;
       if (message && (opts?.continuation || ambiguousProviderTurnKeys.has(ambiguousKey))) {
         const delivered = await failClosedAmbiguousResume(message, sessionId, deliveryToken, "ambiguous provider turn");
+        const retainedContinuation = delivered === true ? undefined : (opts?.continuation ?? delivered);
         return {
           sessionId,
-          route: delivered ? null : { kind: "owned", mode: "processing" },
+          route: delivered === true ? null : { kind: "owned", mode: "processing" },
+          ...(retainedContinuation ? { continuation: retainedContinuation } : {}),
         };
       }
       initialTurnPreparing = true;
