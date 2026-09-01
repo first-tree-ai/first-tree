@@ -10,7 +10,7 @@ import type { FirstTreeHubSDK } from "../../../cloud/sdk.js";
 import type { AgentConfigCache } from "../../../runtime/agent-config-cache.js";
 import type { DeliveryToken, SessionContext, SessionMessage } from "../../../runtime/contracts.js";
 import type { ProviderProcessSpec, ProviderProcessSupervisor } from "../../../runtime/provider-process-supervisor.js";
-import { ANTIGRAVITY_CONTINUATION_PROMPT, computeAntigravityUsageDelta, createAntigravityHandler } from "../index.js";
+import { computeAntigravityUsageDelta, createAntigravityHandler } from "../index.js";
 
 const roots: string[] = [];
 
@@ -319,7 +319,7 @@ describe("Antigravity V1 handler", () => {
       kind: "owned",
       mode: "queued",
     });
-    await vi.waitFor(() => expect(secondToken.complete).toHaveBeenCalledTimes(1), { timeout: 3_000 });
+    await vi.waitFor(() => expect(secondToken.complete).toHaveBeenCalledTimes(1), { timeout: 10_000 });
 
     expect(specs).toHaveLength(2);
     expect(specs[1]?.args).toContain("--conversation");
@@ -490,6 +490,75 @@ process.stdin.on("end", () => {
     await handler.shutdown();
   });
 
+  it("keeps queued rows separate when a provider-entered turn fails retryably", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-queued-custody-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const queuedProviderScript = `
+const conversationId = process.env.FIRST_TREE_TEST_CONVERSATION_ID;
+const turn = Number(process.env.FIRST_TREE_TEST_TURN ?? "0");
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  JSON.parse(input.trim());
+  process.stdout.write(JSON.stringify({event:"init",conversation_id:conversationId}) + "\\n");
+  if (turn === 1) process.exit(1);
+  const response = turn === 0 ? "hello" : "queued done";
+  process.stdout.write(JSON.stringify({event:"result",result:{conversation_id:conversationId,status:"SUCCESS",response}}) + "\\n");
+});
+`;
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createSupervisor(
+        specs,
+        inputs,
+        ["conversation-queued", "conversation-queued", "conversation-queued"],
+        queuedProviderScript,
+      ),
+      antigravityTurnTimeoutMs: 5_000,
+      antigravityRetrySleep: vi.fn(async () => true),
+    });
+    const firstToken = deliveryToken();
+    const secondToken = deliveryToken();
+    await handler.start(message("m-initial", "start the conversation"), sessionCtx, deliveryToken());
+    handler.inject(message("m-first", "first queued request"), firstToken);
+    handler.inject(message("m-second", "second queued request"), secondToken);
+
+    await vi.waitFor(() => expect(firstToken.complete).toHaveBeenCalledTimes(1), { timeout: 3_000 });
+    await vi.waitFor(() => expect(secondToken.complete).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+
+    expect(specs).toHaveLength(3);
+    expect(specs[1]?.args).toEqual(expect.arrayContaining(["--conversation", "conversation-queued"]));
+    expect(firstToken.retry).not.toHaveBeenCalled();
+    expect(firstToken.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "error", completion: "consumed", reason: "unsafe_replay" }),
+    );
+    expect(secondToken.retry).not.toHaveBeenCalled();
+    expect(secondToken.complete).toHaveBeenCalledWith(expect.anything(), { status: "success" });
+    expect(JSON.parse(inputs[1] ?? "")).toMatchObject({
+      event: "user",
+      message: { content: expect.stringContaining("first queued request") },
+    });
+    expect(inputs[1]).not.toContain("second queued request");
+    expect(JSON.parse(inputs[2] ?? "")).toMatchObject({
+      event: "user",
+      message: { content: expect.stringContaining("second queued request") },
+    });
+    expect(inputs[2]).not.toContain("first queued request");
+    expect(forwarded).toEqual(["hello", "queued done"]);
+    await handler.shutdown();
+  });
+
   it.each([
     ["suspend", true],
     ["shutdown", true],
@@ -517,26 +586,13 @@ process.stdin.on("end", () => {
         },
       }),
     ];
-    const recoveredOutput = [
-      JSON.stringify({ event: "init", conversation_id: "conversation-lifecycle" }),
-      JSON.stringify({
-        event: "result",
-        result: { conversation_id: "conversation-lifecycle", status: "SUCCESS", response: "recovered" },
-      }),
-    ];
     const handler = createAntigravityHandler({
       workspaceRoot: root,
       agentName: "antigravity-test-agent",
       runtimeProvider: "antigravity",
       agentConfigCache: cache(runtimeConfig()),
       antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
-      providerProcessSupervisor: createControlledSupervisor(
-        specs,
-        inputs,
-        lifecycleOutput,
-        [lifecycleOutput, recoveredOutput],
-        [false, true],
-      ),
+      providerProcessSupervisor: createControlledSupervisor(specs, inputs, lifecycleOutput),
       antigravityTurnTimeoutMs: 5_000,
     });
     const token = deliveryToken();
@@ -552,47 +608,30 @@ process.stdin.on("end", () => {
 
     const started = await startPromise;
     expect(started.sessionId).toBe("conversation-lifecycle");
-    if (shouldSettleProviderEntered) {
-      expect(started.continuation).toBeUndefined();
-      expect(token.retry).not.toHaveBeenCalled();
-      expect(token.complete).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.objectContaining({ status: "error", completion: "consumed", reason: "unsafe_replay" }),
-      );
-    } else {
-      expect(started.continuation).toEqual({
+    expect(started.continuation).toBeUndefined();
+    expect(token.retry).not.toHaveBeenCalled();
+    expect(token.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "error", completion: "consumed", reason: "unsafe_replay" }),
+    );
+
+    const recoveryToken = deliveryToken();
+    const recoveryMessage = message("m-lifecycle", "mutate this");
+    const resumed = await handler.resume(recoveryMessage, started.sessionId, sessionCtx, recoveryToken, {
+      continuation: {
         kind: "provider_continuation",
         provider: "antigravity",
         sessionId: "conversation-lifecycle",
         messageId: "m-lifecycle",
-      });
-      expect(token.complete).not.toHaveBeenCalled();
-      expect(token.retry).toHaveBeenCalledWith(expect.anything(), `test lifecycle ${lifecycle}`);
-    }
-
-    const recoveryToken = deliveryToken();
-    const recoveryMessage = shouldSettleProviderEntered
-      ? message("m-recovery", "recover without replay")
-      : message("m-lifecycle", "mutate this");
-    const resumed = await handler.resume(
-      recoveryMessage,
-      started.sessionId,
-      sessionCtx,
-      recoveryToken,
-      started.continuation ? { continuation: started.continuation } : undefined,
-    );
+      },
+    });
     expect(resumed.sessionId).toBe("conversation-lifecycle");
-    expect(specs).toHaveLength(2);
-    expect(specs[1]?.args).toEqual(expect.arrayContaining(["--conversation", "conversation-lifecycle"]));
-    if (started.continuation) {
-      expect(inputs[1]).toContain(ANTIGRAVITY_CONTINUATION_PROMPT);
-      expect(inputs[1]).not.toContain("mutate this");
-    } else {
-      expect(inputs[1]).toContain("recover without replay");
-    }
-    expect(inputs[1]).not.toContain("mutate this");
-    expect(recoveryToken.complete).toHaveBeenCalledWith(expect.anything(), { status: "success" });
-    expect(forwarded).toEqual(["recovered"]);
+    expect(specs).toHaveLength(1);
+    expect(recoveryToken.retry).not.toHaveBeenCalled();
+    expect(recoveryToken.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "error", completion: "consumed", reason: "unsafe_replay" }),
+    );
     expect(events.filter((event) => (event as { kind?: string }).kind === "tool_call")).toHaveLength(1);
     await handler.shutdown();
   });
