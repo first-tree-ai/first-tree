@@ -158,7 +158,7 @@ describe("SessionRuntime runtime projection from inbox coordinator work", () => 
 
     // The background task completes and the provider starts a fresh turn on
     // its own: no delivery, no ownership, but real work.
-    capturedCtx.recordProviderActivity();
+    capturedCtx.emitEvent({ kind: "tool_call", payload: { toolUseId: "t1", name: "Bash", args: null, status: "ok" } });
     expect(events[events.length - 1]).toEqual({ chatId: "chat-a", state: "working" });
     expect(sm.getAggregateRuntimeState()).toBe("working");
 
@@ -191,7 +191,7 @@ describe("SessionRuntime runtime projection from inbox coordinator work", () => 
     await sm.dispatch(mockEntry({ id: 1, chatId: "chat-a" }));
     if (!capturedCtx || !capturedMessage) throw new Error("expected captured session context");
     capturedCtx.markMessagesConsumed(capturedMessage);
-    capturedCtx.recordProviderActivity();
+    capturedCtx.emitEvent({ kind: "thinking", payload: {} });
     expect(events[events.length - 1]).toEqual({ chatId: "chat-a", state: "working" });
 
     // Turn liveness ends, but the owned delivery is still being processed —
@@ -201,6 +201,50 @@ describe("SessionRuntime runtime projection from inbox coordinator work", () => 
     expect(sm.getAggregateRuntimeState()).toBe("working");
 
     ack.resolve();
+    await sm.shutdown();
+  });
+
+  it("does not resurrect working from out-of-turn provider traffic after a turn closes", async () => {
+    // `recordProviderActivity` is broader than turn liveness on purpose: the
+    // Codex app-server samples it above its own thread/turn filter, so a late
+    // `thread/tokenUsage/updated` for an already-closed turn reaches it and is
+    // then recorded as historical usage — with no `turn_end` to follow. Turn
+    // liveness must come from in-turn evidence only, or that sample would
+    // strand `working` on an idle chat.
+    const events: Array<{ chatId: string; state: string }> = [];
+    let capturedCtx: SessionContext | undefined;
+    let capturedMessage: SessionMessage | undefined;
+    const handler = createMockHandler({
+      async start(msg, ctx) {
+        capturedCtx = ctx;
+        capturedMessage = msg;
+        return { sessionId: "session-1", route: { kind: "owned" as const, mode: "queued" as const } };
+      },
+    });
+    const sm = createSessionRuntime({
+      handler,
+      onRuntimeStateChange: vi.fn(),
+      onSessionRuntimeChange: (chatId, state) => events.push({ chatId, state }),
+    });
+
+    await sm.dispatch(mockEntry({ id: 1, chatId: "chat-a" }));
+    if (!capturedCtx || !capturedMessage) throw new Error("expected captured session context");
+    capturedCtx.markMessagesConsumed(capturedMessage);
+    capturedCtx.emitEvent({ kind: "thinking", payload: {} });
+    await capturedCtx.finishTurn(capturedMessage, { status: "success", terminal: true });
+    capturedCtx.emitEvent({ kind: "turn_end", payload: { status: "success" } });
+    expect(events[events.length - 1]).toEqual({ chatId: "chat-a", state: "idle" });
+
+    // Late traffic for the closed turn: an activity sample and the usage event
+    // it carries. Neither is evidence of an open turn.
+    capturedCtx.recordProviderActivity();
+    capturedCtx.emitEvent({
+      kind: "token_usage",
+      payload: { provider: "codex", model: "gpt-5", inputTokens: 10, cachedInputTokens: 0, outputTokens: 5 },
+    });
+    expect(events[events.length - 1]).toEqual({ chatId: "chat-a", state: "idle" });
+    expect(sm.getAggregateRuntimeState()).toBe("idle");
+
     await sm.shutdown();
   });
 

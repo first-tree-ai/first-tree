@@ -373,14 +373,15 @@ export class SessionProjectionAuthority<
   }
 
   /**
-   * The provider produced a message for `chatId`, so a turn is running there.
+   * The provider emitted in-turn evidence for `chatId`, so a turn is running
+   * there. The host decides what counts as evidence (see
+   * `noteTurnLivenessFromEvent`); this owns only the ledger.
    *
    * Inbox delivery ownership alone is NOT sufficient to detect a running turn:
    * a provider that re-invokes itself when a background task completes runs a
    * full turn — tool calls, output, token spend — with no owned inbox entry,
    * and projecting `idle` for it made a busy agent read as "Idle" on every
-   * chat surface. Turn liveness is therefore tracked from the provider stream
-   * itself, which every provider reports through `recordProviderActivity`.
+   * chat surface.
    */
   noteProviderTurnStart(chatId: string): void {
     if (this.providerTurnInFlight.has(chatId)) return;

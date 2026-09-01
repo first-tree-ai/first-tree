@@ -1577,6 +1577,33 @@ export class SessionRuntime {
     return parsed.data;
   }
 
+  /**
+   * Turn liveness for the D-axis, derived from the session events a provider
+   * emits *inside* a turn.
+   *
+   * Raw provider activity is deliberately NOT the signal. `recordProviderActivity`
+   * is broader than turn liveness by design — the Codex app-server samples it
+   * above its own thread/turn filter, so a late `thread/tokenUsage/updated` for
+   * an already-closed turn reaches it and is then recorded as historical usage
+   * or buffered, without ever producing a `turn_end`. Treating that sample as a
+   * turn start would strand `working` on an idle chat, kept fresh by the
+   * re-affirm loop until an unrelated turn ends or the session is suspended.
+   *
+   * Assistant text, thinking, and tool calls are only emitted from a provider's
+   * in-turn path, so they are self-proving evidence that a turn is open; the
+   * out-of-turn traffic that caused the problem (`token_usage`,
+   * `context_tree_usage`, runtime `error`) is excluded.
+   */
+  private noteTurnLivenessFromEvent(chatId: string, event: SessionEvent): void {
+    if (event.kind === "turn_end") {
+      this.projection.noteProviderTurnEnd(chatId);
+      return;
+    }
+    if (event.kind === "assistant_text" || event.kind === "thinking" || event.kind === "tool_call") {
+      this.projection.noteProviderTurnStart(chatId);
+    }
+  }
+
   private captureRuntimeFailureNotice(
     chatId: string,
     event: SessionEvent,
@@ -3253,11 +3280,6 @@ export class SessionRuntime {
         const entry = this.projection.getSession(chatId);
         if (entry && entry.status === "active") {
           entry.lastActivity = Date.now();
-          // A provider message means a turn is running here, whoever started
-          // it. Inbox ownership does not cover a turn the provider re-invokes
-          // itself for (a completed background task, for instance), and such a
-          // turn must not read as "Idle" while it burns tools and tokens.
-          this.projection.noteProviderTurnStart(chatId);
         }
       },
       emitEvent: (event) => {
@@ -3272,7 +3294,7 @@ export class SessionRuntime {
           return;
         }
         if (mutationValid && !mutationValid()) return;
-        if (event.kind === "turn_end") this.projection.noteProviderTurnEnd(chatId);
+        this.noteTurnLivenessFromEvent(chatId, event);
         this.config.onSessionEvent?.(chatId, event);
         if (mutationValid && !mutationValid()) return;
         this.captureRuntimeFailureNotice(chatId, event, mutationValid);
@@ -3285,7 +3307,7 @@ export class SessionRuntime {
         // (the Codex landing trial awaits it), so turn liveness must clear
         // here too or that turn would stay `working` until the session is
         // suspended.
-        if (event.kind === "turn_end") this.projection.noteProviderTurnEnd(chatId);
+        this.noteTurnLivenessFromEvent(chatId, event);
         return this.confirmSessionEventOrThrow(chatId, event, mutationValid);
       },
       forwardResult: (text) => {
