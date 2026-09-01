@@ -129,6 +129,81 @@ describe("SessionRuntime runtime projection from inbox coordinator work", () => 
     await sm.shutdown();
   });
 
+  it("projects a provider turn as working when no inbox delivery owns it", async () => {
+    // A provider re-invoked by its own background-task completion runs a full
+    // turn with no owned inbox entry. Projecting that as idle is what made a
+    // busy agent read as "Idle" on every chat surface.
+    const events: Array<{ chatId: string; state: string }> = [];
+    let capturedCtx: SessionContext | undefined;
+    let capturedMessage: SessionMessage | undefined;
+    const handler = createMockHandler({
+      async start(msg, ctx) {
+        capturedCtx = ctx;
+        capturedMessage = msg;
+        return { sessionId: "session-1", route: { kind: "owned" as const, mode: "queued" as const } };
+      },
+    });
+    const sm = createSessionRuntime({
+      handler,
+      onRuntimeStateChange: vi.fn(),
+      onSessionRuntimeChange: (chatId, state) => events.push({ chatId, state }),
+    });
+
+    await sm.dispatch(mockEntry({ id: 1, chatId: "chat-a" }));
+    if (!capturedCtx || !capturedMessage) throw new Error("expected captured session context");
+    capturedCtx.markMessagesConsumed(capturedMessage);
+    await capturedCtx.finishTurn(capturedMessage, { status: "success", terminal: true });
+    capturedCtx.emitEvent({ kind: "turn_end", payload: { status: "success" } });
+    expect(events[events.length - 1]).toEqual({ chatId: "chat-a", state: "idle" });
+
+    // The background task completes and the provider starts a fresh turn on
+    // its own: no delivery, no ownership, but real work.
+    capturedCtx.recordProviderActivity();
+    expect(events[events.length - 1]).toEqual({ chatId: "chat-a", state: "working" });
+    expect(sm.getAggregateRuntimeState()).toBe("working");
+
+    capturedCtx.emitEvent({ kind: "turn_end", payload: { status: "success" } });
+    expect(events[events.length - 1]).toEqual({ chatId: "chat-a", state: "idle" });
+    expect(sm.getAggregateRuntimeState()).toBe("idle");
+
+    await sm.shutdown();
+  });
+
+  it("keeps a delivery working when the provider closes one turn but the delivery is unsettled", async () => {
+    const events: Array<{ chatId: string; state: string }> = [];
+    let capturedCtx: SessionContext | undefined;
+    let capturedMessage: SessionMessage | undefined;
+    const ack = deferred();
+    const handler = createMockHandler({
+      async start(msg, ctx) {
+        capturedCtx = ctx;
+        capturedMessage = msg;
+        return { sessionId: "session-1", route: { kind: "owned" as const, mode: "queued" as const } };
+      },
+    });
+    const sm = createSessionRuntime({
+      handler,
+      ackEntry: vi.fn().mockReturnValue(ack.promise),
+      onRuntimeStateChange: vi.fn(),
+      onSessionRuntimeChange: (chatId, state) => events.push({ chatId, state }),
+    });
+
+    await sm.dispatch(mockEntry({ id: 1, chatId: "chat-a" }));
+    if (!capturedCtx || !capturedMessage) throw new Error("expected captured session context");
+    capturedCtx.markMessagesConsumed(capturedMessage);
+    capturedCtx.recordProviderActivity();
+    expect(events[events.length - 1]).toEqual({ chatId: "chat-a", state: "working" });
+
+    // Turn liveness ends, but the owned delivery is still being processed —
+    // ownership alone must keep the chat working.
+    capturedCtx.emitEvent({ kind: "turn_end", payload: { status: "success" } });
+    expect(events[events.length - 1]).toEqual({ chatId: "chat-a", state: "working" });
+    expect(sm.getAggregateRuntimeState()).toBe("working");
+
+    ack.resolve();
+    await sm.shutdown();
+  });
+
   it("keeps ACK failure unsettled and recovers before routing later delivery", async () => {
     const events: Array<{ chatId: string; state: string }> = [];
     const recovery = deferred();

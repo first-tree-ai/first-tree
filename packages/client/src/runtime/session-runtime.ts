@@ -3253,6 +3253,11 @@ export class SessionRuntime {
         const entry = this.projection.getSession(chatId);
         if (entry && entry.status === "active") {
           entry.lastActivity = Date.now();
+          // A provider message means a turn is running here, whoever started
+          // it. Inbox ownership does not cover a turn the provider re-invokes
+          // itself for (a completed background task, for instance), and such a
+          // turn must not read as "Idle" while it burns tools and tokens.
+          this.projection.noteProviderTurnStart(chatId);
         }
       },
       emitEvent: (event) => {
@@ -3267,6 +3272,7 @@ export class SessionRuntime {
           return;
         }
         if (mutationValid && !mutationValid()) return;
+        if (event.kind === "turn_end") this.projection.noteProviderTurnEnd(chatId);
         this.config.onSessionEvent?.(chatId, event);
         if (mutationValid && !mutationValid()) return;
         this.captureRuntimeFailureNotice(chatId, event, mutationValid);
@@ -3275,6 +3281,11 @@ export class SessionRuntime {
         if (mutationValid && !mutationValid()) {
           return Promise.reject(new Error("route transition invalidated"));
         }
+        // `turn_end` also reaches the server through this confirmed channel
+        // (the Codex landing trial awaits it), so turn liveness must clear
+        // here too or that turn would stay `working` until the session is
+        // suspended.
+        if (event.kind === "turn_end") this.projection.noteProviderTurnEnd(chatId);
         return this.confirmSessionEventOrThrow(chatId, event, mutationValid);
       },
       forwardResult: (text) => {

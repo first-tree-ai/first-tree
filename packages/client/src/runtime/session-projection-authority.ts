@@ -100,6 +100,13 @@ export class SessionProjectionAuthority<
   private readonly registry: SessionRegistry | null;
   private readonly lastReportedStates = new Map<string, SessionState>();
   private readonly sessionRuntimeStates = new Map<string, RuntimeState>();
+  /**
+   * Chats whose provider is currently inside a turn. Set from the first
+   * provider message of a turn and cleared at `turn_end`, so a turn the inbox
+   * does not own — a provider re-invoked by its own background-task
+   * completion, for instance — still projects `working`.
+   */
+  private readonly providerTurnInFlight = new Set<string>();
   /** Chats held specifically for a fresh bind, never same-socket recovery. */
   private readonly runtimeProofRecoveryChats = new Set<string>();
   private lastReportedRuntimeState: RuntimeState | null = null;
@@ -365,6 +372,37 @@ export class SessionProjectionAuthority<
     onStateChange(chatId, state);
   }
 
+  /**
+   * The provider produced a message for `chatId`, so a turn is running there.
+   *
+   * Inbox delivery ownership alone is NOT sufficient to detect a running turn:
+   * a provider that re-invokes itself when a background task completes runs a
+   * full turn — tool calls, output, token spend — with no owned inbox entry,
+   * and projecting `idle` for it made a busy agent read as "Idle" on every
+   * chat surface. Turn liveness is therefore tracked from the provider stream
+   * itself, which every provider reports through `recordProviderActivity`.
+   */
+  noteProviderTurnStart(chatId: string): void {
+    if (this.providerTurnInFlight.has(chatId)) return;
+    this.providerTurnInFlight.add(chatId);
+    this.projectSessionRuntime(chatId);
+  }
+
+  /**
+   * The provider closed a turn for `chatId` (its `turn_end` event). The chat
+   * falls back to inbox-ownership projection, so it stays `working` when an
+   * owned delivery is still being processed and goes `idle` otherwise.
+   *
+   * A provider that dies mid-turn without emitting `turn_end` cannot pin
+   * `working` forever: `lastActivity` stops advancing, so the idle sweep
+   * suspends the session at the `idle_timeout + working_grace` hard cap and
+   * the projection is withdrawn.
+   */
+  noteProviderTurnEnd(chatId: string): void {
+    if (!this.providerTurnInFlight.delete(chatId)) return;
+    this.projectSessionRuntime(chatId);
+  }
+
   projectSessionRuntime(chatId: string, opts: { drainPendingOnIdle?: boolean } = {}): void {
     const session = this.sessions.get(chatId);
     const state = this.projectedRuntimeState(chatId, session ?? null);
@@ -386,7 +424,7 @@ export class SessionProjectionAuthority<
     if (!session) return null;
     if (session.status === "errored") return "error";
     if (session.status !== "active") return null;
-    return this.deps.hasProcessingOwnedWork(chatId) ? "working" : "idle";
+    return this.deps.hasProcessingOwnedWork(chatId) || this.providerTurnInFlight.has(chatId) ? "working" : "idle";
   }
 
   /**
@@ -398,6 +436,10 @@ export class SessionProjectionAuthority<
    * observable even without an ordinary value change.
    */
   private withdrawSessionRuntime(chatId: string): void {
+    // Drop turn liveness first: a withdrawn projection means the session is
+    // gone, suspended, or not active, and none of those may leave a stale
+    // in-flight turn behind for the next session on this chat.
+    this.providerTurnInFlight.delete(chatId);
     if (!this.sessionRuntimeStates.delete(chatId)) return;
     this.deps.onSessionRuntimeChange()?.(chatId, "idle");
     this.recomputeRuntimeState();
