@@ -97,6 +97,60 @@ describe("PsSubprocessProbe", () => {
     probe.stop();
   });
 
+  it("does not call a long-lived stdio MCP server session-spawned work", async () => {
+    // The shape that made this distinction necessary: on a host running
+    // MCP-configured agents, EVERY provider has a permanent `npm exec … mcp`
+    // child. Reading that as "background task" would put the qualifier on
+    // every idle chat on the machine — the opposite of what it is for.
+    const mcpOnly = [`300  ${daemonPid} /opt/homebrew/bin/claude`, "301  300 npm exec momentic mcp --config /x.yaml"];
+    const env = async (): Promise<string> => "FIRST_TREE_CHAT_ID=chat-mcp /bin/claude";
+    let rows = [...mcpOnly];
+    const probe = new PsSubprocessProbe({
+      log: silentLogger(),
+      daemonPid,
+      intervalMs: 1_000_000,
+      runProcessSnapshot: async () => rows.join("\n"),
+      runEnvForPid: env,
+    });
+
+    await probe.refresh();
+    // Broad predicate still true — the eviction deferral it feeds is meant to
+    // be conservative — but nothing this session started is running.
+    expect(probe.hasLiveSubprocess("chat-mcp")).toBe(true);
+    expect(probe.hasSessionSpawnedSubprocess("chat-mcp")).toBe(false);
+
+    // A turn launches a background watcher: a child the baseline never saw.
+    rows = [...mcpOnly, "302  300 /bin/zsh", "303  302 sleep"];
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess("chat-mcp")).toBe(true);
+
+    // It finishes; the permanent MCP child alone must not keep the claim alive.
+    rows = [...mcpOnly];
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess("chat-mcp")).toBe(false);
+    probe.stop();
+  });
+
+  it("re-baselines when the provider process is replaced", async () => {
+    // Baselines are keyed by provider pid, so a restarted provider must not
+    // inherit the old one's children as its session infrastructure.
+    let rows = [`400  ${daemonPid} /opt/homebrew/bin/claude`, "401  400 npm exec momentic mcp"];
+    const probe = new PsSubprocessProbe({
+      log: silentLogger(),
+      daemonPid,
+      intervalMs: 1_000_000,
+      runProcessSnapshot: async () => rows.join("\n"),
+      runEnvForPid: async () => "FIRST_TREE_CHAT_ID=chat-restart /bin/claude",
+    });
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess("chat-restart")).toBe(false);
+
+    rows = [`500  ${daemonPid} /opt/homebrew/bin/claude`, "501  500 npm exec momentic mcp"];
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess("chat-restart")).toBe(false);
+    probe.stop();
+  });
+
   it("falls back to no-live-work when the process scan fails", async () => {
     const probe = new PsSubprocessProbe({
       log: silentLogger(),
@@ -109,6 +163,7 @@ describe("PsSubprocessProbe", () => {
     });
     await probe.refresh();
     expect(probe.hasLiveSubprocess("chat-A")).toBe(false);
+    expect(probe.hasSessionSpawnedSubprocess("chat-A")).toBe(false);
     probe.stop();
   });
 });

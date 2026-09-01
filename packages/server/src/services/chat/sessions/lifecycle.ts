@@ -443,7 +443,7 @@ export async function finalizeTerminatedSession(
       if (existing.runtimeState !== "idle") {
         await tx
           .update(agentChatSessions)
-          .set({ runtimeState: "idle", runtimeStateAt: now, updatedAt: now })
+          .set({ runtimeState: "idle", runtimeStateAt: now, backgroundWork: false, updatedAt: now })
           .where(and(eq(agentChatSessions.agentId, agentId), eq(agentChatSessions.chatId, chatId)));
       }
       await sessionEventService.clearEvents(tx as unknown as Database, agentId, chatId);
@@ -453,7 +453,7 @@ export async function finalizeTerminatedSession(
 
     await tx
       .update(agentChatSessions)
-      .set({ state: "evicted", runtimeState: "idle", runtimeStateAt: now, updatedAt: now })
+      .set({ state: "evicted", runtimeState: "idle", runtimeStateAt: now, backgroundWork: false, updatedAt: now })
       .where(and(eq(agentChatSessions.agentId, agentId), eq(agentChatSessions.chatId, chatId)));
 
     await sessionEventService.clearEvents(tx as unknown as Database, agentId, chatId);
@@ -534,7 +534,7 @@ export async function archiveAllSessionsForAgent(
 
     const transitioned = await tx
       .update(agentChatSessions)
-      .set({ state: "evicted", runtimeState: "idle", runtimeStateAt: now, updatedAt: now })
+      .set({ state: "evicted", runtimeState: "idle", runtimeStateAt: now, backgroundWork: false, updatedAt: now })
       .where(and(eq(agentChatSessions.agentId, agentId), ne(agentChatSessions.state, "evicted")))
       .returning({ chatId: agentChatSessions.chatId });
 
@@ -598,8 +598,8 @@ async function transitionSessionState(
       .update(agentChatSessions)
       .set(
         canTransition
-          ? { state: target, runtimeState: "idle", runtimeStateAt: now, updatedAt: now }
-          : { runtimeState: "idle", runtimeStateAt: now, updatedAt: now },
+          ? { state: target, runtimeState: "idle", runtimeStateAt: now, backgroundWork: false, updatedAt: now }
+          : { runtimeState: "idle", runtimeStateAt: now, backgroundWork: false, updatedAt: now },
       )
       .where(and(eq(agentChatSessions.agentId, agentId), eq(agentChatSessions.chatId, chatId)));
 

@@ -7,6 +7,7 @@ import type {
   ProviderRetryEventPayload,
   RuntimeState,
   SessionEvent,
+  SessionRuntimeReport,
   SessionState,
 } from "@first-tree/shared";
 import { encodeProviderRetryEventMessage, parseProviderRetryEventMessage } from "@first-tree/shared";
@@ -21,6 +22,7 @@ import type {
 } from "../runtime/handler.js";
 import type { DeliveryDecision, DeliveryRouteOwnership, DeliveryWork } from "../runtime/inbox-delivery-coordinator.js";
 import type { SubprocessProbe } from "../runtime/process-tree-probe.js";
+import { PsSubprocessProbe } from "../runtime/process-tree-probe.js";
 import { SessionRegistry } from "../runtime/session-registry.js";
 import { SessionRuntime } from "../runtime/session-runtime.js";
 import { recordingLogger, silentLogger } from "./_logger-helpers.js";
@@ -65,6 +67,8 @@ type SessionRuntimeInternals = {
     projectSessionRuntime(chatId: string, opts?: { drainPendingOnIdle?: boolean }): void;
     recomputeRuntimeState(): void;
     reaffirmRuntimeStates(): void;
+    hasBackgroundWork(chatId: string): boolean;
+    noteProviderTurnStart(chatId: string): void;
     persistRegistry(): void;
     recordHandlerSource(entry: SessionRecord, sourceKey: string): void;
   };
@@ -265,7 +269,7 @@ function makeRuntime(
     subprocessProbe?: SubprocessProbe;
     onStateChange?: (chatId: string, state: SessionState) => void;
     onRuntimeStateChange?: (state: TestRuntimeState) => void;
-    onSessionRuntimeChange?: (chatId: string, state: TestRuntimeState) => void;
+    onSessionRuntimeChange?: (chatId: string, report: SessionRuntimeReport) => void;
     onSessionEvent?: (chatId: string, event: SessionEvent) => void;
     confirmSessionEvent?: (chatId: string, event: SessionEvent) => Promise<void>;
     workspaceRoot?: string;
@@ -7212,7 +7216,9 @@ describe("SessionRuntime edge coverage", () => {
     });
 
     await sm.dispatch(mockEntry({ id: 1, chatId: "chat-runtime" }));
-    expect(sm.getSessionRuntimeStates()).toEqual([{ chatId: "chat-runtime", runtimeState: "working" }]);
+    expect(sm.getSessionRuntimeStates()).toEqual([
+      { chatId: "chat-runtime", runtimeState: "working", backgroundWork: false },
+    ]);
     if (!captured) throw new Error("context was not captured");
     runtimeChanges.length = 0;
     await sm.handleCommand("chat-runtime", "session:suspend");
@@ -7303,7 +7309,7 @@ describe("SessionRuntime edge coverage", () => {
     const sessionRuntimeChanges: Array<{ chatId: string; state: RuntimeState }> = [];
     const aggregateChanges: RuntimeState[] = [];
     const sm = makeRuntime({
-      onSessionRuntimeChange: (chatId, state) => sessionRuntimeChanges.push({ chatId, state }),
+      onSessionRuntimeChange: (chatId, { runtimeState }) => sessionRuntimeChanges.push({ chatId, state: runtimeState }),
       onRuntimeStateChange: (state) => aggregateChanges.push(state),
     });
     const i = internals(sm);
@@ -7726,9 +7732,130 @@ describe("SessionRuntime edge coverage", () => {
     await sm.shutdown();
   });
 
+  it("qualifies an idle chat with background work and keeps re-affirming it", async () => {
+    // A provider parked on a task it started itself burns no tokens, so the
+    // chat is genuinely idle — but it wakes itself up, which plain "Idle"
+    // cannot say. The marker rides the runtime frame it qualifies.
+    const onSessionRuntimeChange = vi.fn();
+    const subprocessProbe: SubprocessProbe = {
+      hasLiveSubprocess: vi.fn(() => true),
+      hasSessionSpawnedSubprocess: vi.fn((chatId: string) => chatId === "chat-parked"),
+      stop: vi.fn(),
+    };
+    const sm = makeRuntime({ subprocessProbe, onSessionRuntimeChange });
+    const i = internals(sm);
+    bindSeededSession(i, makeSessionRecord("chat-parked", { status: "active", lastActivity: Date.now() }));
+    i.projection.projectSessionRuntime("chat-parked");
+    onSessionRuntimeChange.mockClear();
+
+    i.projection.reaffirmRuntimeStates();
+    expect(onSessionRuntimeChange).toHaveBeenCalledWith("chat-parked", { runtimeState: "idle", backgroundWork: true });
+    expect(i.projection.hasBackgroundWork("chat-parked")).toBe(true);
+
+    // The server only trusts the marker while the runtime stamp is fresh, so
+    // the re-affirm must keep coming for as long as the provider is parked.
+    onSessionRuntimeChange.mockClear();
+    i.projection.reaffirmRuntimeStates();
+    expect(onSessionRuntimeChange).toHaveBeenCalledWith("chat-parked", { runtimeState: "idle", backgroundWork: true });
+
+    await sm.shutdown();
+  });
+
+  it("never asserts background work while a turn is running", async () => {
+    // The probe answers "the provider has a live child process", which an
+    // ordinary foreground tool call satisfies too. Only an idle chat may
+    // carry the marker, or a `Bash` step would flap it every turn.
+    const onSessionRuntimeChange = vi.fn();
+    const subprocessProbe: SubprocessProbe = {
+      hasLiveSubprocess: vi.fn(() => true),
+      hasSessionSpawnedSubprocess: vi.fn(() => true),
+      stop: vi.fn(),
+    };
+    const sm = makeRuntime({ subprocessProbe, onSessionRuntimeChange });
+    const i = internals(sm);
+    const chatId = "chat-running-turn";
+    bindSeededSession(i, makeSessionRecord(chatId, { status: "active", lastActivity: Date.now() }));
+    i.projection.projectSessionRuntime(chatId);
+    i.projection.reaffirmRuntimeStates();
+    expect(i.projection.hasBackgroundWork(chatId)).toBe(true);
+
+    // A turn starts: the marker retires with the transition, and the frame
+    // carrying `working` carries the cleared value with it.
+    onSessionRuntimeChange.mockClear();
+    i.projection.noteProviderTurnStart(chatId);
+    expect(onSessionRuntimeChange).toHaveBeenCalledWith(chatId, { runtimeState: "working", backgroundWork: false });
+    expect(i.projection.hasBackgroundWork(chatId)).toBe(false);
+
+    i.projection.reaffirmRuntimeStates();
+    expect(i.projection.hasBackgroundWork(chatId)).toBe(false);
+
+    await sm.shutdown();
+  });
+
+  it("never asserts background work for a session whose only child is its MCP server", async () => {
+    // End to end against the REAL probe rather than a stubbed boolean: this is
+    // the shape that would have shipped the qualifier onto every idle chat of
+    // every MCP-configured agent, and a boolean stub cannot see it because it
+    // assumes the probe already answers the product question.
+    const chatId = "chat-mcp-only";
+    const probe = new PsSubprocessProbe({
+      log: silentLogger(),
+      daemonPid: 4242,
+      intervalMs: 1_000_000,
+      runProcessSnapshot: async () =>
+        ["4242 1 node", "7000 4242 /opt/homebrew/bin/claude", "7001 7000 npm exec momentic mcp --config /x.yaml"].join(
+          "\n",
+        ),
+      runEnvForPid: async () => `FIRST_TREE_CHAT_ID=${chatId} /opt/homebrew/bin/claude`,
+    });
+    await probe.refresh();
+
+    const onSessionRuntimeChange = vi.fn();
+    const sm = makeRuntime({ subprocessProbe: probe, onSessionRuntimeChange });
+    const i = internals(sm);
+    bindSeededSession(i, makeSessionRecord(chatId, { status: "active", lastActivity: Date.now() }));
+    i.projection.projectSessionRuntime(chatId);
+    onSessionRuntimeChange.mockClear();
+
+    i.projection.reaffirmRuntimeStates();
+    expect(i.projection.hasBackgroundWork(chatId)).toBe(false);
+    expect(onSessionRuntimeChange).not.toHaveBeenCalled();
+
+    probe.stop();
+    await sm.shutdown();
+  });
+
+  it("stops asserting background work past the idle-sweep hard cap", async () => {
+    // A forgotten background watcher must not leave "background task" on an
+    // agent forever: past `idle_timeout + working_grace` the sweep reclaims
+    // the slot anyway, so the assertion stops at the same boundary.
+    const onSessionRuntimeChange = vi.fn();
+    const subprocessProbe: SubprocessProbe = {
+      hasLiveSubprocess: vi.fn(() => true),
+      hasSessionSpawnedSubprocess: vi.fn(() => true),
+      stop: vi.fn(),
+    };
+    const sm = makeRuntime({ subprocessProbe, onSessionRuntimeChange });
+    const i = internals(sm);
+    const pastCapMs = (sessionConfig.idle_timeout + sessionConfig.working_grace_seconds) * 1000 + 1_000;
+    bindSeededSession(
+      i,
+      makeSessionRecord("chat-forgotten-watcher", { status: "active", lastActivity: Date.now() - pastCapMs }),
+    );
+    i.projection.projectSessionRuntime("chat-forgotten-watcher");
+    onSessionRuntimeChange.mockClear();
+
+    i.projection.reaffirmRuntimeStates();
+    expect(i.projection.hasBackgroundWork("chat-forgotten-watcher")).toBe(false);
+    expect(onSessionRuntimeChange).not.toHaveBeenCalled();
+
+    await sm.shutdown();
+  });
+
   it("evicts idle active sessions with live subprocesses only after no better candidate exists", async () => {
     const subprocessProbe: SubprocessProbe = {
       hasLiveSubprocess: vi.fn((chatId: string) => chatId === "chat-live-subprocess"),
+      hasSessionSpawnedSubprocess: vi.fn(() => false),
       stop: vi.fn(),
     };
     const sm = makeRuntime({ maxSessions: 1, subprocessProbe });

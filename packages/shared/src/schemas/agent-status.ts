@@ -148,6 +148,18 @@ export const agentChatStatusSchema = z
      */
     statusReason: agentStatusReasonSchema.optional(),
     /**
+     * The provider for this chat is parked on work it started itself (a
+     * background task) and will resume on its own when that work finishes.
+     *
+     * Descriptive only, exactly like `activity` and `statusReason`: it is NOT
+     * an input to `main`, and a chat carrying it stays `ready`. A parked
+     * provider burns no tokens and runs no turn, so calling it `working`
+     * would be a lie; but plain "Idle" is also a lie by omission, because it
+     * reads as "finished, nothing will happen without you" when in fact the
+     * agent wakes itself up. Surfaces render it as a qualifier on Idle.
+     */
+    backgroundWork: z.boolean().optional(),
+    /**
      * The agent's live client connection declares the composite Reset
      * capability `wsSessionResetV1` — i.e. it answers a ref'd terminate with
      * an apply-ack, parks intervening inbox rows behind the Reset fence, and
@@ -190,6 +202,7 @@ export type AgentChatStatusInput = DeriveMainStatusInput & {
   agentId: string;
   activity?: LiveActivity | null;
   statusReason?: AgentStatusReason;
+  backgroundWork?: boolean;
   sessionResetSupported?: boolean;
   teamSkillInvocationSupported?: boolean;
 };
@@ -209,6 +222,7 @@ export function buildAgentChatStatus(input: AgentChatStatusInput): AgentChatStat
     main: deriveMainStatus(input),
     activity: input.activity ?? null,
     ...(input.statusReason ? { statusReason: input.statusReason } : {}),
+    ...(input.backgroundWork ? { backgroundWork: true } : {}),
     ...(input.sessionResetSupported !== undefined ? { sessionResetSupported: input.sessionResetSupported } : {}),
     ...(input.teamSkillInvocationSupported !== undefined
       ? { teamSkillInvocationSupported: input.teamSkillInvocationSupported }

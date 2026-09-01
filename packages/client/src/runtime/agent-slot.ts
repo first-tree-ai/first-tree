@@ -6,6 +6,7 @@ import type {
   RuntimeState,
   SessionCommandAbortReason,
   SessionEvent,
+  SessionRuntimeReport,
   SessionState,
 } from "@first-tree/shared";
 import { runtimeProviderSchema } from "@first-tree/shared";
@@ -414,7 +415,7 @@ export class AgentSlot {
         onRuntimeStateChange: (state) => this.reportRuntimeState(state),
         onSessionEvent: (chatId, event) => this.reportSessionEvent(chatId, event),
         confirmSessionEvent: (chatId, event) => this.confirmSessionEvent(chatId, event),
-        onSessionRuntimeChange: (chatId, state) => this.reportSessionRuntime(chatId, state),
+        onSessionRuntimeChange: (chatId, report) => this.reportSessionRuntime(chatId, report),
       });
 
       const onCommand = (cmd: {
@@ -886,8 +887,8 @@ export class AgentSlot {
     return this.clientConnection.reportSessionEventConfirmed(this.config.agentId, chatId, event);
   }
 
-  private reportSessionRuntime(chatId: string, state: RuntimeState): void {
-    this.clientConnection.reportSessionRuntime(this.config.agentId, chatId, state);
+  private reportSessionRuntime(chatId: string, report: SessionRuntimeReport): void {
+    this.clientConnection.reportSessionRuntime(this.config.agentId, chatId, report);
   }
 
   private fullStateSync(): void {
@@ -927,9 +928,15 @@ export class AgentSlot {
     // holds.
     const runtimeStates = this.sessionRuntime.getSessionRuntimeStates(null);
     const reportedRuntimeChatIds = new Set<string>();
-    for (const { chatId, runtimeState } of runtimeStates) {
+    for (const { chatId, runtimeState, backgroundWork } of runtimeStates) {
       reportedRuntimeChatIds.add(chatId);
-      this.clientConnection.reportSessionRuntime(this.config.agentId, chatId, runtimeState);
+      // Normalize at the boundary: the snapshot is the reconnect repair path,
+      // and a missing marker must go on the wire as an explicit `false` rather
+      // than as `undefined`.
+      this.clientConnection.reportSessionRuntime(this.config.agentId, chatId, {
+        runtimeState,
+        backgroundWork: backgroundWork === true,
+      });
     }
     // The server's complete active-session set is the reconnect catch-up scope.
     // It is deliberately separate from `activeChatIds`, which is filtered by
@@ -943,7 +950,11 @@ export class AgentSlot {
     if (activeSessionChatIds) {
       for (const chatId of activeSessionChatIds) {
         if (!reportedRuntimeChatIds.has(chatId)) {
-          this.clientConnection.reportSessionRuntime(this.config.agentId, chatId, "idle");
+          // Revocation: no local session, therefore nothing parked either.
+          this.clientConnection.reportSessionRuntime(this.config.agentId, chatId, {
+            runtimeState: "idle",
+            backgroundWork: false,
+          });
         }
       }
     }

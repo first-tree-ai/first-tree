@@ -6,6 +6,7 @@ import {
   ASSISTANT_TEXT_PREVIEW_MAX,
   type AssistantTextEventPayload,
   buildAgentChatStatus,
+  deriveMainStatus,
   LIVE_ACTIVITY_STALE_MS,
   type LiveActivity,
   parseProviderRetryEventMessage,
@@ -452,6 +453,7 @@ export async function resolveAgentChatStatuses(
       state: agentChatSessions.state,
       runtimeState: agentChatSessions.runtimeState,
       runtimeStateAt: agentChatSessions.runtimeStateAt,
+      backgroundWork: agentChatSessions.backgroundWork,
     })
     .from(agentChatSessions)
     .where(and(inArray(agentChatSessions.chatId, chatIds), inArray(agentChatSessions.agentId, allAgentIds)));
@@ -548,6 +550,16 @@ export async function resolveAgentChatStatuses(
       const activity = perAgentActivity?.get(agentId) ?? null;
       const engagement: AgentEngagement = state === "active" ? "active" : state === "suspended" ? "suspended" : "none";
       const working = computeWorking(sess, activity, now);
+      const axes = {
+        reachable: p?.clientId != null,
+        errored: computeErrored(sess, p?.runtimeState ?? null, now),
+        working,
+        engagement,
+      };
+      // Only a chat that actually reduces to `ready` may carry the qualifier.
+      // A disconnect keeps the last runtime row fresh for the stale window, so
+      // gating on `!working` alone would render "Offline · Background task".
+      const backgroundWork = deriveMainStatus(axes) === "ready" && computeBackgroundWork(sess, now);
       // A `provider_turn`-scoped `terminal` reason (provider_retry_exhausted /
       // provider_failure_terminal) records that a *past* turn's provider attempts
       // gave up. Once the agent is `working` again it is on a NEW turn, so that
@@ -572,10 +584,7 @@ export async function resolveAgentChatStatuses(
       arr.push(
         buildAgentChatStatus({
           agentId,
-          reachable: p?.clientId != null,
-          errored: computeErrored(sess, p?.runtimeState ?? null, now),
-          working,
-          engagement,
+          ...axes,
           // The activity is a descriptor of in-flight work — carry it only
           // while working, matching the schema's "null when not working"
           // contract. Codex no-events case (new-client authoritative path):
@@ -590,6 +599,10 @@ export async function resolveAgentChatStatuses(
           // runtime frame self-heals.
           activity: working ? activity : null,
           statusReason,
+          // Why an idle chat is not finished. Descriptive only — `main` stays
+          // `ready` — and suppressed while working, where the running turn is
+          // the more specific truth.
+          backgroundWork,
           // Live-connection capability gate for the Web chat-session Reset:
           // only a client that negotiated the composite v1 protocol can both
           // prove the old provider mapping is gone and release the rows it
@@ -642,6 +655,7 @@ type RuntimeSessionRow =
       state: string;
       runtimeState: string;
       runtimeStateAt: Date | null;
+      backgroundWork?: boolean;
     }
   | undefined;
 
@@ -676,6 +690,24 @@ export function computeWorking(session: RuntimeSessionRow, activity: LiveActivit
     return activity != null;
   }
   return isRuntimeFresh(session, now) && session.runtimeState === ("working" satisfies RuntimeState);
+}
+
+/**
+ * Descriptive companion to `computeWorking`: the client last reported that the
+ * provider is parked on work it started itself and will resume unprompted.
+ *
+ * This answers only "did a live client recently say so", gated on the SAME
+ * freshness window as `working` — a client that dies or stops reporting stops
+ * asserting background work rather than leaving a permanent "background task"
+ * on a chat nobody is running. Whether that claim is worth *showing* is a
+ * separate question the caller answers, because the marker qualifies the word
+ * "Idle" specifically: an unreachable, failed, paused, or working chat is not
+ * idle, and appending "· Background task" to any of those states would state
+ * something the composite does not mean. Never an input to `main`.
+ */
+export function computeBackgroundWork(session: RuntimeSessionRow, now: number): boolean {
+  if (!isRuntimeFresh(session, now)) return false;
+  return session?.backgroundWork === true;
 }
 
 function isFaultRuntime(runtimeState: string): boolean {

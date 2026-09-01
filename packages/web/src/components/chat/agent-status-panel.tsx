@@ -314,6 +314,15 @@ function SecondLine({ status }: { status: AgentChatStatus | null }) {
   return (
     <div className="text-caption" style={{ color: view.colorVar }}>
       {view.label}
+      {/* Why this idle agent is not finished: its provider is parked on work
+          it started itself and wakes up on its own. Rendered as a quieter
+          qualifier, not a second state — the dot stays idle. The `ready`
+          check is defense in depth: the qualifier reads as a footnote on the
+          word "Idle", so it must never trail Offline or Paused even if the
+          server were to send it alongside one. */}
+      {status.main === "ready" && status.backgroundWork === true ? (
+        <span style={{ color: "var(--fg-4)" }}> · Background task</span>
+      ) : null}
     </div>
   );
 }

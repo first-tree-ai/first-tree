@@ -1023,6 +1023,9 @@ describe("Agent client WS branch fakes", () => {
       "working",
       "org_1",
       expect.anything(),
+      // The descriptive background-work marker rides the same frame; a client
+      // that omits it asserts nothing, which persists as `false`.
+      false,
     );
     expect(presenceService.setRuntimeState).toHaveBeenCalledWith(
       expect.anything(),

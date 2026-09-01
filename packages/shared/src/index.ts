@@ -1395,6 +1395,7 @@ export {
   runtimeStateSchema,
   SESSION_STATES,
   type SessionRuntimeMessage,
+  type SessionRuntimeReport,
   type SessionState,
   type SessionStateMessage,
   sessionRuntimeMessageSchema,

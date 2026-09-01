@@ -1,3 +1,4 @@
+import type { SessionRuntimeReport } from "@first-tree/shared";
 import type pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import type { FirstTreeHubSDK } from "../cloud/sdk.js";
@@ -44,7 +45,7 @@ function createSessionRuntime(opts: {
   concurrency?: number;
   log?: pino.Logger;
   onRuntimeStateChange?: (state: "idle" | "working" | "blocked" | "error") => void;
-  onSessionRuntimeChange?: (chatId: string, state: "idle" | "working" | "blocked" | "error") => void;
+  onSessionRuntimeChange?: (chatId: string, report: SessionRuntimeReport) => void;
 }): SessionRuntime {
   const handler = opts.handler ?? createMockHandler();
   const factory: HandlerFactory = opts.handlerFactory ?? (() => handler);
@@ -105,7 +106,7 @@ describe("SessionRuntime runtime projection from inbox coordinator work", () => 
       handler,
       ackEntry: vi.fn().mockReturnValue(ack.promise),
       onRuntimeStateChange: vi.fn(),
-      onSessionRuntimeChange: (chatId, state) => events.push({ chatId, state }),
+      onSessionRuntimeChange: (chatId, { runtimeState }) => events.push({ chatId, state: runtimeState }),
     });
 
     await sm.dispatch(mockEntry({ id: 1, chatId: "chat-a" }));
@@ -146,7 +147,7 @@ describe("SessionRuntime runtime projection from inbox coordinator work", () => 
     const sm = createSessionRuntime({
       handler,
       onRuntimeStateChange: vi.fn(),
-      onSessionRuntimeChange: (chatId, state) => events.push({ chatId, state }),
+      onSessionRuntimeChange: (chatId, { runtimeState }) => events.push({ chatId, state: runtimeState }),
     });
 
     await sm.dispatch(mockEntry({ id: 1, chatId: "chat-a" }));
@@ -185,7 +186,7 @@ describe("SessionRuntime runtime projection from inbox coordinator work", () => 
       handler,
       ackEntry: vi.fn().mockReturnValue(ack.promise),
       onRuntimeStateChange: vi.fn(),
-      onSessionRuntimeChange: (chatId, state) => events.push({ chatId, state }),
+      onSessionRuntimeChange: (chatId, { runtimeState }) => events.push({ chatId, state: runtimeState }),
     });
 
     await sm.dispatch(mockEntry({ id: 1, chatId: "chat-a" }));
@@ -224,7 +225,7 @@ describe("SessionRuntime runtime projection from inbox coordinator work", () => 
     const sm = createSessionRuntime({
       handler,
       onRuntimeStateChange: vi.fn(),
-      onSessionRuntimeChange: (chatId, state) => events.push({ chatId, state }),
+      onSessionRuntimeChange: (chatId, { runtimeState }) => events.push({ chatId, state: runtimeState }),
     });
 
     await sm.dispatch(mockEntry({ id: 1, chatId: "chat-a" }));
@@ -265,7 +266,7 @@ describe("SessionRuntime runtime projection from inbox coordinator work", () => 
       recoverChat,
       ackEntry: vi.fn().mockRejectedValue(new Error("prefix_gap")),
       onRuntimeStateChange: vi.fn(),
-      onSessionRuntimeChange: (chatId, state) => events.push({ chatId, state }),
+      onSessionRuntimeChange: (chatId, { runtimeState }) => events.push({ chatId, state: runtimeState }),
     });
 
     const first = mockEntry({ id: 1, chatId: "chat-a" });

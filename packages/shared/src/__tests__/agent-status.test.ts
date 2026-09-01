@@ -146,6 +146,33 @@ describe("buildAgentChatStatus", () => {
     expect(agentChatStatusSchema.safeParse(status).success).toBe(true);
   });
 
+  it("carries background work without letting it touch main", () => {
+    // The marker says "idle, but it wakes itself up" — a descriptive
+    // qualifier like `activity` / `statusReason`, never a fifth state.
+    const status = buildAgentChatStatus({
+      agentId: "agent-1",
+      reachable: true,
+      errored: false,
+      working: false,
+      engagement: "active",
+      backgroundWork: true,
+    });
+    expect(status.main).toBe("ready");
+    expect(status.backgroundWork).toBe(true);
+    expect(agentChatStatusSchema.safeParse(status).success).toBe(true);
+  });
+
+  it("omits background work when absent so the field never lands as false", () => {
+    const status = buildAgentChatStatus({
+      agentId: "agent-1",
+      reachable: true,
+      errored: false,
+      working: false,
+      engagement: "active",
+    });
+    expect(status.backgroundWork).toBeUndefined();
+  });
+
   it("an unreachable agent builds to offline regardless of other axes", () => {
     const status = buildAgentChatStatus({
       agentId: "agent-1",

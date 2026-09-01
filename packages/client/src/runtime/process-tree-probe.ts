@@ -22,6 +22,20 @@ const execFileAsync = promisify(execFile);
 export interface SubprocessProbe {
   /** True if the provider for `chatId` currently has at least one live descendant. */
   hasLiveSubprocess(chatId: string): boolean;
+  /**
+   * True if the provider for `chatId` has a live child it did NOT start the
+   * session with — the closest available reading of "a task this session
+   * launched is still running".
+   *
+   * `hasLiveSubprocess` cannot answer that question. Its predicate is "the
+   * provider has any direct child", and a stdio MCP server is a direct child
+   * for the whole life of the session, so for any MCP-configured agent it is
+   * unconditionally true. That is harmless for the deferral it was built for
+   * (over-deferring a suspend is conservative and invisible) but wrong for
+   * anything a user reads, which would then say "background task" about every
+   * idle chat on the host.
+   */
+  hasSessionSpawnedSubprocess(chatId: string): boolean;
   /** Stop the background refresh loop (called on SessionRuntime shutdown). */
   stop(): void;
 }
@@ -74,6 +88,29 @@ export function hasDescendant(pid: number, childrenByParent: ReadonlyMap<number,
 }
 
 /**
+ * True if `pid` has a direct child outside `baseline` — the children it had
+ * when this provider process was first observed.
+ *
+ * The baseline is what a provider starts a session with and keeps: stdio MCP
+ * servers, most visibly. Work the session itself launches appears as a pid the
+ * baseline has never seen, which is exactly the distinction the plain
+ * descendant check cannot draw.
+ *
+ * Both error directions are deliberate. A provider first observed mid-turn
+ * baselines that turn's children and under-reports until they exit — silence
+ * rather than a false claim. An MCP server that crashes and respawns takes a
+ * new pid and over-reports for the rest of that provider process; that is a
+ * rare, self-limiting case, unlike the permanent misreading it replaces.
+ */
+export function hasNonBaselineChild(
+  pid: number,
+  childrenByParent: ReadonlyMap<number, number[]>,
+  baseline: ReadonlySet<number>,
+): boolean {
+  return (childrenByParent.get(pid) ?? []).some((childPid) => !baseline.has(childPid));
+}
+
+/**
  * Extract the `FIRST_TREE_CHAT_ID` value from a process's environment dump.
  * Handles both forms produced by {@link defaultEnvForPid}: space-separated
  * (Darwin `ps -Eww`) and NUL-separated (Linux `/proc/<pid>/environ`). The value
@@ -122,6 +159,13 @@ async function defaultEnvForPid(pid: number): Promise<string> {
  */
 export class PsSubprocessProbe implements SubprocessProbe {
   private chatIdsWithLiveWork = new Set<string>();
+  private chatIdsWithSessionSpawnedWork = new Set<string>();
+  /**
+   * Direct children each provider pid had when first observed. Keyed by pid,
+   * so a restarted provider re-baselines for free and a dead one is pruned on
+   * the next scan.
+   */
+  private readonly baselineChildrenByProvider = new Map<number, Set<number>>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private inflight: Promise<void> | null = null;
   private readonly daemonPid: number;
@@ -140,6 +184,10 @@ export class PsSubprocessProbe implements SubprocessProbe {
 
   hasLiveSubprocess(chatId: string): boolean {
     return this.chatIdsWithLiveWork.has(chatId);
+  }
+
+  hasSessionSpawnedSubprocess(chatId: string): boolean {
+    return this.chatIdsWithSessionSpawnedWork.has(chatId);
   }
 
   stop(): void {
@@ -167,12 +215,30 @@ export class PsSubprocessProbe implements SubprocessProbe {
       const rows = parseProcessRows(await this.runProcessSnapshot());
       const childrenByParent = buildChildrenIndex(rows);
       const next = new Set<string>();
-      for (const providerPid of findProviderPids(rows, this.daemonPid)) {
-        if (!hasDescendant(providerPid, childrenByParent)) continue;
+      const nextSessionSpawned = new Set<string>();
+      const providerPids = findProviderPids(rows, this.daemonPid);
+      for (const providerPid of providerPids) {
+        let baseline = this.baselineChildrenByProvider.get(providerPid);
+        if (!baseline) {
+          baseline = new Set(childrenByParent.get(providerPid) ?? []);
+          this.baselineChildrenByProvider.set(providerPid, baseline);
+        }
+        const live = hasDescendant(providerPid, childrenByParent);
+        const sessionSpawned = hasNonBaselineChild(providerPid, childrenByParent, baseline);
+        if (!live && !sessionSpawned) continue;
         const chatId = extractChatId(await this.runEnvForPid(providerPid));
-        if (chatId) next.add(chatId);
+        if (!chatId) continue;
+        if (live) next.add(chatId);
+        if (sessionSpawned) nextSessionSpawned.add(chatId);
+      }
+      // Drop baselines for providers that are gone, so a recycled pid cannot
+      // inherit a previous provider's session infrastructure.
+      const alive = new Set(providerPids);
+      for (const pid of this.baselineChildrenByProvider.keys()) {
+        if (!alive.has(pid)) this.baselineChildrenByProvider.delete(pid);
       }
       this.chatIdsWithLiveWork = next;
+      this.chatIdsWithSessionSpawnedWork = nextSessionSpawned;
     } catch (err) {
       // A probe failure must never wedge the runtime: fall back to "no live
       // work", which simply lets suspend proceed exactly as it did before this
@@ -182,6 +248,7 @@ export class PsSubprocessProbe implements SubprocessProbe {
         "subprocess probe refresh failed; treating all sessions as having no live subprocess",
       );
       this.chatIdsWithLiveWork = new Set();
+      this.chatIdsWithSessionSpawnedWork = new Set();
     }
   }
 }

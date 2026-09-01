@@ -252,7 +252,7 @@ describe("ClientConnection — WebSocket edge coverage", () => {
 
     connection.reportSessionState("agent-1", "chat-1", "active");
     connection.reportRuntimeState("agent-1", "working");
-    connection.reportSessionRuntime("agent-1", "chat-1", "working");
+    connection.reportSessionRuntime("agent-1", "chat-1", { runtimeState: "working", backgroundWork: false });
     connection.reportSessionEvent("agent-1", "chat-1", {
       kind: "error",
       payload: { source: "runtime", message: "still handshaking" },
@@ -281,7 +281,7 @@ describe("ClientConnection — WebSocket edge coverage", () => {
 
     connection.reportSessionState("agent-1", "chat-1", "active");
     connection.reportRuntimeState("agent-1", "working");
-    connection.reportSessionRuntime("agent-1", "chat-1", "working");
+    connection.reportSessionRuntime("agent-1", "chat-1", { runtimeState: "working", backgroundWork: false });
     connection.reportSessionEvent("agent-1", "chat-1", {
       kind: "error",
       payload: { source: "runtime", message: "before bind" },
@@ -317,7 +317,7 @@ describe("ClientConnection — WebSocket edge coverage", () => {
     const start = socket.sent.length;
     connection.reportSessionState("agent-1", "chat-1", "active");
     connection.reportRuntimeState("agent-1", "working");
-    connection.reportSessionRuntime("agent-1", "chat-1", "working");
+    connection.reportSessionRuntime("agent-1", "chat-1", { runtimeState: "working", backgroundWork: false });
     connection.reportSessionEvent("agent-1", "chat-1", {
       kind: "error",
       payload: { source: "runtime", message: "after bind" },

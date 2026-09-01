@@ -1,4 +1,4 @@
-import { index, pgTable, primaryKey, text, timestamp } from "drizzle-orm/pg-core";
+import { boolean, index, pgTable, primaryKey, text, timestamp } from "drizzle-orm/pg-core";
 import { agents } from "./agents.js";
 import { chats } from "./chats.js";
 
@@ -34,6 +34,16 @@ export const agentChatSessions = pgTable(
      * would let the producer light up agents that never reported anything.
      */
     runtimeStateAt: timestamp("runtime_state_at", { withTimezone: true }),
+    /**
+     * Descriptive companion to `runtime_state`: the provider for this pair is
+     * parked on work it started itself (a background task) and will resume
+     * without anyone messaging it. Written by the same `session:runtime`
+     * frame and therefore governed by the same `runtime_state_at` freshness
+     * — a client that stops reporting stops asserting background work. It is
+     * NOT an input to the composite `main`; an agent carrying it is still
+     * `ready`, just not finished.
+     */
+    backgroundWork: boolean("background_work").notNull().default(false),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [

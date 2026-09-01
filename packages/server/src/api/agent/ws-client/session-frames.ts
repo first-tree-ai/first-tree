@@ -119,7 +119,7 @@ export function createSessionFrameHandler(
       }
       const boundInfo = boundAgents.get(agentId);
       if (!boundInfo) return;
-      const { chatId, runtimeState } = payloadResult.data;
+      const { chatId, runtimeState, backgroundWork } = payloadResult.data;
       // Same per-(agent,chat) FIFO as session:state / session:event —
       // setSessionRuntime gates on `state='active'`, so the upstream
       // state write must drain first.
@@ -132,6 +132,7 @@ export function createSessionFrameHandler(
             runtimeState,
             boundInfo.organizationId,
             notifier,
+            backgroundWork === true,
           );
         } catch (err) {
           socket.send(

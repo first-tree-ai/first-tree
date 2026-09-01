@@ -101,6 +101,8 @@ export type SlotSchedulerAuthorityDeps = {
   idleTimeoutSec: () => number;
   workingGraceSec: () => number;
   hasLiveSubprocessProbe: (chatId: string) => boolean;
+  /** Live child the provider did not start the session with (see SubprocessProbe). */
+  hasSessionSpawnedSubprocessProbe: (chatId: string) => boolean;
   isProviderRouteAdmissionFenced: (chatId: string) => boolean;
   getSession: (chatId: string) => SlotSchedulerSessionEntry | undefined;
   sessionsValues: () => IterableIterator<SlotSchedulerSessionEntry>;
@@ -889,6 +891,32 @@ export class SlotSchedulerAuthority {
    */
   hasLiveSubprocess(chatId: string): boolean {
     return this.deps.hasLiveSubprocessProbe(chatId);
+  }
+
+  /**
+   * Background work this client is willing to *assert* to the server: the
+   * provider has a live child it did not start the session with, AND the
+   * session has not passed the `idle_timeout + working_grace` hard cap that
+   * `evictIdle` enforces.
+   *
+   * Deliberately NOT `hasLiveSubprocess`. That predicate is "any direct
+   * child", which a stdio MCP server satisfies for the whole session, so
+   * asserting on it would put "background task" on every idle chat of every
+   * MCP-configured agent — inverting a feature whose entire purpose is to stop
+   * Idle from lying. Deferring a suspend on the broader signal stays correct;
+   * telling a human something does not.
+   *
+   * The cap is the second guard. A forgotten `run_in_background` watcher that
+   * nobody will ever read would otherwise leave "background task" hanging on
+   * an agent; past the cap the sweep reclaims the slot anyway, so this stops
+   * asserting at the same boundary.
+   */
+  hasReportableBackgroundWork(chatId: string): boolean {
+    const session = this.deps.getSession(chatId);
+    if (!session || session.status !== "active") return false;
+    if (!this.deps.hasSessionSpawnedSubprocessProbe(chatId)) return false;
+    const capMs = (this.deps.idleTimeoutSec() + this.deps.workingGraceSec()) * 1000;
+    return Date.now() - session.lastActivity < capMs;
   }
 
   findOldestActiveSession(eligible: (session: SlotSchedulerSessionEntry) => boolean): SlotSchedulerSessionEntry | null {

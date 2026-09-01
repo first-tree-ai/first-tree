@@ -1,4 +1,4 @@
-import type { RuntimeState, SessionState } from "@first-tree/shared";
+import type { RuntimeState, SessionRuntimeReport, SessionState } from "@first-tree/shared";
 import type pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import type { FirstTreeHubSDK } from "../cloud/sdk.js";
@@ -79,7 +79,7 @@ function createSessionRuntime(opts: {
   concurrency?: number;
   log?: pino.Logger;
   onStateChange?: (chatId: string, state: SessionState) => void;
-  onSessionRuntimeChange?: (chatId: string, state: RuntimeState) => void;
+  onSessionRuntimeChange?: (chatId: string, report: SessionRuntimeReport) => void;
   recoverChat?: (chatId: string) => Promise<void>;
 }) {
   const handler = opts.handler ?? createMockHandler();
@@ -160,7 +160,7 @@ describe("SessionRuntime: state notifications", () => {
       session: { idle_timeout: 300, max_sessions: 2, working_grace_seconds: 3600, reconcile_interval_seconds: 300 },
       handlerFactory: capturing.factory,
       onStateChange: (chatId, state) => stateChanges.push({ chatId, state }),
-      onSessionRuntimeChange: (chatId, state) => runtimeChanges.push({ chatId, state }),
+      onSessionRuntimeChange: (chatId, { runtimeState: state }) => runtimeChanges.push({ chatId, state }),
     });
 
     await sm.dispatch(mockEntry({ id: 1, chatId: "chat-a" }));
@@ -200,7 +200,8 @@ describe("SessionRuntime: state notifications", () => {
       concurrency: 1,
       handlerFactory: () => handlers.shift() ?? createMockHandler(),
       onStateChange: (chatId, state) => emissions.push({ chatId, kind: "state", value: state }),
-      onSessionRuntimeChange: (chatId, state) => emissions.push({ chatId, kind: "runtime", value: state }),
+      onSessionRuntimeChange: (chatId, { runtimeState: state }) =>
+        emissions.push({ chatId, kind: "runtime", value: state }),
     });
 
     await sm.dispatch(mockEntry({ id: 1, chatId: "chat-a" }));
@@ -301,7 +302,7 @@ describe("SessionRuntime: state-before-runtime ordering (codex review P2)", () =
     const sm = createSessionRuntime({
       handler,
       onStateChange: (_chatId, state) => emissions.push({ kind: "state", value: state }),
-      onSessionRuntimeChange: (_chatId, state) => emissions.push({ kind: "runtime", value: state }),
+      onSessionRuntimeChange: (_chatId, { runtimeState }) => emissions.push({ kind: "runtime", value: runtimeState }),
     });
 
     await sm.dispatch(mockEntry({ id: 1, chatId: "chat-codex" }));
@@ -417,7 +418,8 @@ describe("SessionRuntime: shutdown state reporting", () => {
     const emissions: Array<{ chatId: string; kind: "state" | "runtime"; value: string }> = [];
     const sm = createSessionRuntime({
       onStateChange: (chatId, state) => emissions.push({ chatId, kind: "state", value: state }),
-      onSessionRuntimeChange: (chatId, state) => emissions.push({ chatId, kind: "runtime", value: state }),
+      onSessionRuntimeChange: (chatId, { runtimeState: state }) =>
+        emissions.push({ chatId, kind: "runtime", value: state }),
     });
 
     await sm.dispatch(mockEntry({ id: 1, chatId: "chat-a" }));
@@ -466,7 +468,7 @@ describe("SessionRuntime: terminate + reconcile", () => {
     const runtimeChanges: Array<{ chatId: string; state: RuntimeState }> = [];
     const sm = createSessionRuntime({
       onStateChange: (chatId, state) => stateChanges.push({ chatId, state }),
-      onSessionRuntimeChange: (chatId, state) => runtimeChanges.push({ chatId, state }),
+      onSessionRuntimeChange: (chatId, { runtimeState: state }) => runtimeChanges.push({ chatId, state }),
     });
 
     await sm.dispatch(mockEntry({ id: 1, chatId: "chat-a" }));

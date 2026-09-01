@@ -1,4 +1,4 @@
-import { INBOX_FENCE_PROBE_MAX_IDS, type RuntimeState } from "@first-tree/shared";
+import { INBOX_FENCE_PROBE_MAX_IDS, type SessionRuntimeReport } from "@first-tree/shared";
 import type { pino } from "../cloud/observability/logger.js";
 import type { SessionMessage } from "./handler.js";
 import { type ReplayFenceEntry, ReplayFenceStore, type ReplayFenceWriter } from "./replay-fence.js";
@@ -44,7 +44,7 @@ export type ResetReplayAuthorityDeps = {
   probeFencedSettlement: () =>
     | ((chatId: string, messageIds: readonly string[]) => Promise<readonly string[]>)
     | undefined;
-  onSessionRuntimeChange: () => ((chatId: string, state: RuntimeState) => void) | undefined;
+  onSessionRuntimeChange: () => ((chatId: string, report: SessionRuntimeReport) => void) | undefined;
   projectSessionRuntime: (chatId: string) => void;
   /**
    * SessionRegistry custody lives on SessionProjectionAuthority; these
@@ -417,7 +417,7 @@ export class ResetReplayAuthority {
           { err, chatId, messageId },
           "stale replay fence could not be cleared; the retry loop will redo the local clear",
         );
-        this.deps.onSessionRuntimeChange()?.(chatId, "error");
+        this.deps.onSessionRuntimeChange()?.(chatId, { runtimeState: "error", backgroundWork: false });
       }
     }
     if (proven.size === 0) this.provenSettledFences.delete(chatId);
@@ -541,7 +541,7 @@ export class ResetReplayAuthority {
           { err, chatId, messageId },
           "replay fence could not be cleared after confirmed ACK; the retry loop will redo the local clear",
         );
-        this.deps.onSessionRuntimeChange()?.(chatId, "error");
+        this.deps.onSessionRuntimeChange()?.(chatId, { runtimeState: "error", backgroundWork: false });
       }
     }
     if (transitioned && !this.replayFence.hasFenceForChat(chatId)) {

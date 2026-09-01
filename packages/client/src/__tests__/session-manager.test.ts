@@ -1,6 +1,7 @@
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { SessionRuntimeReport } from "@first-tree/shared";
 import {
   AGENT_RUNTIME_SESSION_ERROR_CODES,
   type AgentRuntimeConfig,
@@ -239,7 +240,7 @@ function createSessionRuntime(opts: {
   probeFencedSettlement?: (chatId: string, messageIds: readonly string[]) => Promise<readonly string[]>;
   recoverRuntimeSessionProof?: (reasonCode: string) => Promise<void>;
   onSessionEvent?: (chatId: string, event: SessionEvent) => void;
-  onSessionRuntimeChange?: (chatId: string, state: RuntimeState) => void;
+  onSessionRuntimeChange?: (chatId: string, report: SessionRuntimeReport) => void;
   confirmSessionEvent?: (chatId: string, event: SessionEvent) => Promise<void>;
   subprocessProbe?: SubprocessProbe;
   registryPath?: string;
@@ -3312,7 +3313,11 @@ describe("SessionRuntime subprocess-aware suspend/eviction", () => {
         },
       });
       const hasLive = vi.fn().mockReturnValue(true);
-      const probe: SubprocessProbe = { hasLiveSubprocess: hasLive, stop: vi.fn() };
+      const probe: SubprocessProbe = {
+        hasLiveSubprocess: hasLive,
+        hasSessionSpawnedSubprocess: vi.fn(() => false),
+        stop: vi.fn(),
+      };
       const sm = createSessionRuntime({
         handler,
         subprocessProbe: probe,
@@ -3348,7 +3353,11 @@ describe("SessionRuntime subprocess-aware suspend/eviction", () => {
           return { sessionId: "sid", route: { kind: "owned" as const, mode: "queued" as const } };
         },
       });
-      const probe: SubprocessProbe = { hasLiveSubprocess: vi.fn().mockReturnValue(true), stop: vi.fn() };
+      const probe: SubprocessProbe = {
+        hasLiveSubprocess: vi.fn().mockReturnValue(true),
+        hasSessionSpawnedSubprocess: vi.fn(() => false),
+        stop: vi.fn(),
+      };
       const sm = createSessionRuntime({
         handler,
         subprocessProbe: probe,
@@ -3387,6 +3396,7 @@ describe("SessionRuntime subprocess-aware suspend/eviction", () => {
     // chat-1 has a live watcher; chat-2 does not.
     const probe: SubprocessProbe = {
       hasLiveSubprocess: vi.fn((chatId: string) => chatId === "chat-1"),
+      hasSessionSpawnedSubprocess: vi.fn(() => false),
       stop: vi.fn(),
     };
     const sm = createSessionRuntime({ handlerFactory: factory, concurrency: 2, subprocessProbe: probe });
@@ -3437,7 +3447,7 @@ describe("SessionRuntime replay fence gate", () => {
         handler,
         ackEntry,
         replayFencePath: fencePath,
-        onSessionRuntimeChange: (chatId, state) => runtimeStates.push({ chatId, state }),
+        onSessionRuntimeChange: (chatId, { runtimeState }) => runtimeStates.push({ chatId, state: runtimeState }),
       });
 
       // The crashed delivery is redelivered after restart: it must NOT be

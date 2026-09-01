@@ -8,7 +8,9 @@ import {
 import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { createAgent } from "../services/agents/identity.js";
+import { upsertSessionState } from "../services/chat/sessions/activity.js";
 import {
+  computeBackgroundWork,
   computeErrored,
   computeWorking,
   getChatAgentStatuses,
@@ -50,6 +52,13 @@ describe("agent-chat-status", () => {
       UPDATE agent_chat_sessions
         SET runtime_state = ${runtimeState},
             runtime_state_at = NOW() + (${atOffsetMs}::int * interval '1 millisecond')
+        WHERE agent_id = ${agentId} AND chat_id = ${chatId}
+    `);
+  }
+
+  async function setBackgroundWork(agentId: string, chatId: string, value: boolean): Promise<void> {
+    await getApp().db.execute(sql`
+      UPDATE agent_chat_sessions SET background_work = ${value}
         WHERE agent_id = ${agentId} AND chat_id = ${chatId}
     `);
   }
@@ -137,6 +146,76 @@ describe("agent-chat-status", () => {
       expect(s?.working).toBe(true);
       expect(s?.main).toBe("working");
       expect(s?.activity?.label).toBe("Bash");
+    });
+
+    it("an idle chat whose provider is parked on background work stays ready and carries the marker", async () => {
+      const { app, peer, chatId } = await newChatWithAgent();
+      await bindPresence(peer.agent.uuid, peer.clientId);
+      await setSession(peer.agent.uuid, chatId, "active");
+      await setRuntime(peer.agent.uuid, chatId, "idle");
+      await app.db.execute(sql`
+        UPDATE agent_chat_sessions SET background_work = true
+          WHERE agent_id = ${peer.agent.uuid} AND chat_id = ${chatId}
+      `);
+
+      const s = (await getChatAgentStatuses(app.db, chatId)).find((x) => x.agentId === peer.agent.uuid);
+      // Descriptive only: the agent burns no tokens, so it is not working —
+      // the marker only explains why "idle" does not mean "finished".
+      expect(s?.working).toBe(false);
+      expect(s?.main).toBe("ready");
+      expect(s?.backgroundWork).toBe(true);
+    });
+
+    it("drops the background-work qualifier for every composite that is not ready", async () => {
+      const { app, peer, chatId } = await newChatWithAgent();
+      await bindPresence(peer.agent.uuid, peer.clientId);
+      await setSession(peer.agent.uuid, chatId, "active");
+      await setRuntime(peer.agent.uuid, chatId, "idle");
+      await setBackgroundWork(peer.agent.uuid, chatId, true);
+
+      const marker = async (): Promise<{ main: string; backgroundWork: boolean | undefined }> => {
+        const s = (await getChatAgentStatuses(app.db, chatId)).find((x) => x.agentId === peer.agent.uuid);
+        return { main: s?.main ?? "missing", backgroundWork: s?.backgroundWork };
+      };
+      expect(await marker()).toEqual({ main: "ready", backgroundWork: true });
+
+      // Disconnect. The runtime row stays active and fresh for the whole
+      // stale window, so without the ready gate this reads
+      // "Offline · Background task".
+      await app.db.execute(sql`UPDATE agent_presence SET client_id = NULL WHERE agent_id = ${peer.agent.uuid}`);
+      expect(await marker()).toEqual({ main: "offline", backgroundWork: undefined });
+      await bindPresence(peer.agent.uuid, peer.clientId);
+
+      // A turn is the more specific truth; the qualifier explains idleness.
+      await setRuntime(peer.agent.uuid, chatId, "working");
+      expect(await marker()).toEqual({ main: "working", backgroundWork: undefined });
+
+      // Runtime fault: attention belongs on the failure, not on a footnote.
+      await setRuntime(peer.agent.uuid, chatId, "error");
+      expect(await marker()).toEqual({ main: "failed", backgroundWork: undefined });
+    });
+
+    it("clears a stored background-work marker when the session is suspended and reactivated", async () => {
+      const { app, peer, chatId } = await newChatWithAgent();
+      await bindPresence(peer.agent.uuid, peer.clientId);
+      await setSession(peer.agent.uuid, chatId, "active");
+      await setRuntime(peer.agent.uuid, chatId, "idle");
+      await setBackgroundWork(peer.agent.uuid, chatId, true);
+
+      // Suspension revokes runtime; the marker describes a provider session
+      // that no longer exists and must not survive into the next one.
+      await upsertSessionState(app.db, peer.agent.uuid, chatId, "suspended", peer.organizationId);
+      const [stored] = (await app.db.execute(sql`
+        SELECT background_work FROM agent_chat_sessions
+          WHERE agent_id = ${peer.agent.uuid} AND chat_id = ${chatId}
+      `)) as unknown as Array<{ background_work: boolean }>;
+      expect(stored?.background_work).toBe(false);
+
+      await upsertSessionState(app.db, peer.agent.uuid, chatId, "active", peer.organizationId);
+      await setRuntime(peer.agent.uuid, chatId, "idle");
+      const s = (await getChatAgentStatuses(app.db, chatId)).find((x) => x.agentId === peer.agent.uuid);
+      expect(s?.main).toBe("ready");
+      expect(s?.backgroundWork).toBeUndefined();
     });
 
     // turnText (folds closed PR #558) — current-turn narration on the /agent-status path.
@@ -765,6 +844,21 @@ describe("agent-chat-status", () => {
       expect(computeWorking(active, null, now)).toBe(false);
       // Old-client fallback still gated on active.
       expect(computeWorking({ ...active, state: "suspended" }, activity, now)).toBe(false);
+    });
+
+    it("computeBackgroundWork — a fresh claim from a live client, nothing more", () => {
+      const parked = { state: "active", runtimeState: "idle", runtimeStateAt: recent(-1000), backgroundWork: true };
+      expect(computeBackgroundWork(parked, now)).toBe(true);
+
+      // Same freshness gate as `working`: a client that stopped reporting
+      // stops asserting background work rather than pinning it forever.
+      expect(computeBackgroundWork({ ...parked, runtimeStateAt: new Date(now - RUNTIME_STALE_MS - 1) }, now)).toBe(
+        false,
+      );
+      expect(computeBackgroundWork({ ...parked, runtimeStateAt: null }, now)).toBe(false);
+      expect(computeBackgroundWork({ ...parked, state: "suspended" }, now)).toBe(false);
+      expect(computeBackgroundWork({ ...parked, backgroundWork: false }, now)).toBe(false);
+      expect(computeBackgroundWork(undefined, now)).toBe(false);
     });
 
     it("computeErrored — new-client authoritative: state='errored' OR fresh error/blocked OR stale in-flight", () => {

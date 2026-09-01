@@ -1,0 +1,1 @@
+ALTER TABLE "agent_chat_sessions" ADD COLUMN "background_work" boolean DEFAULT false NOT NULL;

@@ -32,6 +32,7 @@ import {
   type SessionCommandAbortedFrame,
   type SessionCommandFinalizedFrame,
   type SessionEvent,
+  type SessionRuntimeReport,
   type SessionState,
   serverWelcomeFrameSchema,
   sessionCommandAbortedFrameSchema,
@@ -1362,9 +1363,20 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
    * the agent-global runtime is double-written and kept around for the
    * admin overview / fault notification path until that consumer migrates.
    */
-  reportSessionRuntime(agentId: string, chatId: string, runtimeState: RuntimeState): void {
+  reportSessionRuntime(agentId: string, chatId: string, report: SessionRuntimeReport): void {
     if (!this.canSendAgentFrame(agentId) || !this.ws) return;
-    this.ws.send(JSON.stringify({ type: "session:runtime", agentId, chatId, runtimeState }));
+    // Omitted rather than sent as `false`: an absent field and an explicit
+    // `false` mean the same thing to the server, and omitting keeps the
+    // common frame byte-identical to what older clients send.
+    this.ws.send(
+      JSON.stringify({
+        type: "session:runtime",
+        agentId,
+        chatId,
+        runtimeState: report.runtimeState,
+        ...(report.backgroundWork ? { backgroundWork: true } : {}),
+      }),
+    );
   }
 
   reportSessionEvent(agentId: string, chatId: string, event: SessionEvent): void {

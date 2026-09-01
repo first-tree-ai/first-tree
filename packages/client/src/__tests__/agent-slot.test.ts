@@ -690,7 +690,10 @@ describe("AgentSlot", () => {
     expect(session.noteBindRecoveryComplete).not.toHaveBeenCalled();
     expect(connection.reportSessionState).toHaveBeenCalledWith("agent-1", "chat-1", "active");
     expect(connection.reportSessionState).toHaveBeenCalledWith("agent-1", "chat-evicted", "suspended");
-    expect(connection.reportSessionRuntime).toHaveBeenCalledWith("agent-1", "chat-1", "working");
+    expect(connection.reportSessionRuntime).toHaveBeenCalledWith("agent-1", "chat-1", {
+      runtimeState: "working",
+      backgroundWork: false,
+    });
     expect(connection.reportRuntimeState).toHaveBeenCalledWith("agent-1", "working");
     expect(connection.sendSessionReconcile).toHaveBeenCalledWith("agent-1", ["chat-1", "chat-2"]);
 
@@ -717,7 +720,7 @@ describe("AgentSlot", () => {
     onRuntimeStateChange("blocked");
     onSessionEvent("chat-callback", { type: "error", message: "oops" });
     await confirmSessionEvent("chat-callback", { type: "error", message: "oops" });
-    onSessionRuntimeChange("chat-callback", "error");
+    onSessionRuntimeChange("chat-callback", { runtimeState: "error", backgroundWork: false });
 
     expect(connection.sendInboxAck).toHaveBeenCalledWith(123, "agent-1");
     expect(connection.reportSessionState).toHaveBeenCalledWith("agent-1", "chat-callback", "suspended");
@@ -730,7 +733,10 @@ describe("AgentSlot", () => {
       type: "error",
       message: "oops",
     });
-    expect(connection.reportSessionRuntime).toHaveBeenCalledWith("agent-1", "chat-callback", "error");
+    expect(connection.reportSessionRuntime).toHaveBeenCalledWith("agent-1", "chat-callback", {
+      runtimeState: "error",
+      backgroundWork: false,
+    });
 
     connection.emit("session:reconcile:result", {
       agentId: "other-agent",
@@ -1248,9 +1254,18 @@ describe("AgentSlot", () => {
     expect(vi.mocked(sdk.listActiveRuntimeChatIds)).toHaveBeenCalledTimes(1);
     expect(connection.reportSessionState).toHaveBeenCalledWith("agent-1", "chat-1", "active");
     expect(connection.reportSessionState).not.toHaveBeenCalledWith("agent-1", "chat-evicted", "suspended");
-    expect(connection.reportSessionRuntime).toHaveBeenCalledWith("agent-1", "chat-1", "working");
-    expect(connection.reportSessionRuntime).toHaveBeenCalledWith("agent-1", "chat-2", "idle");
-    expect(connection.reportSessionRuntime).toHaveBeenCalledWith("agent-1", "chat-hidden-session", "idle");
+    expect(connection.reportSessionRuntime).toHaveBeenCalledWith("agent-1", "chat-1", {
+      runtimeState: "working",
+      backgroundWork: false,
+    });
+    expect(connection.reportSessionRuntime).toHaveBeenCalledWith("agent-1", "chat-2", {
+      runtimeState: "idle",
+      backgroundWork: false,
+    });
+    expect(connection.reportSessionRuntime).toHaveBeenCalledWith("agent-1", "chat-hidden-session", {
+      runtimeState: "idle",
+      backgroundWork: false,
+    });
     expect(connection.reportSessionState).not.toHaveBeenCalledWith("agent-1", "chat-hidden-session", "suspended");
 
     const reconcile = Reflect.get(slot, "reconcileNow");

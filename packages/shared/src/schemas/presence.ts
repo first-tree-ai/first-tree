@@ -82,8 +82,25 @@ export type RuntimeStateMessage = z.infer<typeof runtimeStateMessageSchema>;
 export const sessionRuntimeMessageSchema = z.object({
   chatId: z.string().min(1),
   runtimeState: runtimeStateSchema,
+  /**
+   * The provider for this chat is parked on work it started itself — a
+   * `run_in_background` task, for instance — and will resume on its own when
+   * that work finishes. Descriptive only: it never makes a chat `working`
+   * (the turn is not running and no tokens are burning), it explains why an
+   * idle chat is not finished. Optional so an older client that never sends
+   * it simply reads as "no background work".
+   */
+  backgroundWork: z.boolean().optional(),
 });
 export type SessionRuntimeMessage = z.infer<typeof sessionRuntimeMessageSchema>;
+
+/**
+ * One per-chat runtime report, named rather than threaded positionally. The
+ * report crosses four layers (projection -> slot -> connection -> frame), and
+ * every descriptive field added to it would otherwise be another positional
+ * parameter sweep through all of them.
+ */
+export type SessionRuntimeReport = Omit<SessionRuntimeMessage, "chatId"> & { backgroundWork: boolean };
 
 // -- Agent Bind Payload (client -> server) --
 // WS bind authorization derives from the WS-level JWT and the client_id pinned

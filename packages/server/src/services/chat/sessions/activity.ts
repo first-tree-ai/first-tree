@@ -63,19 +63,26 @@ export async function upsertSessionState(
       .insert(agentChatSessions)
       .values(
         revokesRuntime
-          ? { agentId, chatId, state, runtimeState: "idle", runtimeStateAt: now, updatedAt: now }
+          ? { agentId, chatId, state, runtimeState: "idle", runtimeStateAt: now, backgroundWork: false, updatedAt: now }
           : { agentId, chatId, state, updatedAt: now },
       )
       .onConflictDoUpdate({
         target: [agentChatSessions.agentId, agentChatSessions.chatId],
         set: revokesRuntime
-          ? { state, runtimeState: "idle", runtimeStateAt: now, updatedAt: now }
+          ? { state, runtimeState: "idle", runtimeStateAt: now, backgroundWork: false, updatedAt: now }
           : { state, updatedAt: now },
         // An inactive row retaining a non-idle runtime is also a real
         // projection change even when its lifecycle value is already equal.
         // Repair it once, then keep duplicate inactive frames as no-ops.
         setWhere: revokesRuntime
-          ? or(ne(agentChatSessions.state, state), ne(agentChatSessions.runtimeState, "idle"))
+          ? or(
+              ne(agentChatSessions.state, state),
+              ne(agentChatSessions.runtimeState, "idle"),
+              // A leftover background-work marker is the same class of stale
+              // projection as a leftover non-idle runtime: repair it once so a
+              // later activation cannot revive a previous session's marker.
+              eq(agentChatSessions.backgroundWork, true),
+            )
           : ne(agentChatSessions.state, state),
       })
       .returning({ agentId: agentChatSessions.agentId });
@@ -158,6 +165,13 @@ export async function setSessionRuntime(
   runtimeState: RuntimeState,
   organizationId: string,
   notifier?: Notifier,
+  /**
+   * Descriptive marker riding the same frame: the provider is parked on work
+   * it started itself and will resume unprompted. Absent (old client) is
+   * written as `false` — the same fail-closed default a client that stopped
+   * reporting decays to.
+   */
+  backgroundWork = false,
 ): Promise<void> {
   // CTE captures the previous row before the UPDATE; the UPDATE's WHERE
   // additionally enforces `state='active'` so an inactive / missing row
@@ -169,19 +183,25 @@ export async function setSessionRuntime(
   const rows = (await db.execute(sql`
     WITH prev AS (
       SELECT runtime_state    AS prev_runtime_state,
-             runtime_state_at AS prev_runtime_state_at
+             runtime_state_at AS prev_runtime_state_at,
+             background_work  AS prev_background_work
         FROM agent_chat_sessions
        WHERE agent_id = ${agentId} AND chat_id = ${chatId}
     )
     UPDATE agent_chat_sessions
        SET runtime_state    = ${runtimeState},
-           runtime_state_at = NOW()
+           runtime_state_at = NOW(),
+           background_work  = ${backgroundWork}
       FROM prev
      WHERE agent_chat_sessions.agent_id = ${agentId}
        AND agent_chat_sessions.chat_id  = ${chatId}
        AND agent_chat_sessions.state    = 'active'
-    RETURNING prev.prev_runtime_state, prev.prev_runtime_state_at
-  `)) as unknown as Array<{ prev_runtime_state: string | null; prev_runtime_state_at: Date | string | null }>;
+    RETURNING prev.prev_runtime_state, prev.prev_runtime_state_at, prev.prev_background_work
+  `)) as unknown as Array<{
+    prev_runtime_state: string | null;
+    prev_runtime_state_at: Date | string | null;
+    prev_background_work: boolean | null;
+  }>;
 
   // No row returned = WHERE didn't match (row missing or not active). Either
   // way the runtime report is stale; nothing to notify. This replaces the
@@ -204,7 +224,10 @@ export async function setSessionRuntime(
   // a value change, OR a same-value report that crosses the fail-closed
   // boundary (NULL sentinel → fresh, OR stale → fresh). A fresh same-value
   // re-affirm changes nothing, so it stays silent.
-  const valueChanged = prevRuntimeState !== runtimeState;
+  // A background-work flip changes what the surfaces render ("Idle" vs
+  // "Idle · background task"), so it earns a notify on its own even when the
+  // runtime state itself is an unchanged, still-fresh `idle`.
+  const valueChanged = prevRuntimeState !== runtimeState || (row.prev_background_work ?? false) !== backgroundWork;
   const wasStale = prevRuntimeStateAt == null || Date.now() - prevRuntimeStateAt.getTime() > RUNTIME_STALE_MS;
   if ((valueChanged || wasStale) && notifier) {
     notifier.notifySessionRuntime(agentId, chatId, runtimeState, organizationId).catch(() => {});

@@ -1275,6 +1275,26 @@ describe("AgentStatusPanel extra DOM coverage", () => {
     expect(sessionApiMocks.suspendSession).not.toHaveBeenCalled();
   });
 
+  it("qualifies an Idle row whose provider is parked on a background task", async () => {
+    agentStatusApiMocks.fetchChatAgentStatuses.mockResolvedValue([
+      status("agent-nova", { engagement: "active", backgroundWork: true }),
+    ]);
+
+    h.render(
+      withProviders(
+        <AgentStatusPanel chatId="chat-1" agents={[agent("agent-nova", "Nova")]} canManage={() => true} compact />,
+      ),
+    );
+
+    await waitForSettled(h, () => {
+      // Still Idle — no turn is running and no tokens are burning. The
+      // qualifier only says the agent will wake itself up, so "Idle" is not
+      // read as "finished, nothing happens without you".
+      expect(h.container.textContent).toContain("Idle");
+      expect(h.container.textContent).toContain("Background task");
+    });
+  });
+
   it("keeps working and failed roster statuses static and omits activity detail", async () => {
     agentStatusApiMocks.fetchChatAgentStatuses.mockResolvedValue([
       status("agent-worker", {

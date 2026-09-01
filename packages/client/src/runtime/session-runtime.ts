@@ -8,6 +8,7 @@ import type {
   RuntimeProvider,
   RuntimeState,
   SessionEvent,
+  SessionRuntimeReport,
   SessionState,
 } from "@first-tree/shared";
 import {
@@ -397,7 +398,7 @@ type SessionRuntimeConfig = {
    * working / blocked / error sessions so a long turn keeps the
    * server-side freshness stamp current.
    */
-  onSessionRuntimeChange?: (chatId: string, state: RuntimeState) => void;
+  onSessionRuntimeChange?: (chatId: string, report: SessionRuntimeReport) => void;
 };
 
 /**
@@ -609,6 +610,7 @@ export class SessionRuntime {
         onSessionRuntimeChange: () => this.config.onSessionRuntimeChange,
         onRuntimeStateChange: () => this.config.onRuntimeStateChange,
         hasProcessingOwnedWork: (chatId) => this.inboxDelivery.hasProcessingOwnedWork(chatId),
+        hasReportableBackgroundWork: (chatId) => this.slotScheduler.hasReportableBackgroundWork(chatId),
         drainPendingOnIdle: () => {
           this.slotScheduler.drainPendingQueue();
         },
@@ -679,6 +681,8 @@ export class SessionRuntime {
       idleTimeoutSec: () => this.config.session.idle_timeout,
       workingGraceSec: () => this.config.session.working_grace_seconds,
       hasLiveSubprocessProbe: (chatId) => this.config.subprocessProbe?.hasLiveSubprocess(chatId) === true,
+      hasSessionSpawnedSubprocessProbe: (chatId) =>
+        this.config.subprocessProbe?.hasSessionSpawnedSubprocess(chatId) === true,
       isProviderRouteAdmissionFenced: (chatId) => this.resetReplay.isProviderRouteAdmissionFenced(chatId),
       getSession: (chatId) => this.projection.getSession(chatId),
       sessionsValues: () => this.projection.sessionsValues(),
@@ -2108,7 +2112,7 @@ export class SessionRuntime {
         { chatId, messageId: message.id },
         "withholding provider re-entry for replay-fenced chat; unsafe tool effect fenced before interruption",
       );
-      this.config.onSessionRuntimeChange?.(chatId, "error");
+      this.config.onSessionRuntimeChange?.(chatId, { runtimeState: "error", backgroundWork: false });
       this.inboxDelivery.markReplayFenceWithheld(chatId, [message.id]);
       this.resetReplay.ensureReplayFenceReconcileLoop(chatId);
       return;
@@ -3557,7 +3561,7 @@ export class SessionRuntime {
    */
   getSessionRuntimeStates(
     activeChatIds: RuntimeSyncActiveSet = null,
-  ): Array<{ chatId: string; runtimeState: RuntimeState }> {
+  ): Array<{ chatId: string; runtimeState: RuntimeState; backgroundWork: boolean }> {
     return this.projection.getSessionRuntimeStates(activeChatIds);
   }
 

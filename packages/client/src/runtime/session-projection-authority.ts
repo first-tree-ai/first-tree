@@ -1,4 +1,4 @@
-import type { RuntimeState, SessionState } from "@first-tree/shared";
+import type { RuntimeState, SessionRuntimeReport, SessionState } from "@first-tree/shared";
 import type { pino } from "../cloud/observability/logger.js";
 import type { SessionMessage } from "./handler.js";
 import type { Trigger } from "./result-sink.js";
@@ -55,7 +55,13 @@ export type EvictedMappingSnapshot = {
 export type SessionProjectionAuthorityDeps = {
   log: pino.Logger;
   onStateChange: () => ((chatId: string, state: SessionState) => void) | undefined;
-  onSessionRuntimeChange: () => ((chatId: string, state: RuntimeState) => void) | undefined;
+  onSessionRuntimeChange: () => ((chatId: string, report: SessionRuntimeReport) => void) | undefined;
+  /**
+   * The provider for this chat is parked on work it started itself and the
+   * assertion is still within the idle-sweep hard cap (SlotSchedulerAuthority
+   * owns both the probe and the cap).
+   */
+  hasReportableBackgroundWork: (chatId: string) => boolean;
   onRuntimeStateChange: () => ((state: RuntimeState) => void) | undefined;
   /** Inbox processing ownership still lives on InboxDeliveryCoordinator. */
   hasProcessingOwnedWork: (chatId: string) => boolean;
@@ -100,6 +106,12 @@ export class SessionProjectionAuthority<
   private readonly registry: SessionRegistry | null;
   private readonly lastReportedStates = new Map<string, SessionState>();
   private readonly sessionRuntimeStates = new Map<string, RuntimeState>();
+  /**
+   * Chats whose provider is parked on its own background work. Descriptive
+   * only — it never changes the projected runtime state, it rides along with
+   * it so an idle chat can say why it is not finished.
+   */
+  private readonly backgroundWorkChats = new Set<string>();
   /**
    * Chats whose provider is currently inside a turn. Set from the first
    * provider message of a turn and cleared at `turn_end`, so a turn the inbox
@@ -404,6 +416,30 @@ export class SessionProjectionAuthority<
     this.projectSessionRuntime(chatId);
   }
 
+  hasBackgroundWork(chatId: string): boolean {
+    return this.backgroundWorkChats.has(chatId);
+  }
+
+  /**
+   * Re-sample the background-work marker for one chat and report the change
+   * immediately, so an idle chat starts (or stops) explaining itself without
+   * waiting for an unrelated runtime transition.
+   *
+   * Only an idle chat can carry the marker. The underlying probe answers
+   * "does the provider have a live child process", which is also true of an
+   * ordinary foreground tool call — asserting it during a turn would both
+   * flap the wire every time a `Bash` step starts and claim "parked on
+   * background work" about a provider that is plainly running.
+   */
+  syncBackgroundWork(chatId: string): void {
+    const state = this.sessionRuntimeStates.get(chatId);
+    const active = state === "idle" && this.deps.hasReportableBackgroundWork(chatId);
+    if (active === this.backgroundWorkChats.has(chatId)) return;
+    if (active) this.backgroundWorkChats.add(chatId);
+    else this.backgroundWorkChats.delete(chatId);
+    if (state) this.deps.onSessionRuntimeChange()?.(chatId, { runtimeState: state, backgroundWork: active });
+  }
+
   projectSessionRuntime(chatId: string, opts: { drainPendingOnIdle?: boolean } = {}): void {
     const session = this.sessions.get(chatId);
     const state = this.projectedRuntimeState(chatId, session ?? null);
@@ -411,10 +447,16 @@ export class SessionProjectionAuthority<
       this.withdrawSessionRuntime(chatId);
       return;
     }
+    // Leaving idle retires the marker: the chat is no longer explaining a
+    // pause, and the frame below carries the cleared value with the new state.
+    if (state !== "idle") this.backgroundWorkChats.delete(chatId);
     const previous = this.sessionRuntimeStates.get(chatId);
     if (previous === state) return;
     this.sessionRuntimeStates.set(chatId, state);
-    this.deps.onSessionRuntimeChange()?.(chatId, state);
+    this.deps.onSessionRuntimeChange()?.(chatId, {
+      runtimeState: state,
+      backgroundWork: this.backgroundWorkChats.has(chatId),
+    });
     this.recomputeRuntimeState();
     if (state === "idle" && opts.drainPendingOnIdle !== false) {
       this.deps.drainPendingOnIdle();
@@ -441,8 +483,9 @@ export class SessionProjectionAuthority<
     // gone, suspended, or not active, and none of those may leave a stale
     // in-flight turn behind for the next session on this chat.
     this.providerTurnInFlight.delete(chatId);
-    if (!this.sessionRuntimeStates.delete(chatId)) return;
-    this.deps.onSessionRuntimeChange()?.(chatId, "idle");
+    const hadBackgroundWork = this.backgroundWorkChats.delete(chatId);
+    if (!this.sessionRuntimeStates.delete(chatId) && !hadBackgroundWork) return;
+    this.deps.onSessionRuntimeChange()?.(chatId, { runtimeState: "idle", backgroundWork: false });
     this.recomputeRuntimeState();
   }
 
@@ -450,17 +493,30 @@ export class SessionProjectionAuthority<
    * Re-affirm working / blocked / error sessions so the server-side
    * freshness stamp doesn't lapse mid-turn. Reports only — does NOT
    * touch `lastActivity` (that governs idle eviction and must not be
-   * reset by a liveness ping). `idle` is deliberately omitted: the
+   * reset by a liveness ping). Plain `idle` is deliberately omitted: the
    * server treats it as the fail-closed default after the stale window
    * expires, so re-affirming idle is pure wire noise.
+   *
+   * `idle` WITH background work is the one exception, and it is not noise:
+   * the server trusts that marker only while the runtime stamp is fresh, so
+   * letting the stamp lapse would silently drop "background task" from a chat
+   * whose provider is still parked. This tick also re-samples the marker,
+   * which is what makes it decay honestly — a client that dies stops
+   * re-affirming and the server stops believing it.
    */
   reaffirmRuntimeStates(): void {
     if (!this.deps.onSessionRuntimeChange()) return;
     for (const [chatId, session] of this.sessions) {
       if (session.status !== "active" && session.status !== "errored") continue;
+      if (session.status === "active") this.syncBackgroundWork(chatId);
       const state = this.sessionRuntimeStates.get(chatId);
       if (state === "working" || state === "error") {
-        this.deps.onSessionRuntimeChange()?.(chatId, state);
+        this.deps.onSessionRuntimeChange()?.(chatId, {
+          runtimeState: state,
+          backgroundWork: this.backgroundWorkChats.has(chatId),
+        });
+      } else if (state === "idle" && this.backgroundWorkChats.has(chatId)) {
+        this.deps.onSessionRuntimeChange()?.(chatId, { runtimeState: state, backgroundWork: true });
       }
     }
   }
@@ -537,13 +593,16 @@ export class SessionProjectionAuthority<
    */
   getSessionRuntimeStates(
     activeChatIds: RuntimeSyncActiveSet = null,
-  ): Array<{ chatId: string; runtimeState: RuntimeState }> {
-    const out: Array<{ chatId: string; runtimeState: RuntimeState }> = [];
+  ): Array<{ chatId: string; runtimeState: RuntimeState; backgroundWork: boolean }> {
+    const out: Array<{ chatId: string; runtimeState: RuntimeState; backgroundWork: boolean }> = [];
     for (const [chatId, session] of this.sessions) {
       if (!this.shouldIncludeInRuntimeSync(chatId, activeChatIds)) continue;
       const runtimeState = this.projectedRuntimeState(chatId, session);
       if (!runtimeState) continue;
-      out.push({ chatId, runtimeState });
+      // The reconnect repair re-asserts the marker with the state it
+      // qualifies; dropping it here would leave the server showing a bare
+      // "Idle" for a provider that is still parked on background work.
+      out.push({ chatId, runtimeState, backgroundWork: this.backgroundWorkChats.has(chatId) });
     }
     return out;
   }
