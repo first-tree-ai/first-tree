@@ -234,6 +234,7 @@ describe("prepareManagedSession", () => {
         logs.push(message);
       },
       recordProviderActivity: () => {},
+      noteTurnStart: () => {},
       emitEvent: () => {},
       ...mockCtxPlumbing({ sendMessage }, "chat-1"),
     } as SessionContext;
@@ -1424,6 +1425,7 @@ describe("projectManagedWorkspace", () => {
       chatId: "chat-1",
       log: () => {},
       recordProviderActivity: () => {},
+      noteTurnStart: () => {},
       emitEvent: () => {},
       ...mockCtxPlumbing({ sendMessage }, "chat-1"),
     } as SessionContext;

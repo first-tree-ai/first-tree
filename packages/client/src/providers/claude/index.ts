@@ -1452,6 +1452,13 @@ export const createClaudeCodeHandler: HandlerFactory = (config) => {
           for await (const message of query) {
             // Every message refreshes lastActivity to prevent idle timeout
             sessionCtx.recordProviderActivity();
+            // Unlike providers that sample activity above a thread/turn
+            // filter, every message on this stream belongs to the turn that
+            // is currently streaming — including the first one, which arrives
+            // before any assistant text. So the stream head IS the turn
+            // boundary here, and a background-task wake-up lights up at once
+            // rather than at its first displayable output.
+            sessionCtx.noteTurnStart();
 
             toolCallProcessor.onMessage(message);
 

@@ -348,6 +348,7 @@ function makeContext(opts: {
       opts.logs?.push(msg);
     },
     recordProviderActivity: () => {},
+    noteTurnStart: () => {},
     emitEvent: (event) => {
       opts.events.push(event);
     },

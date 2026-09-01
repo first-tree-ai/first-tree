@@ -166,6 +166,20 @@ export type SessionContext = HandlerContext & {
   /** Refresh `lastActivity` timestamp when the provider produces activity. */
   recordProviderActivity: () => void;
   /**
+   * The provider is opening a turn for this chat. Marks the chat `working`
+   * from the turn boundary itself rather than from its first displayable
+   * output, so the model/tool latency at the head of a turn does not read as
+   * Idle. Cleared by the turn's `turn_end` event.
+   *
+   * Distinct from `recordProviderActivity`, which is deliberately broader:
+   * some providers sample activity above their own thread/turn filter, where
+   * late traffic for an already-closed turn arrives. Call this only where the
+   * provider genuinely opens a turn. A provider that does not call it still
+   * reads as working from its first in-turn session event (assistant text,
+   * thinking, or a tool call) — later, but never wrong.
+   */
+  noteTurnStart: () => void;
+  /**
    * Persist a structured session event (tool_call / error / assistant_text /
    * thinking / turn_end / usage) to the server. Assistant text DOES go through
    * here: handlers emit it as `assistant_text` events (chunked when long — see

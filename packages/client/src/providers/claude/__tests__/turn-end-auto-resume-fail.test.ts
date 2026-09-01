@@ -174,6 +174,7 @@ describe("claude-code handler — auto-resume failure surfacing", () => {
       chatId: "chat-resume-fail",
       log: () => {},
       recordProviderActivity: () => {},
+      noteTurnStart: () => {},
       emitEvent: (e) => emitted.push(e),
       ...mockCtxPlumbing({ sendMessage }, "chat-resume-fail"),
       finishTurn: async () => {
@@ -272,6 +273,7 @@ describe("claude-code handler — auto-resume failure surfacing", () => {
       chatId: "chat-resume-fail",
       log: () => {},
       recordProviderActivity: () => {},
+      noteTurnStart: () => {},
       emitEvent: (e) => emitted.push(e),
       ...mockCtxPlumbing({ sendMessage }, "chat-resume-fail"),
       finishTurn: async () => {},
@@ -361,6 +363,7 @@ describe("claude-code handler — auto-resume failure surfacing", () => {
       chatId: "chat-resume-fail",
       log: (m) => logs.push(m),
       recordProviderActivity: () => {},
+      noteTurnStart: () => {},
       emitEvent: (e) => emitted.push(e),
       ...plumbing,
       formatInboundContent: async (message) => {

@@ -307,6 +307,7 @@ function makeContext(
     chatId: "chat-app-server",
     log: () => {},
     recordProviderActivity: () => {},
+    noteTurnStart: () => {},
     emitEvent: opts.emitEvent ?? (() => {}),
     ...(opts.emitEventConfirmed ? { emitEventConfirmed: opts.emitEventConfirmed } : {}),
     ...mockCtxPlumbing({ sendMessage }, "chat-app-server"),

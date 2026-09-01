@@ -224,6 +224,7 @@ function makeContext(fetchAttachment = vi.fn(), log: (message: string) => void =
     chatId: "chat-materialize",
     log,
     recordProviderActivity: () => {},
+    noteTurnStart: () => {},
     emitEvent: () => {},
     ...plumbing,
     publishTeamSkillCommands: (commands) => {

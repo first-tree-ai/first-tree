@@ -101,6 +101,7 @@ describe("claude-code handler — turn_end on SDK-reported subtype error", () =>
       chatId: "chat-1",
       log: () => {},
       recordProviderActivity: () => {},
+      noteTurnStart: () => {},
       emitEvent: (e) => emitted.push(e),
       ...mockCtxPlumbing({ sendMessage }, "chat-1"),
     };

@@ -142,6 +142,7 @@ function buildSessionCtx(chatId: string): SessionContext {
     chatId,
     log: () => {},
     recordProviderActivity: () => {},
+    noteTurnStart: () => {},
     emitEvent: () => {},
     ...mockCtxPlumbing({ sendMessage }, chatId),
   };

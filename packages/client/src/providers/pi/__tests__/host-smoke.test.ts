@@ -135,6 +135,7 @@ function makeContext(events: SessionEvent[]): SessionContext {
     chatId: "chat-pi-smoke",
     log: () => {},
     recordProviderActivity: () => {},
+    noteTurnStart: () => {},
     emitEvent: (value) => void events.push(value),
     ...mockCtxPlumbing({ sendMessage }, "chat-pi-smoke"),
   };

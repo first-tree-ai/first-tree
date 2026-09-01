@@ -210,6 +210,7 @@ function makeContext(
     chatId: "chat-claude-startup-race",
     log: () => {},
     recordProviderActivity: () => {},
+    noteTurnStart: () => {},
     emitEvent: () => {},
     ...mockCtxPlumbing({ sendMessage }, "chat-claude-startup-race"),
     ...(opts.formatInboundContent ? { formatInboundContent: opts.formatInboundContent } : {}),

@@ -188,6 +188,7 @@ function makeContext(
     chatId: "chat-retry-abort",
     log: opts.log ?? (() => {}),
     recordProviderActivity: () => {},
+    noteTurnStart: () => {},
     emitEvent: opts.emitEvent ?? (() => {}),
     ...mockCtxPlumbing({ sendMessage }, "chat-retry-abort"),
     finishTurn: async (messages) => {

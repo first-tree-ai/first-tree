@@ -193,6 +193,7 @@ describe("claude-code handler — transient stream-error retry replays user mess
       chatId: "chat-stream-retry",
       log: (m) => logs.push(m),
       recordProviderActivity: () => {},
+      noteTurnStart: () => {},
       emitEvent: (e) => emitted.push(e),
       ...mockCtxPlumbing({ sendMessage }, "chat-stream-retry"),
       finishTurn: async () => {
@@ -319,6 +320,7 @@ describe("claude-code handler — transient stream-error retry replays user mess
       chatId: "chat-stream-source-flip",
       log: (message) => logs.push(message),
       recordProviderActivity: () => {},
+      noteTurnStart: () => {},
       emitEvent: () => {},
       ...mockCtxPlumbing({ sendMessage }, "chat-stream-source-flip"),
       failSessionForRecovery,
@@ -387,6 +389,7 @@ describe("claude-code handler — transient stream-error retry replays user mess
       chatId: "chat-stream-retry",
       log: (m) => logs.push(m),
       recordProviderActivity: () => {},
+      noteTurnStart: () => {},
       emitEvent: (e) => emitted.push(e),
       ...mockCtxPlumbing({ sendMessage }, "chat-stream-retry"),
       finishTurn: async (messages) => {
@@ -490,6 +493,7 @@ describe("claude-code handler — transient stream-error retry replays user mess
       chatId: "chat-stream-retry",
       log: (m) => logs.push(m),
       recordProviderActivity: () => {},
+      noteTurnStart: () => {},
       emitEvent: (e) => emitted.push(e),
       ...plumbing,
       formatInboundContent: async (message) => {

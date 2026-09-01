@@ -306,6 +306,7 @@ function handlerContext(): SessionContext {
     chatId: "chat-e2e",
     log: () => {},
     recordProviderActivity: () => {},
+    noteTurnStart: () => {},
     emitEvent: () => {},
     ...mockCtxPlumbing({ sendMessage }, "chat-e2e"),
   };

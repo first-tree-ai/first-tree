@@ -210,6 +210,7 @@ async function startSingleResultTurn() {
     chatId: "chat-claude-provider-error",
     log: (m) => logs.push(m),
     recordProviderActivity: () => {},
+    noteTurnStart: () => {},
     emitEvent: (e) => {
       const retryEvent = e.kind === "error" ? parseProviderRetryEventMessage(e.payload.message) : null;
       if (retryEvent?.event === "provider_failure_terminal") settlementOrder.push("terminal-notice");

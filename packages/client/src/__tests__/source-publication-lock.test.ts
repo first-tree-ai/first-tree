@@ -103,6 +103,7 @@ describe("source-publication lock", () => {
       chatId: "chat-1",
       log: () => {},
       recordProviderActivity: () => {},
+      noteTurnStart: () => {},
       emitEvent: () => {},
       ...mockCtxPlumbing({ sendMessage }, "chat-1"),
     } as SessionContext;

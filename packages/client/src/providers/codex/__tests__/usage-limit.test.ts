@@ -162,6 +162,7 @@ function makeContext(
   opts: {
     sendMessage?: SendMessageMock;
     emitEvent?: SessionContext["emitEvent"];
+    noteTurnStart?: SessionContext["noteTurnStart"];
     emitEventConfirmed?: SessionContext["emitEventConfirmed"];
     failSessionForRecovery?: SessionContext["failSessionForRecovery"];
     log?: SessionContext["log"];
@@ -186,6 +187,7 @@ function makeContext(
     chatId: "chat-usage-limit",
     log: opts.log ?? (() => {}),
     recordProviderActivity: () => {},
+    noteTurnStart: opts.noteTurnStart ?? (() => {}),
     emitEvent: opts.emitEvent ?? (() => {}),
     ...(opts.emitEventConfirmed ? { emitEventConfirmed: opts.emitEventConfirmed } : {}),
     ...(opts.failSessionForRecovery ? { failSessionForRecovery: opts.failSessionForRecovery } : {}),
@@ -212,6 +214,39 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(workspaceRoot, { recursive: true, force: true });
+});
+
+describe("codex turn liveness at the provider boundary", () => {
+  it("marks the turn started at turn.started, before any displayable event", async () => {
+    // The chat must read Working from the turn boundary, not from the first
+    // thing the model happens to say. `turn.started` is followed here by a
+    // completion with no item events at all — the extreme case of the head of
+    // a turn being pure latency — and the boundary signal still has to fire.
+    // Anything weaker leaves a provider-owned turn (no inbox custody to fall
+    // back on) reading Idle for as long as the model takes to produce output.
+    state.turns = [[{ type: "turn.started" }, { type: "turn.completed", usage: zeroUsage }]];
+
+    const order: string[] = [];
+    const handler = createCodexHandler({
+      runtimeProvider: "codex",
+      workspaceRoot,
+      agentName: "test-agent",
+    });
+    const ctx = makeContext(() => {}, {
+      noteTurnStart: () => order.push("turn_start"),
+      emitEvent: (event) => order.push(`event:${event.kind}`),
+      sendMessage: vi
+        .fn<(chatId: string, body: Record<string, unknown>) => Promise<unknown>>()
+        .mockResolvedValue(undefined),
+    });
+    await handler.start(makeMessage("msg-boundary", "hello"), ctx, deliveryTokenFromSessionContext(ctx));
+    await vi.waitFor(() => expect(order).toContain("event:turn_end"));
+
+    // Started first, ended last, and nothing displayable in between.
+    expect(order[0]).toBe("turn_start");
+    expect(order[order.length - 1]).toBe("event:turn_end");
+    expect(order.filter((e) => e === "event:assistant_text" || e === "event:tool_call")).toEqual([]);
+  });
 });
 
 describe("codex usage-limit empty-turn (issue #971)", () => {

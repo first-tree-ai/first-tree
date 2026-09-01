@@ -163,6 +163,7 @@ describe("claude-code handler — retry-exhausted surfacing", () => {
       chatId: "chat-retry",
       log: () => {},
       recordProviderActivity: () => {},
+      noteTurnStart: () => {},
       emitEvent: (e) => emitted.push(e),
       ...mockCtxPlumbing({ sendMessage }, "chat-retry"),
       finishTurn: async () => {
@@ -282,6 +283,7 @@ describe("claude-code handler — retry-exhausted surfacing", () => {
       chatId: "chat-retry",
       log: (m) => logs.push(m),
       recordProviderActivity: () => {},
+      noteTurnStart: () => {},
       emitEvent: (e) => emitted.push(e),
       ...plumbing,
       formatInboundContent: async (message) => {
@@ -380,6 +382,7 @@ describe("claude-code handler — retry-exhausted surfacing", () => {
       chatId: "chat-retry-emit-throw",
       log: () => {},
       recordProviderActivity: () => {},
+      noteTurnStart: () => {},
       emitEvent: () => {
         throw new Error("event sink down");
       },

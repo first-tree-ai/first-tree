@@ -1312,6 +1312,9 @@ export const createCodexAppServerHandler: HandlerFactory = (config: HandlerConfi
       resolveTerminal,
     };
     currentTurn = turn;
+    // Turn boundary: from here notifications for this turn are applied, so the
+    // chat is working even before the first displayable item arrives.
+    sessionCtx.noteTurnStart();
     if (providerRetryChain) providerRetryFence = false;
     token.processingStarted(messages);
     currentTurnPromise = terminalPromise.finally(() => {

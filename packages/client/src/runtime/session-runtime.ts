@@ -1593,6 +1593,12 @@ export class SessionRuntime {
    * in-turn path, so they are self-proving evidence that a turn is open; the
    * out-of-turn traffic that caused the problem (`token_usage`,
    * `context_tree_usage`, runtime `error`) is excluded.
+   *
+   * This is the floor, not the primary signal: a provider that reports its own
+   * turn boundary through `noteTurnStart` lights up at the boundary instead,
+   * which matters because the head of a turn is model latency with nothing
+   * displayable in it yet. A provider that reports neither stays idle, which
+   * is the correct failure direction.
    */
   private noteTurnLivenessFromEvent(chatId: string, event: SessionEvent): void {
     if (event.kind === "turn_end") {
@@ -3281,6 +3287,10 @@ export class SessionRuntime {
         if (entry && entry.status === "active") {
           entry.lastActivity = Date.now();
         }
+      },
+      noteTurnStart: () => {
+        if (mutationValid && !mutationValid()) return;
+        this.projection.noteProviderTurnStart(chatId);
       },
       emitEvent: (event) => {
         // During graceful drain, only structured terminal provider-failure events

@@ -872,6 +872,10 @@ export const createCursorHandler: HandlerFactory = (config) => {
     switch (event.kind) {
       case "init": {
         state.sawInit = true;
+        // Stream open = turn boundary; `thinking_delta` and `user_echo` below
+        // are deliberately not emitted as events, so without this the chat
+        // would stay Idle until the first completed block.
+        sessionCtx.noteTurnStart();
         adoptProviderSessionId(sessionCtx, event.sessionId);
         break;
       }

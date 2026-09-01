@@ -173,6 +173,7 @@ function makeContext(
     chatId: "chat-stale-rollout",
     log: () => {},
     recordProviderActivity: () => {},
+    noteTurnStart: () => {},
     emitEvent: () => {},
     ...mockCtxPlumbing({ sendMessage }, "chat-stale-rollout"),
     ...(opts.replaceSessionId ? { replaceSessionId: opts.replaceSessionId } : {}),
