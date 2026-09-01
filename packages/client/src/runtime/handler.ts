@@ -180,6 +180,15 @@ export type SessionContext = HandlerContext & {
    */
   noteTurnStart: () => void;
   /**
+   * The provider closed a turn for this chat. Optional: closure normally rides
+   * the `turn_end` session event, which every provider emits. Call this only
+   * where a provider has an authoritative turn-over frame *after* that event —
+   * the Claude SDK's `session_state_changed: idle`, which fires once the
+   * background-agent loop settles — so a post-result frame cannot leave a turn
+   * open behind it.
+   */
+  noteTurnEnd?: () => void;
+  /**
    * Persist a structured session event (tool_call / error / assistant_text /
    * thinking / turn_end / usage) to the server. Assistant text DOES go through
    * here: handlers emit it as `assistant_text` events (chunked when long — see

@@ -3292,6 +3292,10 @@ export class SessionRuntime {
         if (mutationValid && !mutationValid()) return;
         this.projection.noteProviderTurnStart(chatId);
       },
+      noteTurnEnd: () => {
+        if (mutationValid && !mutationValid()) return;
+        this.projection.noteProviderTurnEnd(chatId);
+      },
       emitEvent: (event) => {
         // During graceful drain, only structured terminal provider-failure events
         // may cross the settlement lease (durable notice capture). All other

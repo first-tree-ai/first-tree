@@ -296,6 +296,19 @@ type ClaudeModelUsageCounters = {
   cacheCreationInputTokens: number;
 };
 
+/**
+ * The SDK's own turn-lifecycle frame. Its `sdk.d.ts` calls `idle` the
+ * "authoritative turn-over signal" — it fires after the held-back result
+ * flushes and the background-agent do-while exits — which also makes `running`
+ * the authoritative turn-entering signal, earlier than any model output.
+ */
+function sessionStateChange(message: unknown): "idle" | "running" | "requires_action" | null {
+  if (!message || typeof message !== "object") return null;
+  const m = message as Record<string, unknown>;
+  if (m.type !== "system" || m.subtype !== "session_state_changed") return null;
+  return m.state === "idle" || m.state === "running" || m.state === "requires_action" ? m.state : null;
+}
+
 function isResultMessage(message: unknown): message is ResultMessage {
   if (!message || typeof message !== "object") return false;
   const m = message as Record<string, unknown>;
@@ -1452,13 +1465,15 @@ export const createClaudeCodeHandler: HandlerFactory = (config) => {
           for await (const message of query) {
             // Every message refreshes lastActivity to prevent idle timeout
             sessionCtx.recordProviderActivity();
-            // Unlike providers that sample activity above a thread/turn
-            // filter, every message on this stream belongs to the turn that
-            // is currently streaming — including the first one, which arrives
-            // before any assistant text. So the stream head IS the turn
-            // boundary here, and a background-task wake-up lights up at once
-            // rather than at its first displayable output.
-            sessionCtx.noteTurnStart();
+            // Turn liveness follows the SDK's own lifecycle frame, not the
+            // arrival of any message. The stream does NOT end at `result`:
+            // `session_state_changed: idle` fires afterwards, once the
+            // background-agent loop settles, so treating every frame as
+            // turn-entering would re-open the turn after its own end and leave
+            // the chat Working until the idle sweep's hard cap.
+            const stateChange = sessionStateChange(message);
+            if (stateChange === "running") sessionCtx.noteTurnStart();
+            else if (stateChange === "idle") sessionCtx.noteTurnEnd?.();
 
             toolCallProcessor.onMessage(message);
 
