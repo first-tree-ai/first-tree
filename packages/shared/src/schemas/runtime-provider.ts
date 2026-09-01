@@ -84,7 +84,14 @@ export const DEFAULT_RUNTIME_PROVIDER: RuntimeProvider = "claude-code";
  * Empty = nothing disabled. To re-enable a provider, remove it from this list
  * (single-line revert).
  */
-export const DISABLED_RUNTIME_PROVIDERS: readonly RuntimeProvider[] = ["claude-code-tui"];
+export const DISABLED_RUNTIME_PROVIDERS: readonly RuntimeProvider[] = [
+  "claude-code-tui",
+  // Antigravity is implemented and deterministic-testable, but remains gated
+  // behind isolated provider-owned live QA and human security/supply-chain
+  // acceptance. Hide new selection and daemon advertising until that gate
+  // passes; a QA branch can remove this one entry without changing schemas.
+  "antigravity",
+];
 
 /** True when `provider` is not temporarily disabled (see {@link DISABLED_RUNTIME_PROVIDERS}). */
 export function isRuntimeProviderEnabled(provider: string): boolean {

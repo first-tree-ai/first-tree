@@ -107,6 +107,27 @@ export function clearAntigravityAttemptCacheForTests(): void {
 }
 
 /**
+ * Release only abandoned attempt windows owned by the retiring session.
+ * Pending delivery windows retain their bounded retry accounting across
+ * replacement, sessions do not reset each other, and an observer failure is
+ * treated as pending rather than as permission to forget an unacked delivery.
+ */
+function forgetAbandonedAntigravityAttemptWindowsForSession(agentId: string, chatId: string): void {
+  const sessionPrefix = `${agentId}\0${chatId}\0`;
+  for (const key of [...providerTurnFailureAttempts.keys()]) {
+    if (!key.startsWith(sessionPrefix)) continue;
+    const entry = providerTurnFailureAttempts.get(key);
+    let abandoned = false;
+    try {
+      abandoned = !entry?.hasPendingDelivery();
+    } catch {
+      // An observer failure is not authority to forget an unacked delivery.
+    }
+    if (abandoned) providerTurnFailureAttempts.delete(key);
+  }
+}
+
+/**
  * Antigravity's terminal usage object is cumulative for a conversation. First
  * Tree's token_usage event is a per-turn delta, so diff the counters only
  * against a baseline belonging to this exact conversation. A handler that
@@ -1229,6 +1250,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
       if (drainingBatch) retryDrainingBatch(drainingBatch, recoveryReason);
       retryQueue(recoveryReason);
       drainCancellationReason = null;
+      if (ctx) forgetAbandonedAntigravityAttemptWindowsForSession(ctx.agent.agentId, ctx.chatId);
       currentAbort = null;
       currentTurnPromise = null;
       initialTurnPreparing = false;
@@ -1244,6 +1266,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
       if (drainingBatch) retryDrainingBatch(drainingBatch, recoveryReason);
       retryQueue(recoveryReason);
       drainCancellationReason = null;
+      if (ctx) forgetAbandonedAntigravityAttemptWindowsForSession(ctx.agent.agentId, ctx.chatId);
       currentAbort = null;
       currentTurnPromise = null;
       cwd = null;
@@ -1256,7 +1279,6 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
       pendingChatContextPrompt = null;
       cumulativeUsageByConversation.clear();
       freshConversations.clear();
-      providerTurnFailureAttempts.clear();
       queue.length = 0;
       initialTurnPreparing = false;
     },

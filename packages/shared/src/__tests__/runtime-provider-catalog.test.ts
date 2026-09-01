@@ -101,6 +101,7 @@ describe("runtime provider identity + catalog completeness", () => {
       RUNTIME_PROVIDER_DISPLAY_ORDER.filter((id) => isRuntimeProviderEnabled(id)),
     );
     expect(enabledRuntimeProviders()).not.toContain("claude-code-tui");
+    expect(enabledRuntimeProviders()).not.toContain("antigravity");
   });
 
   it("exposes stable install/login metadata from structured catalog fields", () => {

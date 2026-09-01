@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import type { AgentRuntimeConfig } from "@first-tree/shared";
+import { type AgentRuntimeConfig, parseProviderRetryEventMessage } from "@first-tree/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FirstTreeHubSDK } from "../../../cloud/sdk.js";
 import type { AgentConfigCache } from "../../../runtime/agent-config-cache.js";
@@ -50,11 +50,11 @@ function cache(config: AgentRuntimeConfig): AgentConfigCache {
   };
 }
 
-function message(id: string, content: string): SessionMessage {
+function message(id: string, content: string, chatId = "chat-1"): SessionMessage {
   return {
     inboxEntryId: Number(id.slice(1)) || 1,
     id,
-    chatId: "chat-1",
+    chatId,
     senderId: "human-1",
     format: "text",
     content,
@@ -71,13 +71,20 @@ function deliveryToken() {
   } satisfies DeliveryToken;
 }
 
-function context(events: unknown[], forwarded: string[]): SessionContext {
-  const agentId = "agent-1";
-  const chatId = "chat-1";
+function context(
+  events: unknown[],
+  forwarded: string[],
+  identity: { agentId: string; chatId: string; inboxId: string } = {
+    agentId: "agent-1",
+    chatId: "chat-1",
+    inboxId: "inbox-1",
+  },
+): SessionContext {
+  const { agentId, chatId, inboxId } = identity;
   return {
     agent: {
       agentId,
-      inboxId: "inbox-1",
+      inboxId,
       displayName: "Agent",
       type: "agent",
       visibility: "organization",
@@ -246,6 +253,15 @@ function createControlledSupervisor(
       return { child, exited: new Promise<void>((resolve) => child.once("close", () => resolve())) };
     },
   };
+}
+
+function providerRetryEventNames(events: readonly unknown[]): string[] {
+  return events.flatMap((event) => {
+    const { kind, payload } = event as { kind?: unknown; payload?: { message?: unknown } };
+    if (kind !== "error" || typeof payload?.message !== "string") return [];
+    const retryEvent = parseProviderRetryEventMessage(payload.message);
+    return retryEvent ? [retryEvent.event] : [];
+  });
 }
 
 describe("Antigravity V1 handler", () => {
@@ -794,5 +810,65 @@ process.stdin.on("end", () => {
     );
     expect(events.some((event) => JSON.stringify(event).includes("unsafe_replay"))).toBe(true);
     await handler.shutdown();
+  });
+
+  it("keeps pending retry accounting across an unrelated handler shutdown", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-attempt-scope-"));
+    roots.push(root);
+    const failingSpecs: ProviderProcessSpec[] = [];
+    const failingInputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const activeHandler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-attempt-a",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(failingSpecs, failingInputs, []),
+      antigravityTurnTimeoutMs: 50,
+      antigravityRetrySleep: vi.fn(async () => true),
+    });
+    const activeMessage = message("m1", "first attempt");
+    const firstToken = deliveryToken();
+    const activeStart = await activeHandler.start(activeMessage, context(events, forwarded), firstToken);
+
+    const unrelatedSpecs: ProviderProcessSpec[] = [];
+    const unrelatedInputs: string[] = [];
+    const unrelatedRoot = mkdtempSync(join(tmpdir(), "ft-antigravity-attempt-scope-other-"));
+    roots.push(unrelatedRoot);
+    const unrelatedHandler = createAntigravityHandler({
+      workspaceRoot: unrelatedRoot,
+      agentName: "antigravity-attempt-b",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createSupervisor(unrelatedSpecs, unrelatedInputs, ["conversation-other"]),
+      antigravityTurnTimeoutMs: 5_000,
+    });
+    await unrelatedHandler.start(
+      message("m-other", "other conversation", "chat-2"),
+      context([], [], { agentId: "agent-2", chatId: "chat-2", inboxId: "inbox-2" }),
+      deliveryToken(),
+    );
+    await unrelatedHandler.shutdown();
+
+    const secondToken = deliveryToken();
+    await activeHandler.resume(activeMessage, activeStart.sessionId, context(events, forwarded), secondToken);
+    expect(secondToken.retry).toHaveBeenCalledTimes(1);
+
+    const thirdToken = deliveryToken();
+    await activeHandler.resume(activeMessage, activeStart.sessionId, context(events, forwarded), thirdToken);
+    expect(thirdToken.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "error", completion: "consumed", reason: "operation_timeout_exhausted" }),
+    );
+
+    expect(providerRetryEventNames(events)).toEqual([
+      "provider_retry_scheduled",
+      "provider_retry_scheduled",
+      "provider_retry_exhausted",
+    ]);
+    await activeHandler.shutdown();
   });
 });

@@ -69,12 +69,13 @@ describe("hasNonOkProvider", () => {
   });
 
   it("a partial snapshot missing an enabled provider is degraded", () => {
-    // codex is absent → still degraded (claude-code-tui is disabled, so ignored).
+    // codex is absent → still degraded (disabled providers are ignored).
     expect(hasNonOkProvider({ "claude-code": okEntry() })).toBe(true);
   });
 
   it("all enabled built-in providers ok → not degraded (stops the poll)", () => {
-    // claude-code-tui is disabled, so every other built-in must be ok.
+    // claude-code-tui and gated Antigravity are disabled, so every other
+    // enabled built-in must be ok.
     expect(
       hasNonOkProvider({
         amp: okEntry(),
@@ -83,7 +84,6 @@ describe("hasNonOkProvider", () => {
         cursor: okEntry(),
         "deepseek-harness": okEntry(),
         grok: okEntry(),
-        antigravity: okEntry(),
         "kimi-code": okEntry(),
         opencode: okEntry(),
         pi: okEntry(),
@@ -100,7 +100,6 @@ describe("hasNonOkProvider", () => {
         codex: okEntry(),
         cursor: okEntry(),
         grok: okEntry(),
-        antigravity: okEntry(),
         "kimi-code": okEntry(),
         opencode: okEntry(),
         pi: okEntry(),
@@ -217,12 +216,13 @@ describe("revalidateCapabilities / reprobeOnReconnect (probe modules mocked)", (
     expect(calls.codex).toBe(1);
     expect(calls.amp).toBe(1);
     expect(calls["deepseek-harness"]).toBe(1);
-    expect(calls.antigravity).toBe(1);
+    expect(calls.antigravity).toBeUndefined();
     expect(out["claude-code"]?.state).toBe("ok");
     expect(out.codex?.state).toBe("ok");
-    // claude-code-tui is disabled → never probed, no entry.
+    // claude-code-tui and gated Antigravity are disabled → never probed, no entry.
     expect(calls["claude-code-tui"]).toBeUndefined();
     expect(out["claude-code-tui"]).toBeUndefined();
+    expect(out.antigravity).toBeUndefined();
   });
 
   it("revalidateCapabilities returns the fresh entry even when a provider regresses", async () => {
