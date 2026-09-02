@@ -7,6 +7,7 @@ import {
   contextTreeBranchSchema,
   contextTreeRepoSchema,
 } from "@first-tree/shared";
+import { readContextTreeRepository } from "@first-tree/shared/config";
 import type { FirstTreeHubSDK } from "../cloud/sdk.js";
 import type { HandlerConfig } from "./handler.js";
 import {
@@ -35,25 +36,42 @@ export const SOURCE_STATE_REL = join(AGENT_RUNTIME_STATE_DIRNAME, SOURCE_STATE_F
 export type { RemoteLatchInspection, RemoteLatchState };
 export { CONTEXT_SOURCE_LOCK_REL, inspectRemoteLatch, workspaceHasRemoteLatch };
 
-export type ContextSourceKind = "remote" | "local" | "none";
+export type ContextSourceKind = "remote" | "local" | "none" | "external";
 
 export type ContextSourceNoneReason = "unknown" | "invalid" | "frozen" | "unbound";
 
 export type ContextSource =
   | { kind: "remote"; path: string; repoUrl: string; branch: string }
   | { kind: "local"; path: string }
-  | { kind: "none"; reason: ContextSourceNoneReason };
+  | { kind: "none"; reason: ContextSourceNoneReason }
+  /**
+   * External Context Tree mode: this machine delegates Context Tree reads and
+   * writes to the `@first-tree-ai/context-tree` CLI and its `context-tree-*`
+   * Skills, keyed by a GitHub OWNER/REPO. First Tree projects no Context Tree
+   * path of its own — the external CLI owns the checkout under
+   * `~/.context-tree/trees/` and resolves it per project.
+   */
+  | { kind: "external"; repository: string };
 
 export type ContextTreeCoordinates = {
   kind?: ContextSourceKind;
   path: string | null;
   repoUrl: string | null;
   branch: string | null;
+  /**
+   * GitHub OWNER/REPO in external mode, null otherwise.
+   *
+   * It travels with the coordinates rather than being re-read from config at
+   * render time because the briefing is compared byte-for-byte during admission:
+   * both the expected and the published briefing must derive it identically.
+   */
+  repository?: string | null;
 };
 
 export function contextSourceKey(source: ContextSource): string {
   if (source.kind === "remote") return `remote\0${source.path}\0${source.repoUrl}\0${source.branch}`;
   if (source.kind === "local") return `local\0${source.path}`;
+  if (source.kind === "external") return `external\0${source.repository}`;
   return "none";
 }
 
@@ -78,7 +96,9 @@ export function captureContextSourceAdmission(source: ContextSource): ContextSou
         })
       : source.kind === "local"
         ? Object.freeze({ kind: "local", path: source.path })
-        : Object.freeze({ kind: "none", reason: source.reason });
+        : source.kind === "external"
+          ? Object.freeze({ kind: "external", repository: source.repository })
+          : Object.freeze({ kind: "none", reason: source.reason });
   return Object.freeze({ source: captured, sourceKey: contextSourceKey(captured) });
 }
 
@@ -259,6 +279,19 @@ export async function resolveAgentContextSource(
   // only the immediate workspace directory here, under a trusted real parent;
   // a symlink/non-directory root remains a hard fail-closed error.
   ensureTrustedWorkspaceRoot(workspaceRoot);
+
+  // External mode wins outright, before the server binding is even fetched:
+  // the operator has delegated this machine's Context Tree to the external CLI,
+  // so a Team binding must not also project First Tree's own Tree Skills. The
+  // remote latch is deliberately not consulted — it exists to stop a stale Local
+  // session publishing the private Local Skill variants after a remote binding
+  // was seen, and external mode publishes neither.
+  const externalRepository = readContextTreeRepository();
+  if (externalRepository) {
+    log(`Context source external: delegating to the context-tree CLI for ${externalRepository}`);
+    return { kind: "external", repository: externalRepository };
+  }
+
   const frozenMessage = "Context source frozen: remote binding was previously observed or source-state is unreadable";
   let classified: ReturnType<typeof classifyAgentContextTreeInfo>;
   try {
@@ -304,6 +337,7 @@ export async function resolveAgentContextSource(
 
 export function applyContextSourceToHandlerConfig(config: HandlerConfig, source: ContextSource): HandlerConfig {
   config.contextSourceKind = source.kind;
+  config.contextTreeRepository = source.kind === "external" ? source.repository : null;
   if (source.kind === "remote") {
     config.contextTreePath = source.path;
     config.contextTreeRepoUrl = source.repoUrl;
@@ -316,6 +350,8 @@ export function applyContextSourceToHandlerConfig(config: HandlerConfig, source:
     config.contextTreeBranch = null;
     return config;
   }
+  // External mode projects no First Tree Tree path: the external CLI owns its
+  // own checkout under `~/.context-tree/trees/` and resolves it per project.
   config.contextTreePath = null;
   config.contextTreeRepoUrl = null;
   config.contextTreeBranch = null;
@@ -335,6 +371,14 @@ export function contextSourceFromHandlerConfig(config: HandlerConfig): ContextSo
       ? config.contextTreeBranch
       : null;
 
+  if (kind === "external") {
+    const repository =
+      typeof config.contextTreeRepository === "string" && config.contextTreeRepository.length > 0
+        ? config.contextTreeRepository
+        : null;
+    if (!repository) return { kind: "none", reason: "unknown" };
+    return { kind: "external", repository };
+  }
   if (kind === "local") {
     if (!path) return { kind: "none", reason: "unknown" };
     return { kind: "local", path };
@@ -358,6 +402,9 @@ export function preparationCoordinatesFromSource(source: ContextSource): Context
   }
   if (source.kind === "local") {
     return { kind: "local", path: source.path, repoUrl: null, branch: null };
+  }
+  if (source.kind === "external") {
+    return { kind: "external", path: null, repoUrl: null, branch: null, repository: source.repository };
   }
   return { kind: "none", path: null, repoUrl: null, branch: null };
 }

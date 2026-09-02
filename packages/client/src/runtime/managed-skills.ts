@@ -32,8 +32,10 @@ import {
 } from "@first-tree/shared";
 import { parseDocument } from "yaml";
 import yauzl, { type Entry, type ZipFile } from "yauzl";
+import type { ContextSourceKind } from "./context-source.js";
 import {
   CORE_SKILL_NAMES,
+  type CoreSkillName,
   localContextVariantSourcePath,
   resolveBundledSkillsRoot,
 } from "./first-tree-skills/installer.js";
@@ -72,6 +74,42 @@ export function allowedTargetRootsFromProjection(projection: ProviderSkillRootPr
 
 const RETIRED_CORE_SKILL_NAMES = ["first-tree-guide", "first-tree-kickoff", "first-tree-gitlab"] as const;
 const ALL_KNOWN_CORE_SKILL_NAMES = [...CORE_SKILL_NAMES, ...RETIRED_CORE_SKILL_NAMES] as const;
+
+/**
+ * Core Skills the external `context-tree-*` family supersedes.
+ *
+ * In external mode these are not projected, so the Agent is never offered two
+ * ways to read or write a Context Tree. They are stood down, not retired: the
+ * payloads still ship and a machine with `context_tree.repository` unset keeps
+ * projecting them. Because `ALL_KNOWN_CORE_SKILL_NAMES` still lists them, the
+ * adoption/prune path below recognizes and REMOVES any already-installed copy on
+ * the next session — that is what makes the switch clean rather than additive.
+ *
+ * Review and Audit are here for a second reason: both operate on a First Tree
+ * Team binding that external mode bypasses, and both SKILL.md bodies route
+ * through `first-tree-read` / `first-tree-write`. Leaving them projected would
+ * hand the Agent instructions pointing at Skills this machine just removed.
+ */
+const EXTERNAL_SUPERSEDED_CORE_SKILL_NAMES: readonly string[] = [
+  "first-tree-read",
+  "first-tree-write",
+  "first-tree-seed",
+  "context-tree-review",
+  "context-tree-audit",
+];
+const EXTERNAL_SUPERSEDED_CORE_SKILLS = new Set<string>(EXTERNAL_SUPERSEDED_CORE_SKILL_NAMES);
+
+/**
+ * Core Skills projected for one context-source mode.
+ *
+ * `buildDesiredSkills` and `verifyManagedSkillsProjectionForAdmission` MUST both
+ * go through this. If they disagree, a workspace projects a ledger its own
+ * admission proof then rejects, and the Agent fails to start.
+ */
+function activeCoreSkillNames(contextSourceKind: ContextSourceKind | undefined): readonly CoreSkillName[] {
+  if (contextSourceKind !== "external") return CORE_SKILL_NAMES;
+  return CORE_SKILL_NAMES.filter((name) => !EXTERNAL_SUPERSEDED_CORE_SKILLS.has(name));
+}
 const WINDOWS_RESERVED_NAMES = new Set<string>([
   "con",
   "prn",
@@ -180,9 +218,16 @@ export async function verifyManagedSkillsProjectionForAdmission(options: {
   workspace: string;
   provider: RuntimeProvider;
   providerSkillRoots: ProviderSkillRootProjection;
+  /**
+   * Must match the mode the projection was built with. External mode projects
+   * fewer Core Skills, so a proof that demanded the full set would reject a
+   * perfectly healthy external-mode ledger and refuse to admit the Agent.
+   */
+  contextSourceKind?: ContextSourceKind;
 }): Promise<VerifiedManagedSkillsProjection | null> {
   const { workspace, provider, providerSkillRoots } = options;
   const allowedRoots = allowedTargetRootsFromProjection(providerSkillRoots);
+  const expectedCoreNames = activeCoreSkillNames(options.contextSourceKind);
 
   try {
     const workspaceStat = await lstat(workspace);
@@ -214,13 +259,13 @@ export async function verifyManagedSkillsProjectionForAdmission(options: {
       ledgerKeys.add(entry.key);
       ledgerTargets.add(entry.target);
     }
-    for (const coreName of CORE_SKILL_NAMES) {
+    for (const coreName of expectedCoreNames) {
       const expected = activeEntries.filter(
         (entry) => entry.key === `core:${coreName}` && entry.target === `${activeRoot}/${coreName}`,
       );
       if (expected.length !== 1) return null;
     }
-    const expectedCoreKeys = new Set(CORE_SKILL_NAMES.map((name) => `core:${name}`));
+    const expectedCoreKeys = new Set(expectedCoreNames.map((name) => `core:${name}`));
     const ledgerCoreEntries = stateResult.state.skills.filter((entry) => entry.key.startsWith("core:"));
     if (
       ledgerCoreEntries.length !== expectedCoreKeys.size ||
@@ -361,7 +406,7 @@ export type ReconcileManagedSkillsOptions = Readonly<{
    * private Local Read/Write payloads; `remote` and `none` keep the public
    * inventory.
    */
-  contextSourceKind?: "remote" | "local" | "none";
+  contextSourceKind?: ContextSourceKind;
   lockTimeoutMs?: number;
   /** Fault-injection seam used by deterministic crash-recovery tests. */
   testCrashAt?: ManagedSkillsCheckpoint;
@@ -472,7 +517,7 @@ export async function reconcileManagedSkillsForConfig(
   config: AgentRuntimeConfig | null | undefined,
   log?: (message: string) => void,
   bundleResolver?: TeamSkillBundleResolver,
-  contextSourceKind: "remote" | "local" | "none" = "remote",
+  contextSourceKind: ContextSourceKind = "remote",
   bundledSkillsRoot?: string,
 ): Promise<ReconcileManagedSkillsResult> {
   return reconcileManagedSkills({
@@ -992,7 +1037,7 @@ async function buildDesiredSkills(
   }
   const desired: DesiredManagedSkill[] = [];
   const localVariants = options.contextSourceKind === "local";
-  for (const name of CORE_SKILL_NAMES) {
+  for (const name of activeCoreSkillNames(options.contextSourceKind)) {
     const useLocalVariant = localVariants && (name === "first-tree-read" || name === "first-tree-write");
     const sourcePath = useLocalVariant ? localContextVariantSourcePath(bundledRoot, name) : join(bundledRoot, name);
     let revision = "unavailable";

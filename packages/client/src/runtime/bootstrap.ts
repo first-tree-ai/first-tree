@@ -14,7 +14,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import type { FirstTreeHubSDK } from "../cloud/sdk.js";
-import { resolveAgentContextSource } from "./context-source.js";
+import { type ContextSourceKind, resolveAgentContextSource } from "./context-source.js";
 import type { AgentIdentity } from "./handler.js";
 import { requireTrustedDirectory } from "./trusted-workspace-paths.js";
 import { atomicWriteText, workspaceHasRemoteLatch } from "./workspace-manifest.js";
@@ -281,7 +281,7 @@ export type BootstrapOptions = {
   /** Stable AgentSlot `config.name`. Never inferred from displayName or path. */
   agentName: string;
   contextTreePath: string | null;
-  contextSourceKind?: "remote" | "local" | "none";
+  contextSourceKind?: ContextSourceKind;
   serverUrl: string;
 };
 

@@ -163,7 +163,7 @@ when the PR/MR closes.<% } %>
 ## CLI Overview
 
 Use `<%- bin %> chat …` for messaging, `<%- bin %> agent …` for self-introspection, `<%- bin %> daemon …` for read-only daemon status/doctor, `<%- bin %> github …` and `<%- bin %> gitlab …` for provider-specific entity attention, `<%- bin %> tree read` for explicit-Team BYO task snapshots, `<%- bin %> tree write` for clean BYO write preflight, `<%- bin %> tree review` for trusted Context Reviewer App publication, `<%- bin %> tree verify` for Context Tree validation, and `<%- bin %> tree tree` for hierarchy browsing.
-Operator-only commands (`login`, `daemon install`, `agent create / bind`) run from the web console or a human terminal — **never from inside a running agent**. Context Tree binding is operator-owned too, with one sanctioned in-agent exception: on a **build / set up the Context Tree** task, load `first-tree-seed` and run its `tree init` path directly. The command validates admin/auth and fails closed; do not pre-confirm admin or ask who will bind. Surface the exact gap only if the command actually fails.
+Operator-only commands (`login`, `daemon install`, `agent create / bind`) run from the web console or a human terminal — **never from inside a running agent**. Context Tree binding is operator-owned too, with one sanctioned in-agent exception: on a **build / set up the Context Tree** task, <% if (contextTree.source === 'external') { %>load `context-tree-setup` and follow it; it creates or connects the tree with the user<% } else { %>load `first-tree-seed` and run its `tree init` path directly. The command validates admin/auth and fails closed; do not pre-confirm admin or ask who will bind<% } %>. Surface the exact gap only if the command actually fails.
 Per-command flags live in `<%- bin %> <command> --help` — start with `<%- bin %> chat --help`;
 the full surface is `docs/cli-reference.md`. Substitute `<%- bin %>` anywhere docs
 show the literal `first-tree`.
@@ -383,7 +383,7 @@ detail stays in source systems; the tree carries the durable *what* and
 *why* a future agent must respect. Each domain is a directory; each node
 is Markdown with frontmatter such as `owners` and `soft_links`.
 
-<% if (contextTree.source === 'remote') { %>The policy below is the always-present baseline. For task-scoped file selection and operational read workflow, load `first-tree-read`. For source-backed tree edits, load `first-tree-write`.<% } else if (contextTree.source === 'local') { %>The policy below is the always-present baseline. This workspace uses an Agent-private Local Context Tree, not a Team remote tree. Load `first-tree-read` / `first-tree-write` (same names; Local payloads are already projected). Do not treat Local content as Team truth. Do not load `first-tree-seed`, `context-tree-review`, or `context-tree-audit` against this Local tree.<% } else { %>The policy below is the always-present baseline for judging what belongs in a Context Tree. This briefing was generated without a bound tree — a supported state, not a gap to fix. Ordinary tasks proceed from the user's messages, chat context, and local inputs with no prompt to bind or create a tree; only a request whose result genuinely needs a tree read/write/audit/setup names that specific capability impact. Re-check the workspace binding only if the user says a tree was created or bound this session; an explicit build/set-up request loads `first-tree-seed`.<% } %>
+<% if (contextTree.source === 'remote') { %>The policy below is the always-present baseline. For task-scoped file selection and operational read workflow, load `first-tree-read`. For source-backed tree edits, load `first-tree-write`.<% } else if (contextTree.source === 'local') { %>The policy below is the always-present baseline. This workspace uses an Agent-private Local Context Tree, not a Team remote tree. Load `first-tree-read` / `first-tree-write` (same names; Local payloads are already projected). Do not treat Local content as Team truth. Do not load `first-tree-seed`, `context-tree-review`, or `context-tree-audit` against this Local tree.<% } else if (contextTree.source === 'external') { %>The policy below is the always-present baseline for judging what belongs in a Context Tree. This machine delegates Context Tree work to the external `context-tree` CLI, so load `context-tree-read` to read and `context-tree-write` to record. See **Operating Boundary** below for what that replaces.<% } else { %>The policy below is the always-present baseline for judging what belongs in a Context Tree. This briefing was generated without a bound tree — a supported state, not a gap to fix. Ordinary tasks proceed from the user's messages, chat context, and local inputs with no prompt to bind or create a tree; only a request whose result genuinely needs a tree read/write/audit/setup names that specific capability impact. Re-check the workspace binding only if the user says a tree was created or bound this session; an explicit build/set-up request loads `first-tree-seed`.<% } %>
 
 <%- contextTreePolicy %><% if (contextTree.source === 'remote') { %>
 
@@ -425,7 +425,7 @@ path. Then inspect `<%- contextTree.hierarchyHelpCommand %>`, run
 `<%- contextTree.verifyCommand %>` before using content, and read files with
 native tools. There is no Git pull, no stable snapshot, and no PR/MR identity.
 A concurrent writer may tear the tree; if verify fails, discard the read.
-Do not load `context-tree-review` or `context-tree-audit` against Local content.<% } else { %>
+Do not load `context-tree-review` or `context-tree-audit` against Local content.<% } else if (contextTree.source !== 'external') { %>
 
 ## Reading the Tree
 
@@ -456,7 +456,7 @@ content lock, candidate, fingerprint, or per-write human approval), reread the
 changed nodes, then run `<%- contextTree.verifyCommand %>` until it passes.
 Last-write-wins. If verify fails, repair; do not guess or delete facts to pass
 validation. Recheck binding after the write; if remote is observed, freeze Local
-and do not upload, merge, or auto-reactivate.<% } else { %>
+and do not upload, merge, or auto-reactivate.<% } else if (contextTree.source !== 'external') { %>
 
 ## Writing the Tree
 
@@ -505,7 +505,7 @@ This directory is not Team shared truth. The same Agent's chats share this live
 tree; other Agents do not. There is no Git clone, pull, worktree, or PR/MR.
 Resolve it only through `tree local resolve`; do not invent a path. The directory
 survives beside a later remote `context-tree/` clone but becomes frozen once a
-remote binding is observed.<% } else { %>
+remote binding is observed.<% } else if (contextTree.source !== 'external') { %>
 
 ## Tree Location
 
@@ -521,7 +521,37 @@ The one exception is an explicit
 create + bind is the sanctioned path — run its `tree init` directly without
 pre-confirming admin or asking "who runs the bind?". The command validates
 admin/auth and fails closed; surface the exact gap only after an actual
-command failure.<% } %>
+command failure.<% } %><% if (contextTree.source === 'external') { %>
+
+## Tree Location
+
+This machine runs in **external Context Tree mode**: the tree lives in the
+GitHub repository `<%- contextTree.repository %>`, checked out and owned by the
+external `context-tree` CLI — not under this workspace. There is no
+`context-tree/` or `local-context/` directory here, and no clone, pull, or
+worktree for you to manage.
+
+Resolve the live tree only through the CLI, never by guessing a path:
+
+- **Read** → load `context-tree-read`. It resolves the connected tree for the
+  project and reads indexed directories and Markdown leaves.
+- **Write** → load `context-tree-write` once a decision is settled. It prepares
+  an isolated worktree, commits, and publishes; do not hand-edit the tree.
+- **No connection yet** → the CLI reports `NO_CONNECTION`. Load
+  `context-tree-setup`, which creates or connects a tree with the user. Treat
+  that as a normal state on a new workspace, not a fault to work around.
+
+Ordinary code, repo, path, and error signals do not route into a Tree read. Only
+a request whose result genuinely needs stored decisions or constraints does.
+
+## Operating Boundary
+
+`<%- bin %> tree …` and the `first-tree-read` / `first-tree-write` /
+`first-tree-seed` / `context-tree-review` / `context-tree-audit` Skills do not
+apply on this machine and are not installed. If you catch yourself reaching for
+one, use the `context-tree-*` Skill for that capability instead.
+The Context Tree Policy above still governs *what* belongs in a tree; the
+external Skills own *how* it is read and written.<% } %>
 
 # Skills (First Tree Managed)<% if (resourceSkillRows.length > 0) { %>
 
@@ -558,7 +588,31 @@ Do not load Seed, Reviewer, or Audit against the Local tree.
 | `first-tree-read`    | read relevant Local Context Tree files before acting from task / path / feature signals |
 | `first-tree-write`   | reflect a concrete source artifact into this Agent's Local Context Tree |
 | `first-tree-qa` | test, validate, reproduce, release-qualify, or assess performance by establishing the complete product harness before task-specific execution |
-| `first-tree-file-bug` | you hit a bug in First Tree itself (CLI, runtime, chat, web, GitHub or GitLab integration, or tree tooling) and want it reported |<% } else { %>
+| `first-tree-file-bug` | you hit a bug in First Tree itself (CLI, runtime, chat, web, GitHub or GitLab integration, or tree tooling) and want it reported |<% } else if (contextTree.source === 'external') { %>
+
+## First Tree Family
+
+The generated Context Tree Policy is always present. This machine runs in
+external Context Tree mode: every Context Tree capability belongs to the
+`context-tree-*` Skills installed by the external CLI. First Tree's own Read,
+Write, Seed, Review, and Audit Skills are absent here — Review and Audit
+included, because both act on a Team binding this mode bypasses.
+
+Context Tree capabilities on this machine:
+
+| Skill | Load when |
+|---|---|
+| `context-tree-read` | read the durable decisions and constraints that bear on a task, before planning or changing code |
+| `context-tree-write` | a decision, constraint, or rationale is settled and should outlive the current task |
+| `context-tree-setup` | the project has no connected tree yet, or another Context Tree operation reported `NO_CONNECTION` |
+
+The remaining First Tree Skills, routing exactly as they do in any other mode:
+
+| Skill | Load when |
+|---|---|
+| `first-tree-welcome` | the First Tree onboarding first chat — a natural welcome / "help me get started" message from the user; never an external-channel or `type=integration` message such as Feishu, even when it is a new chat or greeting |
+| `first-tree-qa` | test, validate, reproduce, release-qualify, or assess performance by establishing the complete product harness first |
+| `first-tree-file-bug` | you hit a bug in First Tree itself and want it reported on First Tree's own repo, not the user's |<% } else { %>
 
 ## First Tree Family
 

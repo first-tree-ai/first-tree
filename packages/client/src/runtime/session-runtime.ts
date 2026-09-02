@@ -2167,7 +2167,8 @@ export class SessionRuntime {
       }
       applyContextSourceToHandlerConfig(cfg, source);
       this.config.log.info(
-        { kind: source.kind, path: source.kind === "none" ? null : source.path },
+        // External mode carries a repository rather than a workspace tree path.
+        { kind: source.kind, path: source.kind === "none" || source.kind === "external" ? null : source.path },
         "context source resolved lazily",
       );
       return captureContextSourceAdmission(source);
