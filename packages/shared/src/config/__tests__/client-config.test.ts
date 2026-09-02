@@ -51,4 +51,26 @@ describe("readContextTreeRepository", () => {
     vi.stubEnv("FIRST_TREE_CONTEXT_TREE_REPOSITORY", "acme/from-env");
     expect(readContextTreeRepository()).toBe("acme/from-env");
   });
+
+  // Setting this key alone switches the runtime into external mode and stands
+  // down First Tree's own Tree Skills. A value the external CLI would reject
+  // must therefore fail closed here rather than disable working Skills for a
+  // repository that can never be connected.
+  it.each(["acme/context", "a/b", "acme-co/context.tree", "acme/context_tree"])("accepts %s", (repository) => {
+    writeClientConfig(`server:\n  url: http://localhost:8000\ncontext_tree:\n  repository: ${repository}\n`);
+    expect(readContextTreeRepository()).toBe(repository);
+  });
+
+  it.each([
+    "owner/..",
+    "owner/.",
+    "-acme/context",
+    "acme-/context",
+    "acme.co/context",
+    "acme",
+    "acme/context/extra",
+  ])("rejects %s, leaving external mode off", (repository) => {
+    writeClientConfig(`server:\n  url: http://localhost:8000\ncontext_tree:\n  repository: "${repository}"\n`);
+    expect(readContextTreeRepository()).toBeNull();
+  });
 });
