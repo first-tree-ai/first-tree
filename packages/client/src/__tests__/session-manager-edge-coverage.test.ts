@@ -7841,6 +7841,10 @@ describe("SessionRuntime edge coverage", () => {
       kind: "tool_call",
       payload: { toolUseId: "t1", name: "Bash", args: null, status: "ok" },
     });
+    // The seal captures its snapshot asynchronously; drain it so this test
+    // pins the real ordering (boundary first, then the turn's work) instead of
+    // depending on which microtask happens to win.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     // …and it launches a watcher that outlives it.
     rows = [...withMcp, "7002 7000 /bin/zsh", "7003 7002 sleep"];
     await capturedCtx.finishTurn(capturedMessage, { status: "success", terminal: true });

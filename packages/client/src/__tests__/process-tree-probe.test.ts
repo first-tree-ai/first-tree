@@ -55,6 +55,11 @@ describe("process-tree-probe pure helpers", () => {
   });
 });
 
+/** `sealBaseline` captures its snapshot fire-and-forget; drain that microtask. */
+async function flushBoundaryCapture(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 describe("PsSubprocessProbe", () => {
   const daemonPid = 55;
   // chat-A provider (100) has a live watcher; chat-B provider (200) has none.
@@ -103,14 +108,13 @@ describe("PsSubprocessProbe", () => {
     // child. Reading that as "background task" would put the qualifier on
     // every idle chat on the machine — the opposite of what it is for.
     const mcpOnly = [`300  ${daemonPid} /opt/homebrew/bin/claude`, "301  300 npm exec momentic mcp --config /x.yaml"];
-    const env = async (): Promise<string> => "FIRST_TREE_CHAT_ID=chat-mcp /bin/claude";
     let rows = [...mcpOnly];
     const probe = new PsSubprocessProbe({
       log: silentLogger(),
       daemonPid,
       intervalMs: 1_000_000,
       runProcessSnapshot: async () => rows.join("\n"),
-      runEnvForPid: env,
+      runEnvForPid: async () => "FIRST_TREE_CHAT_ID=chat-mcp /bin/claude",
     });
 
     await probe.refresh();
@@ -119,8 +123,11 @@ describe("PsSubprocessProbe", () => {
     expect(probe.hasLiveSubprocess("chat-mcp")).toBe(true);
     expect(probe.hasSessionSpawnedSubprocess("chat-mcp")).toBe(false);
 
-    // A turn launches a background watcher: a child the baseline never saw.
+    // A turn begins: the boundary snapshot records the MCP child as infrastructure.
     probe.sealBaseline("chat-mcp");
+    await flushBoundaryCapture();
+
+    // That turn launches a background watcher.
     rows = [...mcpOnly, "302  300 /bin/zsh", "303  302 sleep"];
     await probe.refresh();
     expect(probe.hasSessionSpawnedSubprocess("chat-mcp")).toBe(true);
@@ -132,14 +139,13 @@ describe("PsSubprocessProbe", () => {
     probe.stop();
   });
 
-  it("absorbs a startup MCP child that appears after the provider is first seen", async () => {
-    // The poll starts before any provider exists, so a scan can catch the
-    // `claude` process in the gap before its stdio MCP server spawns. Freezing
-    // the baseline on first sight would store nothing, and the MCP child
-    // arriving one scan later would read as background work for the rest of
-    // that provider's life — the very claim the baseline exists to prevent.
-    const chatId = "chat-startup-race";
-    let rows = [`600  ${daemonPid} /opt/homebrew/bin/claude`];
+  it("takes the baseline at the turn boundary, whenever the MCP child happened to start", async () => {
+    // The interleaving that defeats any scan-order rule: a scan lands while the
+    // provider is still alone, THEN its MCP server starts, and only then does a
+    // turn begin. "Observed before the turn" is true of that first scan and
+    // tells you nothing, because what it observed was incomplete.
+    const chatId = "chat-mcp-after-scan";
+    let rows = [`900  ${daemonPid} /opt/homebrew/bin/claude`];
     const probe = new PsSubprocessProbe({
       log: silentLogger(),
       daemonPid,
@@ -148,32 +154,25 @@ describe("PsSubprocessProbe", () => {
       runEnvForPid: async () => `FIRST_TREE_CHAT_ID=${chatId} /bin/claude`,
     });
 
-    // Scan 1: provider only, still starting up.
+    await probe.refresh(); // provider seen alone
+    rows = [`900  ${daemonPid} /opt/homebrew/bin/claude`, "901  900 npm exec momentic mcp"]; // MCP starts after
+    probe.sealBaseline(chatId); // …and only now does the first turn begin
+    await flushBoundaryCapture();
+
     await probe.refresh();
     expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(false);
 
-    // Scan 2: the permanent MCP child has arrived, still before any turn.
-    rows = [`600  ${daemonPid} /opt/homebrew/bin/claude`, "601  600 npm exec momentic mcp"];
-    await probe.refresh();
-    expect(probe.hasLiveSubprocess(chatId)).toBe(true);
-    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(false);
-
-    // The first turn closes the baseline: everything alive now is infrastructure.
-    probe.sealBaseline(chatId);
-    await probe.refresh();
-    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(false);
-
-    // A task the turn launches is outside it.
-    rows = [`600  ${daemonPid} /opt/homebrew/bin/claude`, "601  600 npm exec momentic mcp", "602  600 /bin/zsh"];
+    // The boundary still lets real work through afterwards.
+    rows = [...rows, "902  900 /bin/zsh"];
     await probe.refresh();
     expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(true);
     probe.stop();
   });
 
   it("keeps reporting a background task that survives into a later turn", async () => {
-    // The baseline seals ONCE, at the first turn. Re-taking it at every turn
-    // start would absorb a task that outlived the previous turn and silence it
-    // — which is the exact case this feature exists to report.
+    // The boundary is taken once per provider. Re-taking it at every turn would
+    // absorb a task that outlived the previous turn and silence it — the exact
+    // case this feature exists to report.
     const chatId = "chat-survives";
     let rows = [`700  ${daemonPid} /opt/homebrew/bin/claude`, "701  700 npm exec momentic mcp"];
     const probe = new PsSubprocessProbe({
@@ -185,7 +184,7 @@ describe("PsSubprocessProbe", () => {
     });
     await probe.refresh();
     probe.sealBaseline(chatId);
-    await probe.refresh();
+    await flushBoundaryCapture();
 
     // Turn 1 launches a watcher that outlives it.
     rows = [...rows, "702  700 /bin/zsh"];
@@ -194,16 +193,16 @@ describe("PsSubprocessProbe", () => {
 
     // Turn 2 starts with that watcher still running: it must stay reported.
     probe.sealBaseline(chatId);
+    await flushBoundaryCapture();
     await probe.refresh();
     expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(true);
     probe.stop();
   });
 
-  it("stays silent for a provider first observed after its session is already running", async () => {
-    // A provider whose first scan lands mid-turn cannot be told apart from one
-    // that always had those children, so its whole tree becomes the baseline.
-    // That under-reports until they exit — silence, not a false claim.
-    const chatId = "chat-late-first-scan";
+  it("claims nothing for a provider that has not reached a turn boundary", async () => {
+    // A replacement provider between turns has no boundary yet. Silence until
+    // its next turn, rather than guessing which of its children are its own.
+    const chatId = "chat-no-boundary-yet";
     const probe = new PsSubprocessProbe({
       log: silentLogger(),
       daemonPid,
@@ -214,69 +213,17 @@ describe("PsSubprocessProbe", () => {
         ),
       runEnvForPid: async () => `FIRST_TREE_CHAT_ID=${chatId} /bin/claude`,
     });
-    probe.sealBaseline(chatId);
     await probe.refresh();
     expect(probe.hasLiveSubprocess(chatId)).toBe(true);
     expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(false);
     probe.stop();
   });
 
-  it("re-baselines when the provider process is replaced", async () => {
-    // Baselines are keyed by provider pid, so a restarted provider must not
-    // inherit the old one's children as its session infrastructure.
-    let rows = [`400  ${daemonPid} /opt/homebrew/bin/claude`, "401  400 npm exec momentic mcp"];
-    const probe = new PsSubprocessProbe({
-      log: silentLogger(),
-      daemonPid,
-      intervalMs: 1_000_000,
-      runProcessSnapshot: async () => rows.join("\n"),
-      runEnvForPid: async () => "FIRST_TREE_CHAT_ID=chat-restart /bin/claude",
-    });
-    await probe.refresh();
-    probe.sealBaseline("chat-restart");
-    await probe.refresh();
-    expect(probe.hasSessionSpawnedSubprocess("chat-restart")).toBe(false);
-
-    // New provider process for the same chat: its own startup window, so the
-    // replacement's MCP child must not be read as work the session launched.
-    rows = [`500  ${daemonPid} /opt/homebrew/bin/claude`, "501  500 npm exec momentic mcp"];
-    await probe.refresh();
-    expect(probe.hasSessionSpawnedSubprocess("chat-restart")).toBe(false);
-    probe.stop();
-  });
-
-  it("gives a provider first seen after the seal request its own startup window", async () => {
-    // The first turn can begin before any scan has seen the provider. Sealing
-    // on that first sighting stores whatever exists at that instant — possibly
-    // nothing — and the MCP child arriving a tick later then reads as work for
-    // the provider's whole life.
-    const chatId = "chat-turn-before-scan";
-    let rows = [`900  ${daemonPid} /opt/homebrew/bin/claude`];
-    const probe = new PsSubprocessProbe({
-      log: silentLogger(),
-      daemonPid,
-      intervalMs: 1_000_000,
-      runProcessSnapshot: async () => rows.join("\n"),
-      runEnvForPid: async () => `FIRST_TREE_CHAT_ID=${chatId} /bin/claude`,
-    });
-
-    probe.sealBaseline(chatId); // the turn starts first
-    await probe.refresh(); // …and only now is the provider seen at all
-    rows = [`900  ${daemonPid} /opt/homebrew/bin/claude`, "901  900 npm exec momentic mcp"];
-    await probe.refresh(); // its MCP server appears during the grace interval
-    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(false);
-
-    // The window is one interval, not forever: work after it still reports.
-    rows = [...rows, "902  900 /bin/zsh"];
-    await probe.refresh();
-    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(true);
-    probe.stop();
-  });
-
-  it("gives a seamless replacement provider its own startup window", async () => {
-    // The chat stays sealed across a provider restart (it never loses a live
-    // provider), so a replacement pid would otherwise be created and sealed in
-    // the same scan — an empty baseline, and its startup MCP child outside it.
+  it("gives a seamless replacement provider its own boundary at the next turn", async () => {
+    // The chat never loses a live provider across a restart, so a chat-level
+    // seal would never re-arm. Baselines are per pid and taken at a boundary,
+    // so the replacement gets its own — including when it is seen before its
+    // MCP child exists.
     const chatId = "chat-seamless-replace";
     let rows = [`1000 ${daemonPid} /opt/homebrew/bin/claude`, "1001 1000 npm exec momentic mcp"];
     const probe = new PsSubprocessProbe({
@@ -288,13 +235,17 @@ describe("PsSubprocessProbe", () => {
     });
     await probe.refresh();
     probe.sealBaseline(chatId);
+    await flushBoundaryCapture();
     await probe.refresh();
     expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(false);
 
-    // The provider is replaced between scans, seen before its MCP child.
+    // Replaced between scans, observed before its MCP child.
     rows = [`1100 ${daemonPid} /opt/homebrew/bin/claude`];
     await probe.refresh();
     rows = [`1100 ${daemonPid} /opt/homebrew/bin/claude`, "1101 1100 npm exec momentic mcp"];
+    probe.sealBaseline(chatId); // the next turn on the new provider
+    await flushBoundaryCapture();
+
     await probe.refresh();
     expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(false);
 

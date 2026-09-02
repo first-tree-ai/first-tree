@@ -176,23 +176,13 @@ export class PsSubprocessProbe implements SubprocessProbe {
   private chatIdsWithLiveWork = new Set<string>();
   private chatIdsWithSessionSpawnedWork = new Set<string>();
   /**
-   * Per provider pid: the infrastructure children, and whether that set is
-   * still growing. Keyed by pid, so a restarted provider re-baselines for free
-   * and a dead one is pruned on the next scan.
+   * Per provider pid: the children it was running at its first turn boundary.
+   * Written once, from a snapshot taken at that instant, and never revised —
+   * so a later turn cannot absorb a watcher an earlier turn left running.
    */
-  private readonly baselineChildrenByProvider = new Map<
-    number,
-    {
-      pids: Set<number>;
-      sealed: boolean;
-      /** This pid was observed growing before any turn asked to seal it. */
-      grownBeforeSealRequest: boolean;
-      /** The one grace scan given to a pid first seen after the seal request. */
-      graceScanUsed: boolean;
-    }
-  >();
-  /** Chats whose first turn has begun; their provider's baseline is closed. */
-  private readonly sealedChats = new Set<string>();
+  private readonly baselineChildrenByProvider = new Map<number, Set<number>>();
+  /** Last known provider pid -> chat, so a boundary capture can skip a scan. */
+  private readonly chatIdByProviderPid = new Map<number, string>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private inflight: Promise<void> | null = null;
   private readonly daemonPid: number;
@@ -218,7 +208,53 @@ export class PsSubprocessProbe implements SubprocessProbe {
   }
 
   sealBaseline(chatId: string): void {
-    this.sealedChats.add(chatId);
+    // Skip the scan when every provider known for this chat already has its
+    // boundary, so the extra `ps` costs one turn per session, not every turn.
+    let known = false;
+    for (const [pid, mapped] of this.chatIdByProviderPid) {
+      if (mapped !== chatId) continue;
+      known = true;
+      if (!this.baselineChildrenByProvider.has(pid)) break;
+    }
+    const allBaselined =
+      known &&
+      [...this.chatIdByProviderPid].every(
+        ([pid, mapped]) => mapped !== chatId || this.baselineChildrenByProvider.has(pid),
+      );
+    if (allBaselined) return;
+    void this.captureBaselineAtBoundary(chatId);
+  }
+
+  /**
+   * Record what this chat's provider is running *right now*, at a turn
+   * boundary, for any provider pid that does not have a baseline yet.
+   *
+   * The snapshot is the whole point. Deriving the boundary from scan order
+   * cannot work: a periodic scan lands wherever it lands, so "the provider was
+   * observed before the turn" is true even for a scan that ran before the
+   * provider's MCP server existed, and any grace window bought against that
+   * has the mirror defect of absorbing a watcher that is already running. A
+   * turn boundary is a real instant — the provider is initialized, so its
+   * infrastructure is up, and the turn has not yet launched anything.
+   *
+   * A pid with no baseline claims nothing until its next turn boundary, which
+   * is the safe direction for a provider that appears between turns.
+   */
+  private async captureBaselineAtBoundary(chatId: string): Promise<void> {
+    try {
+      const rows = parseProcessRows(await this.runProcessSnapshot());
+      const childrenByParent = buildChildrenIndex(rows);
+      for (const providerPid of findProviderPids(rows, this.daemonPid)) {
+        if (this.baselineChildrenByProvider.has(providerPid)) continue;
+        const owner = extractChatId(await this.runEnvForPid(providerPid));
+        if (owner !== chatId) continue;
+        this.chatIdByProviderPid.set(providerPid, owner);
+        this.baselineChildrenByProvider.set(providerPid, new Set(childrenByParent.get(providerPid) ?? []));
+      }
+    } catch (err) {
+      // No baseline means no claim, so a failed capture degrades to silence.
+      this.opts.log.debug({ err }, "subprocess probe boundary capture failed; leaving this provider unbaselined");
+    }
   }
 
   stop(): void {
@@ -254,44 +290,13 @@ export class PsSubprocessProbe implements SubprocessProbe {
         // exists: baseline growth has to happen during provider startup, which
         // is exactly the window where there may be no children yet.
         const chatId = extractChatId(await this.runEnvForPid(providerPid));
-        const children = childrenByParent.get(providerPid) ?? [];
-        let baseline = this.baselineChildrenByProvider.get(providerPid);
-        if (!baseline) {
-          baseline = { pids: new Set(), sealed: false, grownBeforeSealRequest: false, graceScanUsed: false };
-          this.baselineChildrenByProvider.set(providerPid, baseline);
-        }
-        const grow = (): void => {
-          for (const child of children) baseline.pids.add(child);
-        };
-        if (!baseline.sealed) {
-          if (!(chatId && this.sealedChats.has(chatId))) {
-            // Startup: no turn has asked to close this chat's baseline yet.
-            grow();
-            baseline.grownBeforeSealRequest = true;
-          } else if (baseline.grownBeforeSealRequest) {
-            // The startup window was observed before the turn, so everything
-            // infrastructure could be is already in. Closing WITHOUT growing is
-            // what keeps a task this turn just launched outside the baseline.
-            baseline.sealed = true;
-          } else if (!baseline.graceScanUsed) {
-            // This provider was first seen only after the seal request — a
-            // restarted provider, or a first turn that began before any scan.
-            // It has had no startup window at all, and sealing an empty
-            // baseline is what makes a permanent MCP child look like work. Give
-            // it one full interval to show its infrastructure.
-            baseline.graceScanUsed = true;
-            grow();
-          } else {
-            // End of that interval: absorb whatever appeared during it, then
-            // close. Work started inside the grace window is absorbed too —
-            // silence, which is the error direction this whole signal prefers.
-            grow();
-            baseline.sealed = true;
-          }
-        }
+        const baseline = this.baselineChildrenByProvider.get(providerPid);
         const live = hasDescendant(providerPid, childrenByParent);
-        const sessionSpawned = baseline.sealed && hasNonBaselineChild(providerPid, childrenByParent, baseline.pids);
+        // No boundary captured yet — this provider has not reached a turn since
+        // it appeared, so nothing here is known to be work.
+        const sessionSpawned = baseline !== undefined && hasNonBaselineChild(providerPid, childrenByParent, baseline);
         if (!chatId) continue;
+        this.chatIdByProviderPid.set(providerPid, chatId);
         chatsWithLiveProvider.add(chatId);
         if (live) next.add(chatId);
         if (sessionSpawned) nextSessionSpawned.add(chatId);
@@ -302,10 +307,8 @@ export class PsSubprocessProbe implements SubprocessProbe {
       for (const pid of this.baselineChildrenByProvider.keys()) {
         if (!alive.has(pid)) this.baselineChildrenByProvider.delete(pid);
       }
-      // A chat with no live provider has no baseline to keep closed; the next
-      // provider for it starts its own startup window.
-      for (const chatId of this.sealedChats) {
-        if (!chatsWithLiveProvider.has(chatId)) this.sealedChats.delete(chatId);
+      for (const pid of this.chatIdByProviderPid.keys()) {
+        if (!alive.has(pid)) this.chatIdByProviderPid.delete(pid);
       }
       this.chatIdsWithLiveWork = next;
       this.chatIdsWithSessionSpawnedWork = nextSessionSpawned;
