@@ -23,7 +23,9 @@ import {
   createApiNameResolver,
   createExecuteUpdate,
   ensureActiveRootClientIdPersisted,
+  ensureContextTreeSkills,
   ensureFreshAccessToken,
+  formatContextTreeSetupReport,
   getClientServiceStatus,
   handleClientOrgMismatch,
   hasIncompleteClientSwitch,
@@ -213,6 +215,15 @@ export function registerLoginCommand(program: Command): void {
         }
         print.line("  ✓ Authenticated\n");
         print.line(`  ✓ Computer registered (id: ${config.client.id})\n`);
+
+        // External Context Tree mode, when `context_tree.repository` is set.
+        // Best-effort: a machine that cannot install or clone still logs in.
+        const contextTree = await ensureContextTreeSkills();
+        if (contextTree.status === "installed") {
+          print.line(`  ✓ ${formatContextTreeSetupReport(contextTree)}\n`);
+        } else if (contextTree.status === "failed") {
+          print.line(`  ⚠️  ${formatContextTreeSetupReport(contextTree)}\n`);
+        }
 
         const shouldInstallService = options.start !== false && isServiceSupported();
         if (shouldInstallService) {

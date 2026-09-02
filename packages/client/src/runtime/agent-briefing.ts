@@ -9,6 +9,7 @@ import {
 import type * as ejs from "ejs";
 import type { PredeclaredSourceRepo } from "./bootstrap.js";
 import { getCliBinding } from "./cli-binding.js";
+import type { ContextSourceKind } from "./context-source.js";
 import type { AgentIdentity } from "./handler.js";
 
 // EJS is published as CommonJS at runtime even though its types expose named
@@ -74,13 +75,17 @@ type SourceRepositoryRow = Readonly<{
 }>;
 
 type ContextTreeRenderModel = Readonly<{
-  source: "remote" | "local" | "none";
+  source: "remote" | "local" | "none" | "external";
   bound: boolean;
+  /** GitHub OWNER/REPO in external mode; null in every other mode. */
+  repository: string | null;
   path: string | null;
   upstreamUrl: string | null;
   branch: string;
-  verifyCommand: string;
-  hierarchyHelpCommand: string;
+  // Null only in external mode, where the `context-tree-*` Skills own tree
+  // verification and hierarchy browsing and no render site is reached.
+  verifyCommand: string | null;
+  hierarchyHelpCommand: string | null;
   localResolveReadCommand: string | null;
   localResolveWriteCommand: string | null;
   cloneCommand: string | null;
@@ -135,7 +140,9 @@ export type BuildAgentBriefingOptions = {
   /** Upstream coordinates used by the agent-managed Context Tree clone. */
   contextTreeRepoUrl?: string | null;
   contextTreeBranch?: string | null;
-  contextSourceKind?: "remote" | "local" | "none";
+  contextSourceKind?: ContextSourceKind;
+  /** GitHub OWNER/REPO driving external Context Tree mode, when it is on. */
+  contextTreeRepository?: string | null;
 };
 
 /** Build the unified agent-level briefing materialized as `AGENTS.md`. */
@@ -193,6 +200,7 @@ function buildAgentBriefingRenderModel(opts: BuildAgentBriefingOptions): AgentBr
       opts.contextTreeRepoUrl ?? null,
       opts.contextTreeBranch ?? null,
       opts.contextSourceKind,
+      opts.contextTreeRepository ?? null,
     ),
     contextTreePolicy: readCanonicalContextTreePolicy(),
     contextTreeWriteRouting: readCanonicalContextTreeWriteRouting(),
@@ -217,14 +225,42 @@ function buildContextTreeRenderModel(
   path: string | null,
   upstreamUrl: string | null,
   configuredBranch: string | null,
-  sourceKind?: "remote" | "local" | "none",
+  sourceKind?: ContextSourceKind,
+  repository?: string | null,
 ): ContextTreeRenderModel {
   const branch = configuredBranch ?? "main";
   const source = sourceKind ?? (path && upstreamUrl ? "remote" : path ? "remote" : "none");
+
+  // External mode must be decided before the `path === null` short-circuit
+  // below: it deliberately has no First Tree tree path, so it would otherwise
+  // render as an unbound tree and re-introduce the `first-tree-*` prose.
+  if (source === "external") {
+    return {
+      source: "external",
+      bound: repository !== undefined && repository !== null,
+      repository: repository ?? null,
+      path: null,
+      upstreamUrl: null,
+      branch,
+      // Every command field is null here: the external `context-tree-*` Skills
+      // carry their own operating instructions, and each render site for these
+      // fields lives in a `remote` / `local` branch that external mode skips.
+      verifyCommand: null,
+      hierarchyHelpCommand: null,
+      localResolveReadCommand: null,
+      localResolveWriteCommand: null,
+      cloneCommand: null,
+      removeSymlinkCommand: null,
+      pullCommand: null,
+      addWorktreeCommand: null,
+    };
+  }
+
   if (source === "none" || path === null) {
     return {
       source: "none",
       bound: false,
+      repository: null,
       path: null,
       upstreamUrl: null,
       branch,
@@ -244,6 +280,7 @@ function buildContextTreeRenderModel(
     return {
       source: "local",
       bound: true,
+      repository: null,
       path,
       upstreamUrl: null,
       branch,
@@ -261,6 +298,7 @@ function buildContextTreeRenderModel(
   return {
     source: "remote",
     bound: true,
+    repository: null,
     path,
     upstreamUrl,
     branch,
