@@ -1,5 +1,6 @@
 import { validateHeaderValue } from "node:http";
 import { Readable } from "node:stream";
+import { FirstTreeHubSDK } from "@first-tree/client/cloud";
 import {
   ATTACHMENT_FILENAME_HEADER,
   ATTACHMENT_MIME_HEADER,
@@ -828,6 +829,36 @@ describe("attachments route — upload + capability download", () => {
     });
     expect(reply.statusCode).toBe(400);
     expect(reply.json<{ error: string }>().error).toContain("Attachment filename exceeds maximum length");
+  });
+
+  it("accepts an encoded filename after trimming request padding", async () => {
+    const isolatedApp = await createTestApp();
+    try {
+      const admin = await createTestAdmin(isolatedApp, {
+        username: `padded-name-${crypto.randomUUID().slice(0, 6)}`,
+      });
+      await isolatedApp.listen({ port: 0, host: "127.0.0.1" });
+      const address = isolatedApp.server.address();
+      if (!address || typeof address === "string") throw new Error("Test server did not expose a TCP address");
+      const sdk = new FirstTreeHubSDK({
+        serverUrl: `http://127.0.0.1:${address.port}`,
+        agentId: admin.humanAgentUuid,
+        runtimeSessionToken: "test-runtime-session",
+        userAgent: "first-tree-test",
+        getAccessToken: () => admin.accessToken,
+      });
+
+      await expect(
+        sdk.uploadAttachment({
+          orgId: admin.organizationId,
+          bytes: Buffer.from("padded"),
+          mimeType: "text/plain",
+          filename: `${" ".repeat(6000)}padded.txt `,
+        }),
+      ).resolves.toMatchObject({ filename: "padded.txt" });
+    } finally {
+      await isolatedApp.close();
+    }
   });
 
   it("returns 404 for unknown attachment id", async () => {

@@ -77,6 +77,7 @@ import {
   legacyContextActivationResponseSchema,
   listMeChatsResponseSchema,
   type Message,
+  normalizeAttachmentFilename,
   type OrgContextTreeFeaturesOutput,
   type OrgContextTreeFeaturesStorage,
   type OrgContextTreeOutput,
@@ -1055,7 +1056,8 @@ export class FirstTreeHubSDK {
     filename: string;
     orgId: string;
   }): Promise<UploadAttachmentResponse> {
-    const filenameError = getAttachmentFilenameError(opts.filename);
+    const filename = normalizeAttachmentFilename(opts.filename);
+    const filenameError = getAttachmentFilenameError(filename);
     if (filenameError) throw new TypeError(filenameError);
     const json = await this.requestJson<unknown>(`/api/v1/orgs/${encodeURIComponent(opts.orgId)}/attachments`, {
       method: "POST",
@@ -1063,7 +1065,7 @@ export class FirstTreeHubSDK {
       headers: {
         "Content-Type": "application/octet-stream",
         [ATTACHMENT_MIME_HEADER]: opts.mimeType,
-        [ATTACHMENT_FILENAME_HEADER]: encodeURIComponent(opts.filename),
+        [ATTACHMENT_FILENAME_HEADER]: encodeURIComponent(filename),
       },
     });
     return uploadAttachmentResponseSchema.parse(json);

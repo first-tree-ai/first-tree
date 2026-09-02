@@ -21,9 +21,29 @@ export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
  */
 export const MAX_ATTACHMENT_FILENAME_BYTES = 255;
 
+/** Normalize the filename value shared by every upload ingress. */
+export function normalizeAttachmentFilename(value: string): string {
+  return value.trim();
+}
+
+/** Truncate a string without splitting a Unicode code point. */
+export function truncateUtf8ByBytes(value: string, maxBytes: number): string {
+  const encoder = new TextEncoder();
+  if (encoder.encode(value).byteLength <= maxBytes) return value;
+  let result = "";
+  let bytes = 0;
+  for (const character of value) {
+    const characterBytes = encoder.encode(character).byteLength;
+    if (bytes + characterBytes > maxBytes) break;
+    result += character;
+    bytes += characterBytes;
+  }
+  return result;
+}
+
 /** Return the canonical filename validation error shared by every ingress. */
 export function getAttachmentFilenameError(value: string): string | null {
-  const filename = value.trim();
+  const filename = normalizeAttachmentFilename(value);
   if (filename.length === 0) return "Attachment filename is required";
   try {
     encodeURIComponent(filename);

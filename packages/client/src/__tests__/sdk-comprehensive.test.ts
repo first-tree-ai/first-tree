@@ -509,6 +509,30 @@ describe("FirstTreeHubSDK comprehensive wrappers", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("validates and encodes the trimmed attachment filename", async () => {
+    const uploadBody = {
+      id: "123e4567-e89b-12d3-a456-426614174000",
+      mimeType: "text/plain",
+      filename: "padded.txt",
+      sizeBytes: 1,
+      uploadedBy: "agent-1",
+      createdAt: "2026-07-09T00:00:00.000Z",
+    };
+    const fetchMock = mockFetch(jsonResponse(uploadBody));
+
+    await expect(
+      makeSdk().uploadAttachment({
+        orgId: "org-1",
+        bytes: new Uint8Array([1]),
+        mimeType: "text/plain",
+        filename: `${" ".repeat(6000)}padded.txt `,
+      }),
+    ).resolves.toEqual(uploadBody);
+    expect(requestInit(fetchMock, 0)).toMatchObject({
+      headers: expect.objectContaining({ [ATTACHMENT_FILENAME_HEADER]: "padded.txt" }),
+    });
+  });
+
   it("parses SDK errors, Retry-After dates, invalid Retry-After values, and invalid success JSON", async () => {
     vi.useFakeTimers({ now: new Date("2026-07-09T00:00:00.000Z") });
 
