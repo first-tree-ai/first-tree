@@ -7911,6 +7911,69 @@ describe("SessionRuntime edge coverage", () => {
     await sm.shutdown();
   });
 
+  it("gives a provider that respawns inside an open turn its own boundary", async () => {
+    // Claude's transient retry rebuilds the native process mid-turn without a
+    // `turn_end`, so chat-level turn liveness is still in flight when the
+    // replacement generation reports its own boundary. That boundary has to
+    // reach the probe anyway, or the new process's startup MCP child and every
+    // task it launches stay unclassifiable until some later turn.
+    const chatId = "chat-respawn";
+    const T0 = new Date("2026-09-02T00:00:00Z").getTime();
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    let rows = ["4242 1 20:00 node", "8000 4242 02:00 /opt/homebrew/bin/claude", "8001 8000 01:59 npm exec mcp"];
+    const probe = new PsSubprocessProbe({
+      log: silentLogger(),
+      daemonPid: 4242,
+      intervalMs: 1_000_000,
+      runProcessSnapshot: async () => rows.join("\n"),
+      runEnvForPid: async () => `FIRST_TREE_CHAT_ID=${chatId} /opt/homebrew/bin/claude`,
+    });
+    await probe.refresh();
+
+    let capturedCtx: SessionContext | undefined;
+    const sm = makeRuntime({
+      subprocessProbe: probe,
+      handlers: [
+        handler({
+          start: vi.fn(async (_msg: SessionMessage, ctx: SessionContext) => {
+            capturedCtx = ctx;
+            return { sessionId: "session-respawn", route: { kind: "owned" as const, mode: "queued" as const } };
+          }) as unknown as AgentHandler["start"],
+        }),
+      ],
+    });
+    await sm.dispatch(mockEntry({ id: 1, chatId }));
+    if (!capturedCtx) throw new Error("expected captured session context");
+
+    capturedCtx.noteTurnStart(); // the first generation's turn opens
+
+    // The provider respawns mid-turn: new pid, no `turn_end` in between, and
+    // the replacement reports its own boundary.
+    vi.setSystemTime(T0 + 30_000);
+    rows = ["4242 1 20:30 node", "8100 4242 00:03 /opt/homebrew/bin/claude", "8101 8100 00:02 npm exec mcp"];
+    capturedCtx.noteTurnStart();
+
+    // It then launches a watcher, and a scan follows.
+    vi.setSystemTime(T0 + 90_000);
+    rows = [
+      "4242 1 21:30 node",
+      "8100 4242 01:03 /opt/homebrew/bin/claude",
+      "8101 8100 01:02 npm exec mcp",
+      "8102 8100 00:30 /bin/zsh",
+    ];
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(true);
+    // …and the replacement's own permanent MCP child is not the reason.
+    rows = ["4242 1 21:30 node", "8100 4242 01:03 /opt/homebrew/bin/claude", "8101 8100 01:02 npm exec mcp"];
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(false);
+
+    probe.stop();
+    await sm.shutdown();
+    vi.useRealTimers();
+  });
+
   it("never asserts background work for a session whose only child is its MCP server", async () => {
     // End to end against the REAL probe rather than a stubbed boolean: this is
     // the shape that would have shipped the qualifier onto every idle chat of

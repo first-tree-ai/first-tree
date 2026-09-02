@@ -3295,6 +3295,16 @@ export class SessionRuntime {
       },
       noteTurnStart: () => {
         if (mutationValid && !mutationValid()) return;
+        // A provider reporting its OWN turn boundary is authoritative even
+        // inside an open logical turn, so it reaches the probe directly rather
+        // than through chat-level turn liveness. Claude's transient retry
+        // respawns the native process mid-turn without a `turn_end`, and that
+        // replacement generation needs its own instant — otherwise its startup
+        // MCP child and everything it launches stay unclassifiable until some
+        // later turn. Event-derived liveness keeps the one-call-per-turn guard
+        // below, because repeated in-turn events are noise, not a new
+        // generation.
+        this.config.subprocessProbe?.noteTurnBoundary(chatId);
         this.projection.noteProviderTurnStart(chatId);
       },
       noteTurnEnd: () => {
