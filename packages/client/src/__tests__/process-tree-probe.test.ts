@@ -270,6 +270,92 @@ describe("PsSubprocessProbe", () => {
     probe.stop();
   });
 
+  it("classifies against the window ps was actually sampled in, not the scan's start", async () => {
+    // `ps` can take seconds to return. Deriving both start bounds from one
+    // timestamp taken BEFORE the command runs shifts them backwards by that
+    // delay — enough for a replacement to accept a boundary that predates it
+    // and then report its own permanent MCP child as work.
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    const chatId = "chat-slow-ps";
+    let rows: string[] = [];
+    let holdNext: { promise: Promise<string>; resolve: () => void } | null = null;
+    const probe = new PsSubprocessProbe({
+      log: silentLogger(),
+      daemonPid,
+      intervalMs: 1_000_000,
+      runProcessSnapshot: async () => {
+        if (!holdNext) return rows.join("\n");
+        const held = holdNext;
+        holdNext = null;
+        return held.promise;
+      },
+      runEnvForPid: async () => `FIRST_TREE_CHAT_ID=${chatId} /bin/claude`,
+    });
+
+    rows = [proc(1500, daemonPid, 300, "/opt/homebrew/bin/claude"), proc(1501, 1500, 299, "npm exec momentic mcp")];
+    await probe.refresh();
+    probe.noteTurnBoundary(chatId); // predecessor boundary at T0
+
+    // A scan starts at T0+6s; its `ps` does not return until T0+16s, by which
+    // point the replacement provider (started at T0+5s) is 11s old.
+    vi.setSystemTime(T0 + 6_000);
+    let resolveHeld!: (value: string) => void;
+    const heldPromise = new Promise<string>((resolve) => {
+      resolveHeld = resolve;
+    });
+    holdNext = { promise: heldPromise, resolve: () => resolveHeld("") };
+    const pending = probe.refresh();
+    vi.setSystemTime(T0 + 16_000);
+    resolveHeld(
+      [proc(1600, daemonPid, 11, "/opt/homebrew/bin/claude"), proc(1601, 1600, 10, "npm exec momentic mcp")].join("\n"),
+    );
+    await pending;
+
+    // Measured from the scan's start the provider looks born at T0-5s and the
+    // predecessor's boundary looks valid for it; measured from when `ps`
+    // actually sampled, it does not. The damage shows on the NEXT ordinary
+    // scan, where a wrongly adopted boundary turns the replacement's permanent
+    // MCP child into "work" — so the assertion has to look one scan further.
+    vi.setSystemTime(T0 + 20_000);
+    rows = [proc(1600, daemonPid, 15, "/opt/homebrew/bin/claude"), proc(1601, 1600, 14, "npm exec momentic mcp")];
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(false);
+    probe.stop();
+  });
+
+  it("lets a replacement recover with its own turn after rejecting a stale boundary", async () => {
+    // A pending timestamp a provider rejects as older than itself must not
+    // linger: it would block every later turn from being recorded, and the
+    // replacement's work would stay hidden for its whole life.
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    const chatId = "chat-recover";
+    let rows = [proc(1700, daemonPid, 300, "/opt/homebrew/bin/claude"), proc(1701, 1700, 299, "npm exec momentic mcp")];
+    const probe = probeOver(() => rows, chatId);
+    await probe.refresh();
+    probe.noteTurnBoundary(chatId); // predecessor boundary at T0
+
+    // Replaced; the scan rejects the stale boundary for the new provider.
+    vi.setSystemTime(T0 + 5_000);
+    rows = [proc(1800, daemonPid, 2, "/opt/homebrew/bin/claude"), proc(1801, 1800, 1, "npm exec momentic mcp")];
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(false);
+
+    // Its own first turn, then a watcher it launches: both must register.
+    vi.setSystemTime(T0 + 20_000);
+    probe.noteTurnBoundary(chatId);
+    vi.setSystemTime(T0 + 60_000);
+    rows = [
+      proc(1800, daemonPid, 57, "/opt/homebrew/bin/claude"),
+      proc(1801, 1800, 56, "npm exec momentic mcp"),
+      proc(1802, 1800, 30, "/bin/zsh"),
+    ];
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(true);
+    probe.stop();
+  });
+
   it("does not let a same-second replacement adopt its predecessor's boundary", async () => {
     // One-second resolution means a provider born in the same second as the
     // previous boundary cannot prove the boundary came after it started. Fail

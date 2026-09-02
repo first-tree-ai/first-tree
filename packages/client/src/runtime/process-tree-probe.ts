@@ -88,8 +88,8 @@ export function parseProcessRows(output: string): ProcessRow[] {
  * and a child too close to call reads as infrastructure — silence rather than
  * a false claim, the same bias as everywhere else in this signal.
  */
-function earliestStartMs(row: ProcessRow, nowMs: number): number {
-  return nowMs - (row.elapsedSec + 1) * 1_000;
+function earliestStartMs(row: ProcessRow, sampledAtLowerBoundMs: number): number {
+  return sampledAtLowerBoundMs - (row.elapsedSec + 1) * 1_000;
 }
 
 /**
@@ -97,8 +97,8 @@ function earliestStartMs(row: ProcessRow, nowMs: number): number {
  * Pairs with {@link earliestStartMs}: each comparison picks whichever end of
  * the one-second uncertainty makes the claim harder to prove.
  */
-function latestStartMs(row: ProcessRow, nowMs: number): number {
-  return nowMs - row.elapsedSec * 1_000;
+function latestStartMs(row: ProcessRow, sampledAtUpperBoundMs: number): number {
+  return sampledAtUpperBoundMs - row.elapsedSec * 1_000;
 }
 
 /** Build a parent-pid -> child-pids adjacency index. */
@@ -151,11 +151,11 @@ export function hasChildStartedAfter(
   childrenByParent: ReadonlyMap<number, number[]>,
   rowsByPid: ReadonlyMap<number, ProcessRow>,
   boundaryMs: number,
-  nowMs: number,
+  sampledAtLowerBoundMs: number,
 ): boolean {
   return (childrenByParent.get(pid) ?? []).some((childPid) => {
     const row = rowsByPid.get(childPid);
-    return row !== undefined && earliestStartMs(row, nowMs) > boundaryMs;
+    return row !== undefined && earliestStartMs(row, sampledAtLowerBoundMs) > boundaryMs;
   });
 }
 
@@ -288,13 +288,21 @@ export class PsSubprocessProbe implements SubprocessProbe {
 
   private async doRefresh(): Promise<void> {
     try {
-      const now = Date.now();
+      // `ps` samples somewhere inside [scanStartMs, scanEndMs], and the command
+      // can take a while. Each bound below is derived from whichever end of
+      // that window makes its claim harder to prove; collapsing them into one
+      // `Date.now()` taken before the await silently shifts both start bounds
+      // backwards by however long the command took.
+      const scanStartMs = Date.now();
       const rows = parseProcessRows(await this.runProcessSnapshot());
+      const scanEndMs = Date.now();
       const childrenByParent = buildChildrenIndex(rows);
       const rowsByPid = new Map(rows.map((row) => [row.pid, row]));
       const next = new Set<string>();
       const nextSessionSpawned = new Set<string>();
       const chatsWithLiveProvider = new Set<string>();
+      /** Pending boundaries a provider rejected as older than itself. */
+      const supersededPendingChats = new Set<string>();
       const providerPids = findProviderPids(rows, this.daemonPid);
       for (const providerPid of providerPids) {
         // The chat is resolved every scan now, not only when a descendant
@@ -305,23 +313,30 @@ export class PsSubprocessProbe implements SubprocessProbe {
         let boundaryMs = this.boundaryMsByProviderPid.get(providerPid);
         if (boundaryMs === undefined && chatId && providerRow) {
           const chatBoundary = this.pendingTurnBoundaryMsByChat.get(chatId);
-          // Adopt only a boundary that is DEFINITELY at or after this provider
-          // started — the latest instant its age allows. Comparing against the
-          // earliest instead would let a replacement born in the same second
-          // adopt its predecessor's boundary, and then read its own startup MCP
-          // child as work. A replacement that cannot prove it waits for its own
-          // turn instead.
-          if (chatBoundary !== undefined && chatBoundary >= latestStartMs(providerRow, now)) {
+          // Adopt only a boundary DEFINITELY at or after this provider started:
+          // the latest instant its age allows, measured from the latest instant
+          // `ps` could have sampled. Comparing against the earliest instead
+          // would let a replacement born in the same second adopt its
+          // predecessor's boundary and then read its own startup MCP child as
+          // work.
+          if (chatBoundary !== undefined && chatBoundary >= latestStartMs(providerRow, scanEndMs)) {
             boundaryMs = chatBoundary;
             this.boundaryMsByProviderPid.set(providerPid, chatBoundary);
             this.pendingTurnBoundaryMsByChat.delete(chatId);
+          } else if (chatBoundary !== undefined) {
+            // It predates this provider, so it can never become its boundary.
+            // Dropping it is what lets this provider's OWN next turn be
+            // recorded — holding it would make one stale timestamp swallow
+            // every later turn and hide this provider's work for good.
+            supersededPendingChats.add(chatId);
           }
         }
         const live = hasDescendant(providerPid, childrenByParent);
         // No boundary yet — this provider has not reached a turn since it
         // appeared, so nothing under it is known to be work.
         const sessionSpawned =
-          boundaryMs !== undefined && hasChildStartedAfter(providerPid, childrenByParent, rowsByPid, boundaryMs, now);
+          boundaryMs !== undefined &&
+          hasChildStartedAfter(providerPid, childrenByParent, rowsByPid, boundaryMs, scanStartMs);
         if (!chatId) continue;
         chatsWithLiveProvider.add(chatId);
         if (live) next.add(chatId);
@@ -329,6 +344,9 @@ export class PsSubprocessProbe implements SubprocessProbe {
       }
       // Drop baselines for providers that are gone, so a recycled pid cannot
       // inherit a previous provider's session infrastructure.
+      for (const chatId of supersededPendingChats) {
+        if (!nextSessionSpawned.has(chatId)) this.pendingTurnBoundaryMsByChat.delete(chatId);
+      }
       const alive = new Set(providerPids);
       for (const pid of this.boundaryMsByProviderPid.keys()) {
         if (!alive.has(pid)) this.boundaryMsByProviderPid.delete(pid);
