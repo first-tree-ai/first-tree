@@ -181,6 +181,39 @@ describe("CLI command branch sweeper", () => {
     expect(outputMocks.fail).toHaveBeenCalledWith("FETCH_ERROR", "Failed to fetch /me: HTTP 503", 1);
   });
 
+  it("hides release-gated providers from agent create selection", async () => {
+    const { registerAgentCommands } = await import("../commands/agent/index.js");
+
+    const program = new Command();
+    program.configureOutput({ writeOut: () => undefined, writeErr: () => undefined });
+    registerAgentCommands(program);
+    const agentCommand = program.commands.find((command) => command.name() === "agent");
+    const createCommand = agentCommand?.commands.find((command) => command.name() === "create");
+    const help = createCommand?.helpInformation() ?? "";
+    expect(help).toContain("codex");
+    expect(help).not.toContain("antigravity");
+
+    await expect(
+      runWith(registerAgentCommands, [
+        "agent",
+        "create",
+        "agent-gated",
+        "--type",
+        "agent",
+        "--client-id",
+        "client-a",
+        "--runtime",
+        "antigravity",
+      ]),
+    ).rejects.toMatchObject({ code: "CREATE_ERROR" });
+    expect(outputMocks.fail).toHaveBeenCalledWith(
+      "INVALID_RUNTIME",
+      expect.stringContaining('Runtime "antigravity" is not selectable'),
+      1,
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("exercises chat create optional payload and validation branches", async () => {
     const { registerChatCommands } = await import("../commands/chat/index.js");
     const sdk = makeSdk();

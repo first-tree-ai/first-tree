@@ -892,6 +892,43 @@ describe("agent runtime switch service preconditions", () => {
     });
   });
 
+  it.each([
+    ["absent", undefined],
+    ["empty", { capabilities: {} }],
+  ] as const)("rejects Antigravity switch with %s capability metadata", async (_shape, metadata) => {
+    const app = getApp();
+    const { ctx, agent } = await createSwitchFixture(app);
+    const targetClientId = `cli-gated-${crypto.randomUUID().slice(0, 8)}`;
+    await app.db.insert(clients).values({
+      id: targetClientId,
+      userId: ctx.userId,
+      organizationId: ctx.organizationId,
+      status: "connected",
+      sdkVersion: "0.5.12",
+      metadata,
+    });
+
+    await expect(
+      switchAgentRuntime(
+        app.db,
+        agent.uuid,
+        { clientId: targetClientId, runtimeProvider: "antigravity" },
+        { userId: ctx.userId, memberId: ctx.memberId },
+      ),
+    ).rejects.toThrow(/disabled for new selection/);
+
+    const [row] = await app.db
+      .select({ clientId: agents.clientId, metadata: agents.metadata, runtimeProvider: agents.runtimeProvider })
+      .from(agents)
+      .where(eq(agents.uuid, agent.uuid))
+      .limit(1);
+    expect(row).toMatchObject({
+      clientId: ctx.clientId,
+      metadata: {},
+      runtimeProvider: "claude-code",
+    });
+  });
+
   it("rejects recovery when state is missing, malformed, or the agent is gone", async () => {
     const app = getApp();
     const { agent } = await createSwitchFixture(app);

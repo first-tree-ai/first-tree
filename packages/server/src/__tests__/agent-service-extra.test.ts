@@ -1,4 +1,4 @@
-import { AGENT_STATUSES } from "@first-tree/shared";
+import { AGENT_STATUSES, type RuntimeProvider } from "@first-tree/shared";
 import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { agents } from "../db/schema/agents.js";
@@ -144,6 +144,51 @@ describe("agent service extra coverage", () => {
         managerId: "member-missing",
       }),
     ).rejects.toThrow(/Manager "member-missing" not found/);
+  });
+
+  it("rejects disabled new-selection providers regardless of capability reports", async () => {
+    const app = getApp();
+    const admin = await createAdminContext(app, {
+      username: `agent-gate-${crypto.randomUUID().slice(0, 8)}`,
+    });
+    const [adminClient] = await app.db
+      .select({ metadata: clients.metadata })
+      .from(clients)
+      .where(eq(clients.id, admin.clientId))
+      .limit(1);
+    expect(adminClient?.metadata).toBeNull();
+
+    const absentCapabilityInput = {
+      name: `gate-absent-${crypto.randomUUID().slice(0, 6)}`,
+      type: "agent" as const,
+      managerId: admin.memberId,
+      clientId: admin.clientId,
+      runtimeProvider: "antigravity" as RuntimeProvider,
+    } as unknown as Parameters<typeof createAgent>[1];
+    await expect(createAgent(app.db, absentCapabilityInput)).rejects.toThrow(/disabled for new selection/);
+    await expect(
+      createAgent(
+        app.db,
+        { ...absentCapabilityInput, name: `gate-force-${crypto.randomUUID().slice(0, 6)}` },
+        { force: true },
+      ),
+    ).rejects.toThrow(/disabled for new selection/);
+
+    const emptyCapabilityClientId = `cli-empty-${crypto.randomUUID().slice(0, 8)}`;
+    await app.db.insert(clients).values({
+      id: emptyCapabilityClientId,
+      userId: admin.userId,
+      organizationId: admin.organizationId,
+      status: "connected",
+      metadata: { capabilities: {} },
+    });
+    await expect(
+      createAgent(app.db, {
+        ...absentCapabilityInput,
+        name: `gate-empty-${crypto.randomUUID().slice(0, 6)}`,
+        clientId: emptyCapabilityClientId,
+      }),
+    ).rejects.toThrow(/disabled for new selection/);
   });
 
   it("validates reserved names, explicit manager/org pairs, and direct capability checks", async () => {

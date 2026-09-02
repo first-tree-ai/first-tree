@@ -4,6 +4,7 @@ import {
   type AgentRuntimeConfigPayload,
   agentRuntimeConfigPayloadSchema,
   defaultRuntimeConfigPayload,
+  isRuntimeProviderEnabled,
   MIN_RUNTIME_SWITCH_CLIENT_VERSION,
   type RuntimeProvider,
   supportsRuntimeSwitchClientVersion,
@@ -262,6 +263,15 @@ export async function switchAgentRuntime(
     throw new ClientRetiredError(`Client "${input.clientId}" has been retired`);
   }
   assertRuntimeSwitchClientVersion(targetClient.sdkVersion);
+
+  // Reject rollout-gated targets before consulting capability data. An
+  // already-bound disabled provider can keep running, but switch is new
+  // selection and cannot bypass the release gate.
+  if (!isRuntimeProviderEnabled(input.runtimeProvider)) {
+    throw new BadRequestError(
+      `Runtime provider "${input.runtimeProvider}" is disabled for new selection until release acceptance.`,
+    );
+  }
   await ensureClientSupportsRuntimeProvider(db, targetClient.id, input.runtimeProvider);
 
   const claim: RuntimeSwitchClaim = {

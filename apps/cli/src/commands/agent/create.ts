@@ -1,3 +1,4 @@
+import { asRuntimeProvider, isRuntimeProviderEnabled, RUNTIME_PROVIDER_IDS } from "@first-tree/shared";
 import type { Command } from "commander";
 import { fail } from "../../cli/output.js";
 import { ensureFreshAccessToken, resolveServerUrl, saveAgentConfig } from "../../core/bootstrap.js";
@@ -6,6 +7,8 @@ import { cliFetch } from "../../core/cli-fetch.js";
 import { print } from "../../core/output.js";
 
 export function registerAgentCreateCommand(agent: Command): void {
+  const selectableRuntimes = RUNTIME_PROVIDER_IDS.filter(isRuntimeProviderEnabled);
+  const runtimeChoices = selectableRuntimes.join(", ");
   agent
     .command("create <name>")
     .description("Create an agent in First Tree and bind it locally")
@@ -14,11 +17,7 @@ export function registerAgentCreateCommand(agent: Command): void {
       "--client-id <id>",
       `Client (machine) that will run this agent — must be owned by you. Run \`${channelConfig.binName} login <code>\` on that machine first.`,
     )
-    .option(
-      "--runtime <runtime>",
-      "Runtime handler — one of: claude-code, claude-code-tui, codex, cursor, grok, antigravity, kimi-code, opencode, pi (default: claude-code)",
-      "claude-code",
-    )
+    .option("--runtime <runtime>", `Runtime handler — one of: ${runtimeChoices} (default: claude-code)`, "claude-code")
     .option("--display-name <name>", "Display name")
     .option("--org <id>", "Target organization id (required when you belong to multiple orgs)")
     .option("--server <url>", "First Tree server URL")
@@ -37,6 +36,15 @@ export function registerAgentCreateCommand(agent: Command): void {
         try {
           const serverUrl = resolveServerUrl(options.server);
           const adminToken = await ensureFreshAccessToken();
+          const runtimeProvider = asRuntimeProvider(options.runtime);
+          if (!runtimeProvider || !isRuntimeProviderEnabled(runtimeProvider)) {
+            fail(
+              "INVALID_RUNTIME",
+              `Runtime "${options.runtime}" is not selectable. Choose one of: ${runtimeChoices}`,
+              1,
+            );
+            return;
+          }
           const headers = {
             Authorization: `Bearer ${adminToken}`,
             "Content-Type": "application/json",
@@ -73,7 +81,7 @@ export function registerAgentCreateCommand(agent: Command): void {
             name,
             type: options.type,
             clientId: options.clientId,
-            runtimeProvider: options.runtime,
+            runtimeProvider,
           };
           if (options.displayName) createBody.displayName = options.displayName;
 
@@ -90,7 +98,7 @@ export function registerAgentCreateCommand(agent: Command): void {
           const created = (await createRes.json()) as { uuid: string; name: string | null };
           print.line(`  ✓ Agent created: ${created.name ?? created.uuid}\n`);
 
-          const agentDir = saveAgentConfig(name, created.uuid, options.runtime);
+          const agentDir = saveAgentConfig(name, created.uuid, runtimeProvider);
           print.line(`  ✓ Config saved: ${agentDir}/agent.yaml\n`);
           print.line("  ✓ Agent ready — start the daemon on that machine to bind\n");
         } catch (error) {
