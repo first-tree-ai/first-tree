@@ -180,7 +180,17 @@ export class PsSubprocessProbe implements SubprocessProbe {
    * still growing. Keyed by pid, so a restarted provider re-baselines for free
    * and a dead one is pruned on the next scan.
    */
-  private readonly baselineChildrenByProvider = new Map<number, { pids: Set<number>; sealed: boolean }>();
+  private readonly baselineChildrenByProvider = new Map<
+    number,
+    {
+      pids: Set<number>;
+      sealed: boolean;
+      /** This pid was observed growing before any turn asked to seal it. */
+      grownBeforeSealRequest: boolean;
+      /** The one grace scan given to a pid first seen after the seal request. */
+      graceScanUsed: boolean;
+    }
+  >();
   /** Chats whose first turn has begun; their provider's baseline is closed. */
   private readonly sealedChats = new Set<string>();
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -247,12 +257,37 @@ export class PsSubprocessProbe implements SubprocessProbe {
         const children = childrenByParent.get(providerPid) ?? [];
         let baseline = this.baselineChildrenByProvider.get(providerPid);
         if (!baseline) {
-          baseline = { pids: new Set(children), sealed: false };
+          baseline = { pids: new Set(), sealed: false, grownBeforeSealRequest: false, graceScanUsed: false };
           this.baselineChildrenByProvider.set(providerPid, baseline);
         }
+        const grow = (): void => {
+          for (const child of children) baseline.pids.add(child);
+        };
         if (!baseline.sealed) {
-          if (chatId && this.sealedChats.has(chatId)) baseline.sealed = true;
-          else for (const child of children) baseline.pids.add(child);
+          if (!(chatId && this.sealedChats.has(chatId))) {
+            // Startup: no turn has asked to close this chat's baseline yet.
+            grow();
+            baseline.grownBeforeSealRequest = true;
+          } else if (baseline.grownBeforeSealRequest) {
+            // The startup window was observed before the turn, so everything
+            // infrastructure could be is already in. Closing WITHOUT growing is
+            // what keeps a task this turn just launched outside the baseline.
+            baseline.sealed = true;
+          } else if (!baseline.graceScanUsed) {
+            // This provider was first seen only after the seal request — a
+            // restarted provider, or a first turn that began before any scan.
+            // It has had no startup window at all, and sealing an empty
+            // baseline is what makes a permanent MCP child look like work. Give
+            // it one full interval to show its infrastructure.
+            baseline.graceScanUsed = true;
+            grow();
+          } else {
+            // End of that interval: absorb whatever appeared during it, then
+            // close. Work started inside the grace window is absorbed too —
+            // silence, which is the error direction this whole signal prefers.
+            grow();
+            baseline.sealed = true;
+          }
         }
         const live = hasDescendant(providerPid, childrenByParent);
         const sessionSpawned = baseline.sealed && hasNonBaselineChild(providerPid, childrenByParent, baseline.pids);

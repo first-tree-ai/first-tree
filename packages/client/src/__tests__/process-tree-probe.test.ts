@@ -245,6 +245,65 @@ describe("PsSubprocessProbe", () => {
     probe.stop();
   });
 
+  it("gives a provider first seen after the seal request its own startup window", async () => {
+    // The first turn can begin before any scan has seen the provider. Sealing
+    // on that first sighting stores whatever exists at that instant — possibly
+    // nothing — and the MCP child arriving a tick later then reads as work for
+    // the provider's whole life.
+    const chatId = "chat-turn-before-scan";
+    let rows = [`900  ${daemonPid} /opt/homebrew/bin/claude`];
+    const probe = new PsSubprocessProbe({
+      log: silentLogger(),
+      daemonPid,
+      intervalMs: 1_000_000,
+      runProcessSnapshot: async () => rows.join("\n"),
+      runEnvForPid: async () => `FIRST_TREE_CHAT_ID=${chatId} /bin/claude`,
+    });
+
+    probe.sealBaseline(chatId); // the turn starts first
+    await probe.refresh(); // …and only now is the provider seen at all
+    rows = [`900  ${daemonPid} /opt/homebrew/bin/claude`, "901  900 npm exec momentic mcp"];
+    await probe.refresh(); // its MCP server appears during the grace interval
+    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(false);
+
+    // The window is one interval, not forever: work after it still reports.
+    rows = [...rows, "902  900 /bin/zsh"];
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(true);
+    probe.stop();
+  });
+
+  it("gives a seamless replacement provider its own startup window", async () => {
+    // The chat stays sealed across a provider restart (it never loses a live
+    // provider), so a replacement pid would otherwise be created and sealed in
+    // the same scan — an empty baseline, and its startup MCP child outside it.
+    const chatId = "chat-seamless-replace";
+    let rows = [`1000 ${daemonPid} /opt/homebrew/bin/claude`, "1001 1000 npm exec momentic mcp"];
+    const probe = new PsSubprocessProbe({
+      log: silentLogger(),
+      daemonPid,
+      intervalMs: 1_000_000,
+      runProcessSnapshot: async () => rows.join("\n"),
+      runEnvForPid: async () => `FIRST_TREE_CHAT_ID=${chatId} /bin/claude`,
+    });
+    await probe.refresh();
+    probe.sealBaseline(chatId);
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(false);
+
+    // The provider is replaced between scans, seen before its MCP child.
+    rows = [`1100 ${daemonPid} /opt/homebrew/bin/claude`];
+    await probe.refresh();
+    rows = [`1100 ${daemonPid} /opt/homebrew/bin/claude`, "1101 1100 npm exec momentic mcp"];
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(false);
+
+    rows = [...rows, "1102 1100 /bin/zsh"];
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(true);
+    probe.stop();
+  });
+
   it("falls back to no-live-work when the process scan fails", async () => {
     const probe = new PsSubprocessProbe({
       log: silentLogger(),

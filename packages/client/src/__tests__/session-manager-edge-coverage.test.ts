@@ -7794,6 +7794,74 @@ describe("SessionRuntime edge coverage", () => {
     await sm.shutdown();
   });
 
+  it("seals through a real turn and then reports a watcher that turn launched", async () => {
+    // The positive direction, end to end, with nothing about the answer stubbed:
+    // a real PsSubprocessProbe fed a real process tree, a real SessionRuntime,
+    // and the seal reached ONLY through a turn — never by calling
+    // `sealBaseline` directly. Every other runtime-level test here is either a
+    // negative (a dead feature also emits no frame) or hands the runtime a
+    // stubbed `hasSessionSpawnedSubprocess`, so replacing the one-line seal
+    // wiring with a no-op leaves them all green while the qualifier can never
+    // appear on any host.
+    const chatId = "chat-seal-wiring";
+    const withMcp = ["4242 1 node", "7000 4242 /opt/homebrew/bin/claude", "7001 7000 npm exec momentic mcp"];
+    let rows = [...withMcp];
+    const probe = new PsSubprocessProbe({
+      log: silentLogger(),
+      daemonPid: 4242,
+      intervalMs: 1_000_000,
+      runProcessSnapshot: async () => rows.join("\n"),
+      runEnvForPid: async () => `FIRST_TREE_CHAT_ID=${chatId} /opt/homebrew/bin/claude`,
+    });
+    await probe.refresh(); // startup scan: the MCP child becomes the baseline
+
+    const frames: Array<{ chatId: string; report: { runtimeState: string; backgroundWork: boolean } }> = [];
+    let capturedCtx: SessionContext | undefined;
+    let capturedMessage: SessionMessage | undefined;
+    const sm = makeRuntime({
+      subprocessProbe: probe,
+      onSessionRuntimeChange: (id, report) => frames.push({ chatId: id, report }),
+      handlers: [
+        handler({
+          start: vi.fn(async (msg: SessionMessage, ctx: SessionContext) => {
+            capturedCtx = ctx;
+            capturedMessage = msg;
+            return { sessionId: "session-seal", route: { kind: "owned" as const, mode: "queued" as const } };
+          }) as unknown as AgentHandler["start"],
+        }),
+      ],
+    });
+    const i = internals(sm);
+
+    await sm.dispatch(mockEntry({ id: 1, chatId }));
+    if (!capturedCtx || !capturedMessage) throw new Error("expected captured session context");
+
+    // A turn runs. This event is the only thing that seals the baseline.
+    capturedCtx.emitEvent({
+      kind: "tool_call",
+      payload: { toolUseId: "t1", name: "Bash", args: null, status: "ok" },
+    });
+    // …and it launches a watcher that outlives it.
+    rows = [...withMcp, "7002 7000 /bin/zsh", "7003 7002 sleep"];
+    await capturedCtx.finishTurn(capturedMessage, { status: "success", terminal: true });
+    capturedCtx.emitEvent({ kind: "turn_end", payload: { status: "success" } });
+
+    await probe.refresh();
+    frames.length = 0;
+    i.projection.reaffirmRuntimeStates();
+    expect(frames).toContainEqual({ chatId, report: { runtimeState: "idle", backgroundWork: true } });
+
+    // The watcher exits; the permanent MCP child must not keep the claim alive.
+    rows = [...withMcp];
+    await probe.refresh();
+    frames.length = 0;
+    i.projection.reaffirmRuntimeStates();
+    expect(frames).toContainEqual({ chatId, report: { runtimeState: "idle", backgroundWork: false } });
+
+    probe.stop();
+    await sm.shutdown();
+  });
+
   it("never asserts background work for a session whose only child is its MCP server", async () => {
     // End to end against the REAL probe rather than a stubbed boolean: this is
     // the shape that would have shipped the qualifier onto every idle chat of
