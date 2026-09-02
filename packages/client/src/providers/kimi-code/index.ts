@@ -1,6 +1,9 @@
 import { statSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import {
+  type ApprovalHandler,
+  type ApprovalRequest,
+  type ApprovalResponse,
   type CreateSessionOptions,
   createKimiHarness,
   type Event as KimiEvent,
@@ -243,6 +246,23 @@ function additionalDirectories(workspaceCwd: string, contextTreePath: string | n
     return [];
   }
 }
+
+/**
+ * Hosted sessions have no interactive approval surface, so no human can
+ * answer an approval prompt. The SDK's ExitPlanMode review policy escalates
+ * plan exits to an approval request in every permission mode except "auto" —
+ * including "yolo" — and the headless RPC bridge cancels any request that has
+ * no registered handler. Without this handler a session that enters plan mode
+ * deadlocks: every ExitPlanMode is auto-dismissed and plan mode keeps denying
+ * all writes. Approve plan exits to restore the intended yolo posture; cancel
+ * every other request, matching the previous handler-less behavior.
+ */
+const hostedSessionApprovalHandler: ApprovalHandler = (request: ApprovalRequest): ApprovalResponse => {
+  if (request.toolName === "ExitPlanMode" || request.display?.kind === "plan_review") {
+    return { decision: "approved" };
+  }
+  return { decision: "cancelled", feedback: "No interactive approval surface in hosted sessions." };
+};
 
 /** Kimi Code handler backed by the direct Botiverse/Moonshot Node SDK. */
 export const createKimiCodeHandler: HandlerFactory = (config) => {
@@ -985,6 +1005,7 @@ export const createKimiCodeHandler: HandlerFactory = (config) => {
           },
         });
         session = await activeHarness.createSession(options);
+        session.setApprovalHandler(hostedSessionApprovalHandler);
         sessionId = session.id;
         sessionActive = true;
         initialTurnPreparing = true;
@@ -1029,6 +1050,7 @@ export const createKimiCodeHandler: HandlerFactory = (config) => {
         });
         session = await activeHarness.resumeSession(input);
         sessionId = session.id;
+        session.setApprovalHandler(hostedSessionApprovalHandler);
         await session.setPermission("yolo");
         if (prepared.payload.model) await session.setModel(prepared.payload.model);
         sessionActive = true;
