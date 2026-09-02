@@ -611,6 +611,7 @@ export class SessionRuntime {
         onRuntimeStateChange: () => this.config.onRuntimeStateChange,
         hasProcessingOwnedWork: (chatId) => this.inboxDelivery.hasProcessingOwnedWork(chatId),
         hasReportableBackgroundWork: (chatId) => this.slotScheduler.hasReportableBackgroundWork(chatId),
+        onProviderTurnStarted: (chatId) => this.config.subprocessProbe?.sealBaseline(chatId),
         drainPendingOnIdle: () => {
           this.slotScheduler.drainPendingQueue();
         },

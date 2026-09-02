@@ -62,6 +62,12 @@ export type SessionProjectionAuthorityDeps = {
    * owns both the probe and the cap).
    */
   hasReportableBackgroundWork: (chatId: string) => boolean;
+  /**
+   * A turn opened for this chat. The subprocess probe uses it to close the
+   * provider's startup-infrastructure baseline: whatever is running when the
+   * first turn begins is infrastructure, and anything later is work.
+   */
+  onProviderTurnStarted: (chatId: string) => void;
   onRuntimeStateChange: () => ((state: RuntimeState) => void) | undefined;
   /** Inbox processing ownership still lives on InboxDeliveryCoordinator. */
   hasProcessingOwnedWork: (chatId: string) => boolean;
@@ -396,6 +402,7 @@ export class SessionProjectionAuthority<
    * chat surface.
    */
   noteProviderTurnStart(chatId: string): void {
+    this.deps.onProviderTurnStarted(chatId);
     if (this.providerTurnInFlight.has(chatId)) return;
     this.providerTurnInFlight.add(chatId);
     this.projectSessionRuntime(chatId);

@@ -7740,6 +7740,7 @@ describe("SessionRuntime edge coverage", () => {
     const subprocessProbe: SubprocessProbe = {
       hasLiveSubprocess: vi.fn(() => true),
       hasSessionSpawnedSubprocess: vi.fn((chatId: string) => chatId === "chat-parked"),
+      sealBaseline: vi.fn(),
       stop: vi.fn(),
     };
     const sm = makeRuntime({ subprocessProbe, onSessionRuntimeChange });
@@ -7769,6 +7770,7 @@ describe("SessionRuntime edge coverage", () => {
     const subprocessProbe: SubprocessProbe = {
       hasLiveSubprocess: vi.fn(() => true),
       hasSessionSpawnedSubprocess: vi.fn(() => true),
+      sealBaseline: vi.fn(),
       stop: vi.fn(),
     };
     const sm = makeRuntime({ subprocessProbe, onSessionRuntimeChange });
@@ -7833,6 +7835,7 @@ describe("SessionRuntime edge coverage", () => {
     const subprocessProbe: SubprocessProbe = {
       hasLiveSubprocess: vi.fn(() => true),
       hasSessionSpawnedSubprocess: vi.fn(() => true),
+      sealBaseline: vi.fn(),
       stop: vi.fn(),
     };
     const sm = makeRuntime({ subprocessProbe, onSessionRuntimeChange });
@@ -7856,6 +7859,7 @@ describe("SessionRuntime edge coverage", () => {
     const subprocessProbe: SubprocessProbe = {
       hasLiveSubprocess: vi.fn((chatId: string) => chatId === "chat-live-subprocess"),
       hasSessionSpawnedSubprocess: vi.fn(() => false),
+      sealBaseline: vi.fn(),
       stop: vi.fn(),
     };
     const sm = makeRuntime({ maxSessions: 1, subprocessProbe });

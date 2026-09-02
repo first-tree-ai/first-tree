@@ -36,6 +36,20 @@ export interface SubprocessProbe {
    * idle chat on the host.
    */
   hasSessionSpawnedSubprocess(chatId: string): boolean;
+  /**
+   * A turn has begun for `chatId`, so whatever the provider is running now is
+   * its startup infrastructure and nothing more. Until this is called, the
+   * probe keeps absorbing newly observed children into that provider's
+   * baseline; after it, new children are session-spawned work.
+   *
+   * The seal needs a lifecycle point rather than a scan count: the poll starts
+   * before any provider exists, so a scan can catch a `claude` process in the
+   * window before its stdio MCP server appears. Freezing on first sight would
+   * baseline nothing, and the MCP child arriving one scan later would read as
+   * background work for the rest of that provider's life — the exact false
+   * claim the baseline exists to prevent.
+   */
+  sealBaseline(chatId: string): void;
   /** Stop the background refresh loop (called on SessionRuntime shutdown). */
   stop(): void;
 }
@@ -88,19 +102,20 @@ export function hasDescendant(pid: number, childrenByParent: ReadonlyMap<number,
 }
 
 /**
- * True if `pid` has a direct child outside `baseline` — the children it had
- * when this provider process was first observed.
+ * True if `pid` has a direct child outside `baseline` — the children this
+ * provider was running before its first turn.
  *
  * The baseline is what a provider starts a session with and keeps: stdio MCP
  * servers, most visibly. Work the session itself launches appears as a pid the
  * baseline has never seen, which is exactly the distinction the plain
  * descendant check cannot draw.
  *
- * Both error directions are deliberate. A provider first observed mid-turn
- * baselines that turn's children and under-reports until they exit — silence
- * rather than a false claim. An MCP server that crashes and respawns takes a
- * new pid and over-reports for the rest of that provider process; that is a
- * rare, self-limiting case, unlike the permanent misreading it replaces.
+ * Both error directions are deliberate. A provider whose baseline seals mid-turn
+ * absorbs that turn's children and under-reports until they exit — silence
+ * rather than a false claim. An MCP server that crashes and respawns after the
+ * seal takes a new pid and over-reports for the rest of that provider process;
+ * that is a rare, self-limiting case, unlike the permanent misreading it
+ * replaces.
  */
 export function hasNonBaselineChild(
   pid: number,
@@ -161,11 +176,13 @@ export class PsSubprocessProbe implements SubprocessProbe {
   private chatIdsWithLiveWork = new Set<string>();
   private chatIdsWithSessionSpawnedWork = new Set<string>();
   /**
-   * Direct children each provider pid had when first observed. Keyed by pid,
-   * so a restarted provider re-baselines for free and a dead one is pruned on
-   * the next scan.
+   * Per provider pid: the infrastructure children, and whether that set is
+   * still growing. Keyed by pid, so a restarted provider re-baselines for free
+   * and a dead one is pruned on the next scan.
    */
-  private readonly baselineChildrenByProvider = new Map<number, Set<number>>();
+  private readonly baselineChildrenByProvider = new Map<number, { pids: Set<number>; sealed: boolean }>();
+  /** Chats whose first turn has begun; their provider's baseline is closed. */
+  private readonly sealedChats = new Set<string>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private inflight: Promise<void> | null = null;
   private readonly daemonPid: number;
@@ -188,6 +205,10 @@ export class PsSubprocessProbe implements SubprocessProbe {
 
   hasSessionSpawnedSubprocess(chatId: string): boolean {
     return this.chatIdsWithSessionSpawnedWork.has(chatId);
+  }
+
+  sealBaseline(chatId: string): void {
+    this.sealedChats.add(chatId);
   }
 
   stop(): void {
@@ -216,18 +237,27 @@ export class PsSubprocessProbe implements SubprocessProbe {
       const childrenByParent = buildChildrenIndex(rows);
       const next = new Set<string>();
       const nextSessionSpawned = new Set<string>();
+      const chatsWithLiveProvider = new Set<string>();
       const providerPids = findProviderPids(rows, this.daemonPid);
       for (const providerPid of providerPids) {
+        // The chat is resolved every scan now, not only when a descendant
+        // exists: baseline growth has to happen during provider startup, which
+        // is exactly the window where there may be no children yet.
+        const chatId = extractChatId(await this.runEnvForPid(providerPid));
+        const children = childrenByParent.get(providerPid) ?? [];
         let baseline = this.baselineChildrenByProvider.get(providerPid);
         if (!baseline) {
-          baseline = new Set(childrenByParent.get(providerPid) ?? []);
+          baseline = { pids: new Set(children), sealed: false };
           this.baselineChildrenByProvider.set(providerPid, baseline);
         }
+        if (!baseline.sealed) {
+          if (chatId && this.sealedChats.has(chatId)) baseline.sealed = true;
+          else for (const child of children) baseline.pids.add(child);
+        }
         const live = hasDescendant(providerPid, childrenByParent);
-        const sessionSpawned = hasNonBaselineChild(providerPid, childrenByParent, baseline);
-        if (!live && !sessionSpawned) continue;
-        const chatId = extractChatId(await this.runEnvForPid(providerPid));
+        const sessionSpawned = baseline.sealed && hasNonBaselineChild(providerPid, childrenByParent, baseline.pids);
         if (!chatId) continue;
+        chatsWithLiveProvider.add(chatId);
         if (live) next.add(chatId);
         if (sessionSpawned) nextSessionSpawned.add(chatId);
       }
@@ -236,6 +266,11 @@ export class PsSubprocessProbe implements SubprocessProbe {
       const alive = new Set(providerPids);
       for (const pid of this.baselineChildrenByProvider.keys()) {
         if (!alive.has(pid)) this.baselineChildrenByProvider.delete(pid);
+      }
+      // A chat with no live provider has no baseline to keep closed; the next
+      // provider for it starts its own startup window.
+      for (const chatId of this.sealedChats) {
+        if (!chatsWithLiveProvider.has(chatId)) this.sealedChats.delete(chatId);
       }
       this.chatIdsWithLiveWork = next;
       this.chatIdsWithSessionSpawnedWork = nextSessionSpawned;

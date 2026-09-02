@@ -120,6 +120,7 @@ describe("PsSubprocessProbe", () => {
     expect(probe.hasSessionSpawnedSubprocess("chat-mcp")).toBe(false);
 
     // A turn launches a background watcher: a child the baseline never saw.
+    probe.sealBaseline("chat-mcp");
     rows = [...mcpOnly, "302  300 /bin/zsh", "303  302 sleep"];
     await probe.refresh();
     expect(probe.hasSessionSpawnedSubprocess("chat-mcp")).toBe(true);
@@ -128,6 +129,95 @@ describe("PsSubprocessProbe", () => {
     rows = [...mcpOnly];
     await probe.refresh();
     expect(probe.hasSessionSpawnedSubprocess("chat-mcp")).toBe(false);
+    probe.stop();
+  });
+
+  it("absorbs a startup MCP child that appears after the provider is first seen", async () => {
+    // The poll starts before any provider exists, so a scan can catch the
+    // `claude` process in the gap before its stdio MCP server spawns. Freezing
+    // the baseline on first sight would store nothing, and the MCP child
+    // arriving one scan later would read as background work for the rest of
+    // that provider's life — the very claim the baseline exists to prevent.
+    const chatId = "chat-startup-race";
+    let rows = [`600  ${daemonPid} /opt/homebrew/bin/claude`];
+    const probe = new PsSubprocessProbe({
+      log: silentLogger(),
+      daemonPid,
+      intervalMs: 1_000_000,
+      runProcessSnapshot: async () => rows.join("\n"),
+      runEnvForPid: async () => `FIRST_TREE_CHAT_ID=${chatId} /bin/claude`,
+    });
+
+    // Scan 1: provider only, still starting up.
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(false);
+
+    // Scan 2: the permanent MCP child has arrived, still before any turn.
+    rows = [`600  ${daemonPid} /opt/homebrew/bin/claude`, "601  600 npm exec momentic mcp"];
+    await probe.refresh();
+    expect(probe.hasLiveSubprocess(chatId)).toBe(true);
+    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(false);
+
+    // The first turn closes the baseline: everything alive now is infrastructure.
+    probe.sealBaseline(chatId);
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(false);
+
+    // A task the turn launches is outside it.
+    rows = [`600  ${daemonPid} /opt/homebrew/bin/claude`, "601  600 npm exec momentic mcp", "602  600 /bin/zsh"];
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(true);
+    probe.stop();
+  });
+
+  it("keeps reporting a background task that survives into a later turn", async () => {
+    // The baseline seals ONCE, at the first turn. Re-taking it at every turn
+    // start would absorb a task that outlived the previous turn and silence it
+    // — which is the exact case this feature exists to report.
+    const chatId = "chat-survives";
+    let rows = [`700  ${daemonPid} /opt/homebrew/bin/claude`, "701  700 npm exec momentic mcp"];
+    const probe = new PsSubprocessProbe({
+      log: silentLogger(),
+      daemonPid,
+      intervalMs: 1_000_000,
+      runProcessSnapshot: async () => rows.join("\n"),
+      runEnvForPid: async () => `FIRST_TREE_CHAT_ID=${chatId} /bin/claude`,
+    });
+    await probe.refresh();
+    probe.sealBaseline(chatId);
+    await probe.refresh();
+
+    // Turn 1 launches a watcher that outlives it.
+    rows = [...rows, "702  700 /bin/zsh"];
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(true);
+
+    // Turn 2 starts with that watcher still running: it must stay reported.
+    probe.sealBaseline(chatId);
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(true);
+    probe.stop();
+  });
+
+  it("stays silent for a provider first observed after its session is already running", async () => {
+    // A provider whose first scan lands mid-turn cannot be told apart from one
+    // that always had those children, so its whole tree becomes the baseline.
+    // That under-reports until they exit — silence, not a false claim.
+    const chatId = "chat-late-first-scan";
+    const probe = new PsSubprocessProbe({
+      log: silentLogger(),
+      daemonPid,
+      intervalMs: 1_000_000,
+      runProcessSnapshot: async () =>
+        [`800  ${daemonPid} /opt/homebrew/bin/claude`, "801  800 npm exec momentic mcp", "802  800 /bin/zsh"].join(
+          "\n",
+        ),
+      runEnvForPid: async () => `FIRST_TREE_CHAT_ID=${chatId} /bin/claude`,
+    });
+    probe.sealBaseline(chatId);
+    await probe.refresh();
+    expect(probe.hasLiveSubprocess(chatId)).toBe(true);
+    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(false);
     probe.stop();
   });
 
@@ -143,8 +233,12 @@ describe("PsSubprocessProbe", () => {
       runEnvForPid: async () => "FIRST_TREE_CHAT_ID=chat-restart /bin/claude",
     });
     await probe.refresh();
+    probe.sealBaseline("chat-restart");
+    await probe.refresh();
     expect(probe.hasSessionSpawnedSubprocess("chat-restart")).toBe(false);
 
+    // New provider process for the same chat: its own startup window, so the
+    // replacement's MCP child must not be read as work the session launched.
     rows = [`500  ${daemonPid} /opt/homebrew/bin/claude`, "501  500 npm exec momentic mcp"];
     await probe.refresh();
     expect(probe.hasSessionSpawnedSubprocess("chat-restart")).toBe(false);
