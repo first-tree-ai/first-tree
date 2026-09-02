@@ -242,28 +242,34 @@ describe("PsSubprocessProbe", () => {
     probe.stop();
   });
 
-  it("keeps the first in-turn event's boundary when the same turn emits more", async () => {
-    // Every assistant/thinking/tool event reaches noteTurnBoundary, so a later
-    // event in the SAME turn must not move the boundary past a watcher an
-    // earlier one already launched.
+  it("takes a replacement provider's own first turn even before any scan sees it", async () => {
+    // The ordering the poll cannot exclude: A leaves an unassigned candidate,
+    // B replaces A, and B's first turn happens before any scan. If that turn
+    // could not supersede A's candidate, B would never get a boundary and all
+    // of its work would stay hidden for its life.
     vi.useFakeTimers();
     vi.setSystemTime(T0);
-    const chatId = "chat-repeat-events";
-    let rows = [proc(1200, daemonPid, 120, "/opt/homebrew/bin/claude"), proc(1201, 1200, 119, "npm exec momentic mcp")];
+    const chatId = "chat-b-first-turn";
+    let rows = [proc(1900, daemonPid, 300, "/opt/homebrew/bin/claude"), proc(1901, 1900, 299, "npm exec momentic mcp")];
     const probe = probeOver(() => rows, chatId);
     await probe.refresh();
-
-    probe.noteTurnBoundary(chatId); // first tool call of the turn, at T0
+    probe.noteTurnBoundary(chatId); // A's turn, assigned on the next scan
     vi.setSystemTime(T0 + 10_000);
-    rows = [...rows, proc(1202, 1200, 0, "/bin/zsh")]; // …which launches a watcher
+    await probe.refresh();
     vi.setSystemTime(T0 + 20_000);
-    probe.noteTurnBoundary(chatId); // a second event in the same turn
+    probe.noteTurnBoundary(chatId); // a later A turn, left unassigned
 
-    vi.setSystemTime(T0 + 60_000);
+    // B replaces A and takes its own first turn, with no scan in between.
+    vi.setSystemTime(T0 + 40_000);
+    probe.noteTurnBoundary(chatId);
+    rows = [proc(2000, daemonPid, 5, "/opt/homebrew/bin/claude"), proc(2001, 2000, 4, "npm exec momentic mcp")];
+
+    // B launches a watcher, and only now does a scan happen.
+    vi.setSystemTime(T0 + 80_000);
     rows = [
-      proc(1200, daemonPid, 180, "/opt/homebrew/bin/claude"),
-      proc(1201, 1200, 179, "npm exec momentic mcp"),
-      proc(1202, 1200, 50, "/bin/zsh"),
+      proc(2000, daemonPid, 45, "/opt/homebrew/bin/claude"),
+      proc(2001, 2000, 44, "npm exec momentic mcp"),
+      proc(2002, 2000, 30, "/bin/zsh"),
     ];
     await probe.refresh();
     expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(true);

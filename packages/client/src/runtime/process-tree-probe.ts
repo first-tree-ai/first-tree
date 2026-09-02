@@ -220,14 +220,14 @@ export class PsSubprocessProbe implements SubprocessProbe {
   private chatIdsWithLiveWork = new Set<string>();
   private chatIdsWithSessionSpawnedWork = new Set<string>();
   /**
-   * The earliest not-yet-assigned turn-start instant per chat. Written
-   * synchronously, no I/O.
+   * The latest unassigned turn-start instant per chat. Written synchronously,
+   * no I/O.
    *
-   * Earliest, not latest: every in-turn event reaches this, so overwriting
-   * would let the second tool call of a turn move the boundary past a watcher
-   * the first one already launched, hiding it for the provider's life. Once a
-   * scan assigns it to a provider the entry is consumed, so a later turn can
-   * still supply a boundary to a provider that appears afterwards.
+   * Its caller fires once per distinct turn, so overwriting is what a newer
+   * turn is *for*: a replacement provider's own first turn must supersede a
+   * candidate left over from the process it replaced, even when that turn
+   * happens before any scan has seen the replacement. Repeated events inside
+   * one turn cannot move it, because they never reach here.
    */
   private readonly pendingTurnBoundaryMsByChat = new Map<string, number>();
   /**
@@ -262,7 +262,6 @@ export class PsSubprocessProbe implements SubprocessProbe {
   }
 
   noteTurnBoundary(chatId: string): void {
-    if (this.pendingTurnBoundaryMsByChat.has(chatId)) return;
     this.pendingTurnBoundaryMsByChat.set(chatId, Date.now());
   }
 
@@ -301,8 +300,6 @@ export class PsSubprocessProbe implements SubprocessProbe {
       const next = new Set<string>();
       const nextSessionSpawned = new Set<string>();
       const chatsWithLiveProvider = new Set<string>();
-      /** Pending boundaries a provider rejected as older than itself. */
-      const supersededPendingChats = new Set<string>();
       const providerPids = findProviderPids(rows, this.daemonPid);
       for (const providerPid of providerPids) {
         // The chat is resolved every scan now, not only when a descendant
@@ -323,12 +320,6 @@ export class PsSubprocessProbe implements SubprocessProbe {
             boundaryMs = chatBoundary;
             this.boundaryMsByProviderPid.set(providerPid, chatBoundary);
             this.pendingTurnBoundaryMsByChat.delete(chatId);
-          } else if (chatBoundary !== undefined) {
-            // It predates this provider, so it can never become its boundary.
-            // Dropping it is what lets this provider's OWN next turn be
-            // recorded — holding it would make one stale timestamp swallow
-            // every later turn and hide this provider's work for good.
-            supersededPendingChats.add(chatId);
           }
         }
         const live = hasDescendant(providerPid, childrenByParent);
@@ -344,9 +335,6 @@ export class PsSubprocessProbe implements SubprocessProbe {
       }
       // Drop baselines for providers that are gone, so a recycled pid cannot
       // inherit a previous provider's session infrastructure.
-      for (const chatId of supersededPendingChats) {
-        if (!nextSessionSpawned.has(chatId)) this.pendingTurnBoundaryMsByChat.delete(chatId);
-      }
       const alive = new Set(providerPids);
       for (const pid of this.boundaryMsByProviderPid.keys()) {
         if (!alive.has(pid)) this.boundaryMsByProviderPid.delete(pid);

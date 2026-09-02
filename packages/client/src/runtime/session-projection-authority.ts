@@ -402,9 +402,14 @@ export class SessionProjectionAuthority<
    * chat surface.
    */
   noteProviderTurnStart(chatId: string): void {
-    this.deps.onProviderTurnStarted(chatId);
     if (this.providerTurnInFlight.has(chatId)) return;
     this.providerTurnInFlight.add(chatId);
+    // Below the in-flight guard on purpose: this fires once per DISTINCT turn,
+    // never once per in-turn event. That is what lets the subprocess probe
+    // treat each call as a newer boundary candidate — a later turn supersedes
+    // an unassigned one — without a turn's own second tool call being able to
+    // move the boundary past work its first one already launched.
+    this.deps.onProviderTurnStarted(chatId);
     this.projectSessionRuntime(chatId);
   }
 

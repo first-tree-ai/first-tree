@@ -69,6 +69,7 @@ type SessionRuntimeInternals = {
     reaffirmRuntimeStates(): void;
     hasBackgroundWork(chatId: string): boolean;
     noteProviderTurnStart(chatId: string): void;
+    noteProviderTurnEnd(chatId: string): void;
     persistRegistry(): void;
     recordHandlerSource(entry: SessionRecord, sourceKey: string): void;
   };
@@ -7878,6 +7879,36 @@ describe("SessionRuntime edge coverage", () => {
     probe.stop();
     await sm.shutdown();
     vi.useRealTimers();
+  });
+
+  it("signals one turn boundary per turn, not one per in-turn event", async () => {
+    // The probe treats each boundary call as a newer candidate, so this guard
+    // is what stops a turn's second tool call from moving the boundary past a
+    // watcher its first one already launched. It lives here rather than in the
+    // probe because only the projection knows where a turn begins and ends.
+    const chatId = "chat-one-boundary-per-turn";
+    const boundaries: string[] = [];
+    const probe: SubprocessProbe = {
+      hasLiveSubprocess: vi.fn(() => true),
+      hasSessionSpawnedSubprocess: vi.fn(() => false),
+      noteTurnBoundary: vi.fn((id: string) => boundaries.push(id)),
+      stop: vi.fn(),
+    };
+    const sm = makeRuntime({ subprocessProbe: probe });
+    const i = internals(sm);
+    bindSeededSession(i, makeSessionRecord(chatId, { status: "active", lastActivity: Date.now() }));
+
+    i.projection.noteProviderTurnStart(chatId);
+    i.projection.noteProviderTurnStart(chatId);
+    i.projection.noteProviderTurnStart(chatId);
+    expect(boundaries).toEqual([chatId]);
+
+    // A distinct turn must be able to supersede the previous candidate.
+    i.projection.noteProviderTurnEnd(chatId);
+    i.projection.noteProviderTurnStart(chatId);
+    expect(boundaries).toEqual([chatId, chatId]);
+
+    await sm.shutdown();
   });
 
   it("never asserts background work for a session whose only child is its MCP server", async () => {
