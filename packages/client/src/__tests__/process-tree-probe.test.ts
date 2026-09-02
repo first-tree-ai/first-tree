@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildChildrenIndex,
+  defaultProcessSnapshot,
   extractChatId,
   findProviderPids,
   hasDescendant,
@@ -65,6 +66,23 @@ describe("process-tree-probe pure helpers", () => {
     );
     // The value must not bleed into the next NUL-separated entry.
     expect(extractChatId(environ)).toBe("f93566d9-00c8");
+  });
+});
+
+describe("the real ps adapter", () => {
+  it("produces rows this parser accepts, including our own process", async () => {
+    // Every other test here injects a fixture, so none of them can see the
+    // adapter and the parser disagreeing about columns. That mismatch is
+    // silent and total: no row parses, both result sets publish empty, and the
+    // idle-suspend protection that predates this feature dies with it. This
+    // runs the actual command instead.
+    const rows = parseProcessRows(await defaultProcessSnapshot());
+    expect(rows.length).toBeGreaterThan(0);
+    const self = rows.find((row) => row.pid === process.pid);
+    expect(self, "this process should appear in its own ps output").toBeTruthy();
+    expect(self?.ppid).toBe(process.ppid);
+    expect(self?.elapsedSec).toBeGreaterThanOrEqual(0);
+    expect(self?.comm.length).toBeGreaterThan(0);
   });
 });
 
@@ -221,6 +239,55 @@ describe("PsSubprocessProbe", () => {
     ];
     await probe.refresh();
     expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(true);
+    probe.stop();
+  });
+
+  it("keeps the first in-turn event's boundary when the same turn emits more", async () => {
+    // Every assistant/thinking/tool event reaches noteTurnBoundary, so a later
+    // event in the SAME turn must not move the boundary past a watcher an
+    // earlier one already launched.
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    const chatId = "chat-repeat-events";
+    let rows = [proc(1200, daemonPid, 120, "/opt/homebrew/bin/claude"), proc(1201, 1200, 119, "npm exec momentic mcp")];
+    const probe = probeOver(() => rows, chatId);
+    await probe.refresh();
+
+    probe.noteTurnBoundary(chatId); // first tool call of the turn, at T0
+    vi.setSystemTime(T0 + 10_000);
+    rows = [...rows, proc(1202, 1200, 0, "/bin/zsh")]; // …which launches a watcher
+    vi.setSystemTime(T0 + 20_000);
+    probe.noteTurnBoundary(chatId); // a second event in the same turn
+
+    vi.setSystemTime(T0 + 60_000);
+    rows = [
+      proc(1200, daemonPid, 180, "/opt/homebrew/bin/claude"),
+      proc(1201, 1200, 179, "npm exec momentic mcp"),
+      proc(1202, 1200, 50, "/bin/zsh"),
+    ];
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(true);
+    probe.stop();
+  });
+
+  it("does not let a same-second replacement adopt its predecessor's boundary", async () => {
+    // One-second resolution means a provider born in the same second as the
+    // previous boundary cannot prove the boundary came after it started. Fail
+    // closed: wait for a boundary that definitely does.
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    const chatId = "chat-same-second";
+    let rows = [proc(1300, daemonPid, 300, "/opt/homebrew/bin/claude"), proc(1301, 1300, 299, "npm exec momentic mcp")];
+    const probe = probeOver(() => rows, chatId);
+    await probe.refresh();
+    probe.noteTurnBoundary(chatId); // predecessor boundary at T0
+
+    // Replacement starts ~0.5s later, its MCP child ~0.6s later; first scan at
+    // T0+1.5s reports ages of 1s and 0s.
+    vi.setSystemTime(T0 + 1_500);
+    rows = [proc(1400, daemonPid, 1, "/opt/homebrew/bin/claude"), proc(1401, 1400, 0, "npm exec momentic mcp")];
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(false);
     probe.stop();
   });
 

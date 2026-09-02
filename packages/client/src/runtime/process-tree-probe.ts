@@ -92,6 +92,15 @@ function earliestStartMs(row: ProcessRow, nowMs: number): number {
   return nowMs - (row.elapsedSec + 1) * 1_000;
 }
 
+/**
+ * The latest instant a process with this elapsed time could have started.
+ * Pairs with {@link earliestStartMs}: each comparison picks whichever end of
+ * the one-second uncertainty makes the claim harder to prove.
+ */
+function latestStartMs(row: ProcessRow, nowMs: number): number {
+  return nowMs - row.elapsedSec * 1_000;
+}
+
 /** Build a parent-pid -> child-pids adjacency index. */
 export function buildChildrenIndex(rows: readonly ProcessRow[]): Map<number, number[]> {
   const byParent = new Map<number, number[]>();
@@ -168,14 +177,23 @@ type PsSubprocessProbeOptions = {
   daemonPid?: number;
   /** Refresh cadence; defaults to 10s (matches the idle-eviction tick). */
   intervalMs?: number;
-  /** Injectable for tests: returns `ps -axo pid=,ppid=,comm=` stdout. */
+  /** Injectable for tests: returns {@link PROCESS_SNAPSHOT_PS_ARGS} stdout. */
   runProcessSnapshot?: () => Promise<string>;
   /** Injectable for tests: returns `ps -Eww -p <pid> -o command=` stdout. */
   runEnvForPid?: (pid: number) => Promise<string>;
 };
 
-async function defaultProcessSnapshot(): Promise<string> {
-  const { stdout } = await execFileAsync("ps", ["-axo", "pid=,ppid=,comm="]);
+/**
+ * The columns {@link parseProcessRows} expects, in order. Exported so a test
+ * can run the real command and prove the adapter and the parser still agree —
+ * an injected fixture cannot, and a mismatch here is silent: every row fails to
+ * parse, both result sets publish empty, and the idle-suspend protection that
+ * predates any of this goes with them.
+ */
+export const PROCESS_SNAPSHOT_PS_ARGS = ["-axo", "pid=,ppid=,etime=,comm="] as const;
+
+export async function defaultProcessSnapshot(): Promise<string> {
+  const { stdout } = await execFileAsync("ps", [...PROCESS_SNAPSHOT_PS_ARGS]);
   return stdout;
 }
 
@@ -201,8 +219,17 @@ async function defaultEnvForPid(pid: number): Promise<string> {
 export class PsSubprocessProbe implements SubprocessProbe {
   private chatIdsWithLiveWork = new Set<string>();
   private chatIdsWithSessionSpawnedWork = new Set<string>();
-  /** Most recent turn-start instant per chat. Written synchronously, no I/O. */
-  private readonly turnBoundaryMsByChat = new Map<string, number>();
+  /**
+   * The earliest not-yet-assigned turn-start instant per chat. Written
+   * synchronously, no I/O.
+   *
+   * Earliest, not latest: every in-turn event reaches this, so overwriting
+   * would let the second tool call of a turn move the boundary past a watcher
+   * the first one already launched, hiding it for the provider's life. Once a
+   * scan assigns it to a provider the entry is consumed, so a later turn can
+   * still supply a boundary to a provider that appears afterwards.
+   */
+  private readonly pendingTurnBoundaryMsByChat = new Map<string, number>();
   /**
    * Per provider pid: the instant its first turn began. Assigned once — from a
    * chat boundary that is not older than the provider itself — and never
@@ -235,7 +262,8 @@ export class PsSubprocessProbe implements SubprocessProbe {
   }
 
   noteTurnBoundary(chatId: string): void {
-    this.turnBoundaryMsByChat.set(chatId, Date.now());
+    if (this.pendingTurnBoundaryMsByChat.has(chatId)) return;
+    this.pendingTurnBoundaryMsByChat.set(chatId, Date.now());
   }
 
   stop(): void {
@@ -276,13 +304,17 @@ export class PsSubprocessProbe implements SubprocessProbe {
         const providerRow = rowsByPid.get(providerPid);
         let boundaryMs = this.boundaryMsByProviderPid.get(providerPid);
         if (boundaryMs === undefined && chatId && providerRow) {
-          const chatBoundary = this.turnBoundaryMsByChat.get(chatId);
-          // Only a turn that began at or after this provider started belongs to
-          // it. A replacement provider therefore ignores the boundary of the
-          // process it replaced and waits for its own first turn.
-          if (chatBoundary !== undefined && chatBoundary >= earliestStartMs(providerRow, now)) {
+          const chatBoundary = this.pendingTurnBoundaryMsByChat.get(chatId);
+          // Adopt only a boundary that is DEFINITELY at or after this provider
+          // started — the latest instant its age allows. Comparing against the
+          // earliest instead would let a replacement born in the same second
+          // adopt its predecessor's boundary, and then read its own startup MCP
+          // child as work. A replacement that cannot prove it waits for its own
+          // turn instead.
+          if (chatBoundary !== undefined && chatBoundary >= latestStartMs(providerRow, now)) {
             boundaryMs = chatBoundary;
             this.boundaryMsByProviderPid.set(providerPid, chatBoundary);
+            this.pendingTurnBoundaryMsByChat.delete(chatId);
           }
         }
         const live = hasDescendant(providerPid, childrenByParent);
