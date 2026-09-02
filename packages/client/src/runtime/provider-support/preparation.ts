@@ -24,6 +24,7 @@ import { bootstrapWorkspace, type PredeclaredSourceRepo, writeAgentBriefing } fr
 import { type ChatContext, fetchChatContext } from "../chat-context.js";
 import {
   type ContextSourceKind,
+  effectiveContextSourceKind,
   inspectRemoteLatch,
   recordRemoteBindingObservation,
   resolveAgentContextSource,
@@ -315,7 +316,9 @@ async function verifyCompleteCapturedProjection(
     contextTree: ContextTreeCoordinates;
   },
 ): Promise<VerifiedManagedSkillsProjection | null> {
-  const kind = contextSourceKindFromCoordinates(expected.contextTree);
+  // Provider-aware: admission must derive the same kind the projection used, or
+  // it rejects the state it just published. See `effectiveContextSourceKind`.
+  const kind = effectiveContextSourceKind(contextSourceKindFromCoordinates(expected.contextTree), runtimeProvider);
   const expectedIdentity = JSON.parse(
     JSON.stringify({
       agentId: expected.sessionCtx.agent.agentId,
@@ -693,7 +696,10 @@ export async function projectManagedWorkspace(
       }
       contextTree = resolvedTree;
     }
-    const requestedKind = contextSourceKindFromCoordinates(contextTree);
+    // A provider the external installer cannot reach falls back to `none`, so it
+    // keeps First Tree's own Tree Skills instead of standing them down for
+    // `context-tree-*` Skills that were never installed there.
+    const requestedKind = effectiveContextSourceKind(contextSourceKindFromCoordinates(contextTree), runtimeProvider);
     const latch = inspectRemoteLatch(sourceAuthorityRoot);
 
     assertRuntimeConfigCanPublish(workspace, sourceAuthorityRoot, runtimeConfig, existingPayload !== undefined);

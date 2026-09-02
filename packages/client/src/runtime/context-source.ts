@@ -6,6 +6,7 @@ import {
   contextTreeActiveBindingSchema,
   contextTreeBranchSchema,
   contextTreeRepoSchema,
+  type RuntimeProvider,
 } from "@first-tree/shared";
 import { readContextTreeRepository } from "@first-tree/shared/config";
 import type { FirstTreeHubSDK } from "../cloud/sdk.js";
@@ -37,6 +38,34 @@ export type { RemoteLatchInspection, RemoteLatchState };
 export { CONTEXT_SOURCE_LOCK_REL, inspectRemoteLatch, workspaceHasRemoteLatch };
 
 export type ContextSourceKind = "remote" | "local" | "none" | "external";
+
+/**
+ * Runtime providers the external `context-tree` CLI can install Skills for.
+ *
+ * Its installer accepts exactly `claude` and `codex`; for anything else it
+ * reports the host as skipped and installs nothing. The Claude family shares
+ * `~/.claude`, so both entries map onto the one supported host.
+ */
+const EXTERNAL_INSTALLER_PROVIDERS = new Set<RuntimeProvider>(["claude-code", "claude-code-tui", "codex"]);
+
+/**
+ * Narrow `external` to the providers the external installer actually supports.
+ *
+ * External mode stands down `first-tree-{read,write,seed}` on the promise that
+ * `context-tree-*` replaces them. That promise only holds where the external
+ * installer can place them: on any other provider the machine would end up with
+ * no Context Tree Skills at all, plus a briefing naming Skills that were never
+ * installed. Those providers therefore keep First Tree's own Skills.
+ *
+ * Skill projection, briefing rendering, and admission MUST all derive the kind
+ * through this function. The briefing is compared byte-for-byte during admission
+ * and the projection is verified against the same active Skill set, so a
+ * disagreement makes a workspace reject the very state it just published.
+ */
+export function effectiveContextSourceKind(kind: ContextSourceKind, provider: RuntimeProvider): ContextSourceKind {
+  if (kind !== "external") return kind;
+  return EXTERNAL_INSTALLER_PROVIDERS.has(provider) ? "external" : "none";
+}
 
 export type ContextSourceNoneReason = "unknown" | "invalid" | "frozen" | "unbound";
 

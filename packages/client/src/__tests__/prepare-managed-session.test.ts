@@ -269,14 +269,40 @@ describe("prepareManagedSession", () => {
     process.env.FIRST_TREE_HOME = configHome;
 
     try {
-      await runExternalModePreparation();
+      // Claude is one of the two hosts the external installer supports, so this
+      // is a provider where external mode can actually deliver the Skills.
+      await runExternalModePreparation("claude-code");
     } finally {
       if (previousHome === undefined) delete process.env.FIRST_TREE_HOME;
       else process.env.FIRST_TREE_HOME = previousHome;
     }
   });
 
-  async function runExternalModePreparation(): Promise<void> {
+  it("keeps First Tree's own Skills for a provider the external installer cannot reach", async () => {
+    // `context-tree install` supports only `claude` and `codex`; for any other
+    // host it installs nothing and reports a skip. Standing down
+    // `first-tree-{read,write}` here would leave the machine with no Context
+    // Tree Skills at all, so external mode must not apply to this provider.
+    const configHome = mkdtempSync(join(tmpdir(), "prepare-external-unsupported-"));
+    mkdirSync(join(configHome, "config"), { recursive: true });
+    writeFileSync(
+      join(configHome, "config", "client.yaml"),
+      "server:\n  url: http://localhost:8000\ncontext_tree:\n  repository: acme/context\n",
+      "utf8",
+    );
+    const previousHome = process.env.FIRST_TREE_HOME;
+    process.env.FIRST_TREE_HOME = configHome;
+
+    try {
+      await runExternalModePreparation("cursor");
+    } finally {
+      if (previousHome === undefined) delete process.env.FIRST_TREE_HOME;
+      else process.env.FIRST_TREE_HOME = previousHome;
+    }
+  });
+
+  async function runExternalModePreparation(runtimeProvider: "claude-code" | "cursor"): Promise<void> {
+    const supported = runtimeProvider === "claude-code";
     const prepareManagedSession = await loadPrepare();
     const payload = {
       kind: "cursor" as const,
@@ -292,7 +318,7 @@ describe("prepareManagedSession", () => {
       sessionCtx: sessionCtx(),
       workspaceRoot,
       agentName: "prep-agent",
-      runtimeProvider: "cursor",
+      runtimeProvider,
       providerSkillRoots: TEST_PROVIDER_SKILL_ROOTS,
       runtimeConfig: null,
       payload,
@@ -300,20 +326,24 @@ describe("prepareManagedSession", () => {
       contextTree: { kind: "external", path: null, repoUrl: null, branch: null, repository: "acme/context" },
     });
 
-    // Regression guard: the projection used to receive `remote` for anything that
-    // was not `local`. That would project `first-tree-read` / `first-tree-write`
-    // and then fail the admission proof, which expects them gone in this mode.
     const kinds = reconcileManagedSkillsForConfig.mock.calls.map((call) => call[6]);
-    expect(kinds).toContain("external");
-    expect(kinds).not.toContain("remote");
-
-    // And the superseded Skills are absent from the projected skill root.
-    const skillRoot = join(workspaceRoot, TEST_PROVIDER_SKILL_ROOTS.cursor);
-    for (const superseded of ["first-tree-read", "first-tree-write"]) {
-      expect(existsSync(join(skillRoot, superseded))).toBe(false);
+    if (supported) {
+      // Regression guard: the projection used to receive `remote` for anything
+      // that was not `local`. That would project `first-tree-read` /
+      // `first-tree-write` and then fail the admission proof, which expects them
+      // gone in this mode.
+      expect(kinds).toContain("external");
+      expect(kinds).not.toContain("remote");
+    } else {
+      // `none` collapses to the ordinary full-Skill mode on the way into the
+      // reconciler, which is the point: this provider keeps
+      // `first-tree-{read,write,seed}` instead of having them stood down for
+      // `context-tree-*` Skills that were never installed for it.
+      expect(kinds).not.toContain("external");
+      expect(kinds).toContain("remote");
     }
 
-    // External mode owns no workspace tree, so no manifest names one.
+    // Either way no workspace tree is owned, so no manifest names one.
     expect(existsSync(join(workspaceRoot, ".first-tree", "workspace.json"))).toBe(false);
   }
 

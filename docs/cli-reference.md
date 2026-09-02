@@ -1294,6 +1294,29 @@ the `context-tree-{setup,create,connect,read,write,publish}` Skills into
 from each workspace on its next session — along with `context-tree-review` and
 `context-tree-audit`, which act on the Team binding this mode bypasses. The briefing follows the same switch.
 
+`login` also writes a `context-tree` shim next to this channel's CLI binary.
+Every installed Skill invokes `context-tree` by name, and npm links only a
+top-level package's bin — never a transitive dependency's — so without the shim
+the Skills are installed and unrunnable. If the bin directory is not writable the
+`login` line says so; `npm i -g @first-tree-ai/context-tree` is the manual
+equivalent. An existing `context-tree` that First Tree did not write — a real
+global install, for instance — is left exactly as it is and never removed on
+revert.
+
+**Only Claude and Codex agents switch.** `context-tree install` supports exactly
+those two hosts. An agent on any other provider — Cursor, Grok, Kimi, OpenCode,
+Amp, DeepSeek, Pi — keeps First Tree's own Context Tree Skills and its ordinary
+briefing, because standing them down would leave that agent with no Context Tree
+Skills at all. One caveat: such an agent moves to the unbound state, so if it
+previously had a Team tree bound, its next session reports an unresolved context
+source rather than silently dropping the old projection.
+
+**Codex's workspace-only sandbox does not see the pre-linked connection.** That
+mode sets `HOME` to the workspace, and the external CLI derives its state root
+from the home directory, so the connection `login` recorded is invisible and
+`resolve` reports `NO_CONNECTION`. The first in-session `context-tree-setup`
+handles it by connecting the tree with the user. Other providers are unaffected.
+
 An agent whose workspace does not exist yet is skipped — its home is only created
 on the daemon's first run of that agent. The same applies to any agent added
 after the last `login`: its first session resolves `NO_CONNECTION`, which
@@ -1304,9 +1327,19 @@ Re-running `first-tree login` also links any workspace created since.
 `https` URL and the `context-tree` package holds no tokens of its own, so run
 `gh auth setup-git` (or configure a credential helper) first.
 
-**To revert**, unset the key and restart the session; the First Tree Skills are
-reprojected. The external CLI has no uninstall command, so remove its Skills by
-hand if you want them gone: `rm -rf ~/.claude/skills/context-tree-*`.
+**To revert**, unset the key and re-run `first-tree login`. The external CLI has
+no uninstall command, so First Tree records what it installed in
+`<dataDir>/context-tree-install.json` and removes exactly that — the Skills it
+wrote and the shim — then the First Tree Skills are reprojected on the next
+session. Only ledger entries are ever deleted, so a `context-tree install` you
+ran yourself is left alone, as are the tree checkouts under
+`~/.context-tree/trees/` and the connection records in
+`~/.context-tree/connections.json`.
+
+This matters because a *global* npm install runs the bundled dependency's own
+`postinstall`, which places the Skills in `~/.claude/skills` and
+`~/.codex/skills` regardless of this key. Running `first-tree login` with the key
+unset is what stands them back down.
 
 **Team bindings are ignored in this mode.** The tree named by
 `context_tree.repository` is what the agent sees — not the server-side Team

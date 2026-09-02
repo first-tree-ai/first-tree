@@ -8,6 +8,20 @@ import type { InferConfig } from "./types.js";
 
 export const updatePolicySchema = z.enum(UPDATE_POLICIES);
 
+/**
+ * A GitHub OWNER/REPO this machine may delegate its Context Tree to.
+ *
+ * The owner segment follows GitHub's own rule — alphanumeric and hyphens, no
+ * leading or trailing hyphen, at most 39 characters — and the repository segment
+ * rejects `.` and `..`. It deliberately matches what the external
+ * `@first-tree-ai/context-tree` CLI accepts: setting this key alone switches the
+ * runtime into external mode and stands down First Tree's own Tree Skills, so a
+ * value the external CLI can never connect to would disable working Skills in
+ * exchange for nothing.
+ */
+export const CONTEXT_TREE_REPOSITORY_PATTERN =
+  /^[A-Za-z\d](?:[A-Za-z\d-]{0,37}[A-Za-z\d])?\/(?!\.{1,2}$)[A-Za-z\d._-]{1,100}$/;
+
 export const clientConfigSchema = defineConfig({
   server: {
     url: field(z.string(), {
@@ -49,7 +63,7 @@ export const clientConfigSchema = defineConfig({
     repository: field(
       z
         .string()
-        .regex(/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/, "Context Tree repository must be GitHub OWNER/REPO.")
+        .regex(CONTEXT_TREE_REPOSITORY_PATTERN, "Context Tree repository must be GitHub OWNER/REPO.")
         .optional(),
       { env: "FIRST_TREE_CONTEXT_TREE_REPOSITORY" },
     ),
@@ -74,6 +88,11 @@ export function getClientConfig(): ClientConfig {
  * Never throws: an unreadable or malformed config means "external mode off",
  * which is a healthy state, so resolution falls through to the server-bound
  * behaviour rather than failing a login or a session start.
+ *
+ * The pattern is re-checked here rather than left to the field schema because
+ * `resolveConfigReadonly` returns file values unvalidated. Without this check a
+ * repository the external CLI rejects would still switch the machine into
+ * external mode and stand down the Skills it was meant to replace.
  */
 export function readContextTreeRepository(): string | null {
   let resolved: Record<string, unknown>;
@@ -85,5 +104,6 @@ export function readContextTreeRepository(): string | null {
   const group = resolved.context_tree;
   if (typeof group !== "object" || group === null) return null;
   const repository = (group as Record<string, unknown>).repository;
-  return typeof repository === "string" && repository.length > 0 ? repository : null;
+  if (typeof repository !== "string" || !CONTEXT_TREE_REPOSITORY_PATTERN.test(repository)) return null;
+  return repository;
 }
