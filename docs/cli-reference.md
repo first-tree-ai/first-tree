@@ -99,7 +99,8 @@ first-tree
 ├── org ...                  Organization-level operations
 ├── daemon ...               Background daemon (start, stop, status, doctor, probe)
 ├── config ...               View/modify this machine's client.yaml
-└── tree ...                 Read, write, review, validate, and browse Context Trees
+├── tree ...                 Read, write, review, validate, and browse Context Trees
+└── zcode ...                Managed ZCode runtime (host-local login)
 ```
 
 ---
@@ -2027,6 +2028,30 @@ path, and derivation source. JSON mode returns `{ items, nextCursor }`, adding
 `treeHeadCommit` when the runtime observed one, which identifies the candidate
 commit for recovering the node content that was read; it is not a claim that a
 dirty working file matched that commit.
+
+## zcode
+
+```
+first-tree zcode
+└── login [args...]
+```
+
+### zcode login
+
+```
+first-tree zcode login [-- <args...>]
+```
+
+Sign in to the managed ZCode runtime. First Tree extracts and verifies the
+official ZCode runtime automatically on capability admission (Linux x64,
+Node.js 22.19.0+) — there is no separate manual install step. This command
+re-resolves that same managed runtime (extracting it first on a clean host)
+and hands the terminal to it via the exact absolute Node executable and cache
+path First Tree admitted, so the advertised recovery step always matches what
+actually runs a turn. Credentials stay provider-owned and host-local; First
+Tree does not read, store, or proxy them. Extra arguments (e.g.
+`--no-browser`) are forwarded verbatim to the underlying `zcode.cjs login`
+invocation.
 
 ## Environment variables
 

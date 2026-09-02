@@ -213,10 +213,14 @@ export function isClaudeAuthError(code: string | undefined): boolean {
  * and points at the runtime's own CLI — we do NOT advertise a First Tree
  * UI button or relogin flow, by design.
  */
-export function formatAuthHint(runtime: Runtime, originalMessage: string): string {
+export function formatAuthHint(
+  runtime: Runtime,
+  originalMessage: string,
+  options: { loginCommand?: string } = {},
+): string {
   // Login / owner copy comes from the shared runtime-provider catalog so the
   // in-chat hint stays aligned with Computers setup and other surfaces.
-  const reauth = runtimeProviderChatAuthLoginPhrase(runtime);
+  const reauth = options.loginCommand ? `\`${options.loginCommand}\`` : runtimeProviderChatAuthLoginPhrase(runtime);
   const provider = runtimeProviderAuthOwnerLabel(runtime);
   const preferred = runtimeProviderPreferredCredentialProse(runtime);
   // Cap the appended raw message so an upstream stack-trace envelope (codex

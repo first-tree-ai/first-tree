@@ -609,9 +609,21 @@ function isCredential(
     return true;
   }
   // Pi CLI logged-out / missing-key phrasings (kept in sync with isPiAuthError).
-  return (
+  if (
     provider === "pi" &&
     /missing credentials|no api key|\/login|auth[_ ]required|not authenticated|pi_auth_required/.test(text)
+  ) {
+    return true;
+  }
+  // The official ZCode runtime's clean-host turn contract emits this
+  // provider-owned configuration error before OAuth exists. Keep the rule
+  // provider-gated so the generic words do not turn unrelated runtime output
+  // into credential failures.
+  return (
+    provider === "zcode" &&
+    /provider_not_configured|model config is missing|model provider is missing an api key|explicit model provider/.test(
+      text,
+    )
   );
 }
 

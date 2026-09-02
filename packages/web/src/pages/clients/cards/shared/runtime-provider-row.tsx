@@ -23,6 +23,7 @@ export function RuntimeProviderRow({
   entry,
   os,
   hostname,
+  binName,
   showInstallBox = false,
 }: {
   provider: RuntimeProvider;
@@ -30,6 +31,8 @@ export function RuntimeProviderRow({
   os?: string | null;
   /** Host label for the install box copy; only consulted when `showInstallBox`. */
   hostname?: string;
+  /** Connected Computer's channel-aware CLI binary name; only consulted when `showInstallBox`. */
+  binName?: string | null;
   showInstallBox?: boolean;
 }) {
   const needsInstall = showInstallBox && (entry == null || entry.state === "missing" || entry.state === "error");
@@ -37,7 +40,7 @@ export function RuntimeProviderRow({
     <div className="flex flex-col" style={{ gap: "var(--sp-1_5)" }}>
       {entry != null && !needsInstall && <RuntimeStateLine provider={provider} entry={entry} os={os} />}
       {needsInstall && hostname != null && (
-        <RuntimeInstallBox provider={provider} entry={entry} hostname={hostname} os={os} />
+        <RuntimeInstallBox provider={provider} entry={entry} hostname={hostname} os={os} binName={binName} />
       )}
     </div>
   );

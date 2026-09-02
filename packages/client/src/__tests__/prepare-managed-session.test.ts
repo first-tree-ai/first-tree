@@ -25,6 +25,7 @@ const TEST_PROVIDER_SKILL_ROOTS = Object.freeze({
   "kimi-code": ".kimi-code/skills",
   opencode: ".opencode/skills",
   pi: ".agents/skills",
+  zcode: ".zcode/skills",
 });
 
 const reconcileManagedSkillsForConfig = vi.fn();

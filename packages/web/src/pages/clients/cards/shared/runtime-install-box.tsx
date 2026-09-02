@@ -2,7 +2,13 @@ import type { CapabilityEntry, RuntimeProvider } from "@first-tree/shared";
 import { runtimeProviderShowsHostLoginOnSetup } from "@first-tree/shared";
 import type { ReactNode } from "react";
 import { InlineCommand } from "./inline-command.js";
-import { buildInstallCommand, PROVIDER_LABEL, PROVIDER_LOGIN_COMMAND, providerInstallCommand } from "./providers.js";
+import {
+  buildInstallCommand,
+  PROVIDER_LABEL,
+  PROVIDER_LOGIN_COMMAND,
+  providerInstallCommand,
+  zcodeLoginCommand,
+} from "./providers.js";
 
 type RuntimeInstallBoxProps = {
   provider: RuntimeProvider;
@@ -18,6 +24,8 @@ type RuntimeInstallBoxProps = {
   hostname: string;
   /** Host OS (`darwin` / `linux` / `win32`) — keys the tmux install command. */
   os?: string | null;
+  /** Connected Computer's channel-aware CLI binary name (for ZCode's `zcode login` driver). */
+  binName?: string | null;
 };
 
 /**
@@ -29,9 +37,9 @@ type RuntimeInstallBoxProps = {
  * from the `ProviderRow` chips in the Ready card's CapabilityMatrix —
  * that's a state-only summary line; this is an actionable surface.
  */
-export function RuntimeInstallBox({ provider, entry, hostname, os }: RuntimeInstallBoxProps) {
+export function RuntimeInstallBox({ provider, entry, hostname, os, binName }: RuntimeInstallBoxProps) {
   const label = PROVIDER_LABEL[provider];
-  const { headline, command } = installBoxView(entry, provider, hostname, os);
+  const { headline, command } = installBoxView(entry, provider, hostname, os, binName);
 
   // No outer raised-bg / border / radius — the inner `InlineCommand`'s
   // sunken pre-block is the only chrome that earns its weight (commands
@@ -93,6 +101,7 @@ export function installBoxView(
   provider: RuntimeProvider,
   hostname: string,
   os?: string | null,
+  binName?: string | null,
 ): { headline: string; command: string | null } {
   // Grok Build is macOS/Linux-only in V1. The probe reports this as state
   // `error` on win32; rendering the generic probe-error branch would print
@@ -114,12 +123,14 @@ export function installBoxView(
     let headline: string;
     if (provider === "claude-code-tui") {
       headline = `Install ${label} (the \`claude\` CLI + tmux >= 3.0) on ${hostname}.`;
+    } else if (provider === "zcode") {
+      headline = `Install ${label} and run \`${zcodeLoginCommand(binName)}\` on ${hostname}.`;
     } else if (runtimeProviderShowsHostLoginOnSetup(provider)) {
       headline = `Install ${label} and run \`${PROVIDER_LOGIN_COMMAND[provider]}\` on ${hostname}.`;
     } else {
       headline = `Install ${label} on ${hostname}.`;
     }
-    return { headline, command: buildInstallCommand(provider, os) };
+    return { headline, command: buildInstallCommand(provider, os, binName) };
   }
   if (entry.state === "error") {
     return {
@@ -131,6 +142,6 @@ export function installBoxView(
   // entries out. Provide a defensive fallback that's still actionable.
   return {
     headline: `${PROVIDER_LABEL[provider]} is configured. To reinstall, run on ${hostname}:`,
-    command: buildInstallCommand(provider, os),
+    command: buildInstallCommand(provider, os, binName),
   };
 }

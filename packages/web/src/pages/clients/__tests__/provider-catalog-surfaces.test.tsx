@@ -38,6 +38,7 @@ const HOST_SETUP_CASES = [
   ["kimi-code", "kimi # then run /login"],
   ["opencode", "opencode auth login"],
   ["pi", "pi # then run /login"],
+  ["zcode", "first-tree zcode login"],
 ] as const satisfies readonly (readonly [RuntimeProvider, string])[];
 
 let root: Root | null = null;
@@ -175,4 +176,17 @@ describe("web provider surfaces derived from shared catalog", () => {
       expect(el.querySelector("pre")?.textContent).toBe(expected);
     });
   }
+
+  it("renders RuntimeInstallBox with the connected Computer's own channel binary name for ZCode", async () => {
+    const expected = buildInstallCommand("zcode", "linux", "first-tree-staging");
+    const el = await render(
+      <RuntimeInstallBox provider="zcode" entry={null} hostname="devbox" os="linux" binName="first-tree-staging" />,
+    );
+    const text = el.textContent ?? "";
+    expect(text).toContain("first-tree-staging zcode login");
+    expect(el.querySelector("pre")?.textContent).toBe(expected);
+    expect(expected).toBe(
+      "# First Tree extracts official ZCode 3.10.2 automatically on linux-x64\nfirst-tree-staging zcode login",
+    );
+  });
 });

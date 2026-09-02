@@ -8,6 +8,16 @@ import { PROVIDER_SKILL_ROOTS } from "../providers/skill-roots.js";
 import type { HandlerConfig } from "../runtime/handler.js";
 import { providerSkillRoot } from "../runtime/managed-skills.js";
 
+vi.mock("../providers/zcode/capability.js", () => ({
+  probeZcodeCapability: vi.fn(async () => ({
+    state: "missing",
+    available: false,
+    error: "mocked official-runtime probe",
+    detectedAt: new Date().toISOString(),
+    latencyMs: 0,
+  })),
+}));
+
 const HANDLER_METHODS = ["start", "resume", "inject", "suspend", "shutdown"] as const;
 
 describe("builtin handler registry", () => {

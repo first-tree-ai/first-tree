@@ -71,7 +71,7 @@ export function RuntimeTab() {
         </div>
       )}
 
-      {config && (
+      {config && ctx.setupRuntimeProvider !== "zcode" && (
         <div style={{ marginTop: "var(--sp-8)" }}>
           <Section headingLevel={3} title={titleWithSemantics("Model settings", modelSettingsSaved)}>
             <ModelSection
