@@ -7740,7 +7740,7 @@ describe("SessionRuntime edge coverage", () => {
     const subprocessProbe: SubprocessProbe = {
       hasLiveSubprocess: vi.fn(() => true),
       hasSessionSpawnedSubprocess: vi.fn((chatId: string) => chatId === "chat-parked"),
-      sealBaseline: vi.fn(),
+      noteTurnBoundary: vi.fn(),
       stop: vi.fn(),
     };
     const sm = makeRuntime({ subprocessProbe, onSessionRuntimeChange });
@@ -7770,7 +7770,7 @@ describe("SessionRuntime edge coverage", () => {
     const subprocessProbe: SubprocessProbe = {
       hasLiveSubprocess: vi.fn(() => true),
       hasSessionSpawnedSubprocess: vi.fn(() => true),
-      sealBaseline: vi.fn(),
+      noteTurnBoundary: vi.fn(),
       stop: vi.fn(),
     };
     const sm = makeRuntime({ subprocessProbe, onSessionRuntimeChange });
@@ -7804,7 +7804,14 @@ describe("SessionRuntime edge coverage", () => {
     // wiring with a no-op leaves them all green while the qualifier can never
     // appear on any host.
     const chatId = "chat-seal-wiring";
-    const withMcp = ["4242 1 node", "7000 4242 /opt/homebrew/bin/claude", "7001 7000 npm exec momentic mcp"];
+    const T0 = new Date("2026-09-02T00:00:00Z").getTime();
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    const withMcp = [
+      "4242 1 20:00 node",
+      "7000 4242 02:00 /opt/homebrew/bin/claude",
+      "7001 7000 01:59 npm exec momentic mcp",
+    ];
     let rows = [...withMcp];
     const probe = new PsSubprocessProbe({
       log: silentLogger(),
@@ -7813,7 +7820,7 @@ describe("SessionRuntime edge coverage", () => {
       runProcessSnapshot: async () => rows.join("\n"),
       runEnvForPid: async () => `FIRST_TREE_CHAT_ID=${chatId} /opt/homebrew/bin/claude`,
     });
-    await probe.refresh(); // startup scan: the MCP child becomes the baseline
+    await probe.refresh(); // startup scan
 
     const frames: Array<{ chatId: string; report: { runtimeState: string; backgroundWork: boolean } }> = [];
     let capturedCtx: SessionContext | undefined;
@@ -7836,27 +7843,33 @@ describe("SessionRuntime edge coverage", () => {
     await sm.dispatch(mockEntry({ id: 1, chatId }));
     if (!capturedCtx || !capturedMessage) throw new Error("expected captured session context");
 
-    // A turn runs. This event is the only thing that seals the baseline.
+    // A turn runs. This event is the only thing that records the boundary —
+    // no test-imposed ordering around it, because the runtime does not provide
+    // one: the boundary is an instant, and the scan proving it can run late.
     capturedCtx.emitEvent({
       kind: "tool_call",
       payload: { toolUseId: "t1", name: "Bash", args: null, status: "ok" },
     });
-    // The seal captures its snapshot asynchronously; drain it so this test
-    // pins the real ordering (boundary first, then the turn's work) instead of
-    // depending on which microtask happens to win.
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    // …and it launches a watcher that outlives it.
-    rows = [...withMcp, "7002 7000 /bin/zsh", "7003 7002 sleep"];
+    // …and the turn launches a watcher that outlives it.
     await capturedCtx.finishTurn(capturedMessage, { status: "success", terminal: true });
     capturedCtx.emitEvent({ kind: "turn_end", payload: { status: "success" } });
 
+    vi.setSystemTime(T0 + 30_000);
+    rows = [
+      "4242 1 20:30 node",
+      "7000 4242 02:30 /opt/homebrew/bin/claude",
+      "7001 7000 02:29 npm exec momentic mcp",
+      "7002 7000 00:20 /bin/zsh",
+      "7003 7002 00:20 sleep",
+    ];
     await probe.refresh();
     frames.length = 0;
     i.projection.reaffirmRuntimeStates();
     expect(frames).toContainEqual({ chatId, report: { runtimeState: "idle", backgroundWork: true } });
 
     // The watcher exits; the permanent MCP child must not keep the claim alive.
-    rows = [...withMcp];
+    vi.setSystemTime(T0 + 60_000);
+    rows = ["4242 1 21:00 node", "7000 4242 03:00 /opt/homebrew/bin/claude", "7001 7000 02:59 npm exec momentic mcp"];
     await probe.refresh();
     frames.length = 0;
     i.projection.reaffirmRuntimeStates();
@@ -7864,6 +7877,7 @@ describe("SessionRuntime edge coverage", () => {
 
     probe.stop();
     await sm.shutdown();
+    vi.useRealTimers();
   });
 
   it("never asserts background work for a session whose only child is its MCP server", async () => {
@@ -7877,9 +7891,11 @@ describe("SessionRuntime edge coverage", () => {
       daemonPid: 4242,
       intervalMs: 1_000_000,
       runProcessSnapshot: async () =>
-        ["4242 1 node", "7000 4242 /opt/homebrew/bin/claude", "7001 7000 npm exec momentic mcp --config /x.yaml"].join(
-          "\n",
-        ),
+        [
+          "4242 1 20:00 node",
+          "7000 4242 02:00 /opt/homebrew/bin/claude",
+          "7001 7000 01:59 npm exec momentic mcp --config /x.yaml",
+        ].join("\n"),
       runEnvForPid: async () => `FIRST_TREE_CHAT_ID=${chatId} /opt/homebrew/bin/claude`,
     });
     await probe.refresh();
@@ -7907,7 +7923,7 @@ describe("SessionRuntime edge coverage", () => {
     const subprocessProbe: SubprocessProbe = {
       hasLiveSubprocess: vi.fn(() => true),
       hasSessionSpawnedSubprocess: vi.fn(() => true),
-      sealBaseline: vi.fn(),
+      noteTurnBoundary: vi.fn(),
       stop: vi.fn(),
     };
     const sm = makeRuntime({ subprocessProbe, onSessionRuntimeChange });
@@ -7931,7 +7947,7 @@ describe("SessionRuntime edge coverage", () => {
     const subprocessProbe: SubprocessProbe = {
       hasLiveSubprocess: vi.fn((chatId: string) => chatId === "chat-live-subprocess"),
       hasSessionSpawnedSubprocess: vi.fn(() => false),
-      sealBaseline: vi.fn(),
+      noteTurnBoundary: vi.fn(),
       stop: vi.fn(),
     };
     const sm = makeRuntime({ maxSessions: 1, subprocessProbe });

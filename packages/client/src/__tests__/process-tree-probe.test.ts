@@ -1,40 +1,53 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildChildrenIndex,
   extractChatId,
   findProviderPids,
   hasDescendant,
   PsSubprocessProbe,
+  parseElapsedSeconds,
   parseProcessRows,
 } from "../runtime/process-tree-probe.js";
 import { silentLogger } from "./_logger-helpers.js";
 
 describe("process-tree-probe pure helpers", () => {
-  it("parses ps pid/ppid/comm rows and skips unparseable lines", () => {
-    const out = ["  100   55 /opt/homebrew/bin/claude", " 101  100 /bin/zsh", "garbage", "", "102 101 sleep"].join(
-      "\n",
-    );
+  it("parses ps pid/ppid/etime/comm rows and skips unparseable lines", () => {
+    const out = [
+      "  100   55 01:02:03 /opt/homebrew/bin/claude",
+      " 101  100    04:05 /bin/zsh",
+      "garbage",
+      "",
+      "102 101 2-03:04:05 sleep",
+      "103 101 not-a-time sleep",
+    ].join("\n");
     expect(parseProcessRows(out)).toEqual([
-      { pid: 100, ppid: 55, comm: "/opt/homebrew/bin/claude" },
-      { pid: 101, ppid: 100, comm: "/bin/zsh" },
-      { pid: 102, ppid: 101, comm: "sleep" },
+      { pid: 100, ppid: 55, elapsedSec: 3723, comm: "/opt/homebrew/bin/claude" },
+      { pid: 101, ppid: 100, elapsedSec: 245, comm: "/bin/zsh" },
+      { pid: 102, ppid: 101, elapsedSec: 183_845, comm: "sleep" },
     ]);
+  });
+
+  it("rejects an elapsed field that is not an elapsed time", () => {
+    expect(parseElapsedSeconds("04:05")).toBe(245);
+    expect(parseElapsedSeconds("2-03:04:05")).toBe(183_845);
+    expect(parseElapsedSeconds("/bin/zsh")).toBeNull();
+    expect(parseElapsedSeconds("")).toBeNull();
   });
 
   it("finds claude providers that are direct children of the daemon (macOS path + linux basename)", () => {
     const rows = [
-      { pid: 100, ppid: 55, comm: "/opt/homebrew/bin/claude" },
-      { pid: 200, ppid: 55, comm: "claude" },
-      { pid: 300, ppid: 55, comm: "/usr/bin/codex" },
-      { pid: 400, ppid: 99, comm: "claude" }, // not a direct child of the daemon
+      { pid: 100, ppid: 55, elapsedSec: 10, comm: "/opt/homebrew/bin/claude" },
+      { pid: 200, ppid: 55, elapsedSec: 10, comm: "claude" },
+      { pid: 300, ppid: 55, elapsedSec: 10, comm: "/usr/bin/codex" },
+      { pid: 400, ppid: 99, elapsedSec: 10, comm: "claude" }, // not a direct child of the daemon
     ];
     expect(findProviderPids(rows, 55).sort((a, b) => a - b)).toEqual([100, 200]);
   });
 
   it("detects a live descendant via a direct child, and its absence", () => {
     const idx = buildChildrenIndex([
-      { pid: 101, ppid: 100, comm: "/bin/zsh" },
-      { pid: 102, ppid: 101, comm: "sleep" },
+      { pid: 101, ppid: 100, elapsedSec: 5, comm: "/bin/zsh" },
+      { pid: 102, ppid: 101, elapsedSec: 5, comm: "sleep" },
     ]);
     expect(hasDescendant(100, idx)).toBe(true);
     expect(hasDescendant(999, idx)).toBe(false);
@@ -55,30 +68,45 @@ describe("process-tree-probe pure helpers", () => {
   });
 });
 
-/** `sealBaseline` captures its snapshot fire-and-forget; drain that microtask. */
-async function flushBoundaryCapture(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 0));
-}
-
 describe("PsSubprocessProbe", () => {
   const daemonPid = 55;
-  // chat-A provider (100) has a live watcher; chat-B provider (200) has none.
-  const snapshot = [
-    `100  ${daemonPid} /opt/homebrew/bin/claude`,
-    "101  100 /bin/zsh",
-    "102  101 sleep",
-    `200  ${daemonPid} /opt/homebrew/bin/claude`,
-  ].join("\n");
-  const envForPid = async (pid: number): Promise<string> =>
-    pid === 100 ? "FIRST_TREE_CHAT_ID=chat-A /bin/claude" : "FIRST_TREE_CHAT_ID=chat-B /bin/claude";
+  const T0 = new Date("2026-09-02T00:00:00Z").getTime();
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /**
+   * A `pid ppid etime comm` row. `ageSec` is the process's age at the moment of
+   * the scan — the datum the probe classifies on, so every case here states it
+   * explicitly rather than letting wall-clock timing decide.
+   */
+  const proc = (pid: number, ppid: number, ageSec: number, comm: string): string =>
+    `${pid} ${ppid} ${Math.floor(ageSec / 60)}:${String(ageSec % 60).padStart(2, "0")} ${comm}`;
+
+  function probeOver(rows: () => string[], chatId: string): PsSubprocessProbe {
+    return new PsSubprocessProbe({
+      log: silentLogger(),
+      daemonPid,
+      intervalMs: 1_000_000,
+      runProcessSnapshot: async () => rows().join("\n"),
+      runEnvForPid: async () => `FIRST_TREE_CHAT_ID=${chatId} /bin/claude`,
+    });
+  }
 
   it("marks only providers that currently have a live descendant", async () => {
+    const rows = [
+      proc(100, daemonPid, 60, "/opt/homebrew/bin/claude"),
+      proc(101, 100, 50, "/bin/zsh"),
+      proc(200, daemonPid, 60, "/opt/homebrew/bin/claude"),
+    ];
     const probe = new PsSubprocessProbe({
       log: silentLogger(),
       daemonPid,
       intervalMs: 1_000_000,
-      runProcessSnapshot: async () => snapshot,
-      runEnvForPid: envForPid,
+      runProcessSnapshot: async () => rows.join("\n"),
+      runEnvForPid: async (pid) =>
+        pid === 100 ? "FIRST_TREE_CHAT_ID=chat-A /bin/claude" : "FIRST_TREE_CHAT_ID=chat-B /bin/claude",
     });
     await probe.refresh();
     expect(probe.hasLiveSubprocess("chat-A")).toBe(true);
@@ -87,171 +115,180 @@ describe("PsSubprocessProbe", () => {
     probe.stop();
   });
 
-  it("attributes providers from NUL-separated env (Linux /proc form)", async () => {
-    const probe = new PsSubprocessProbe({
-      log: silentLogger(),
-      daemonPid,
-      intervalMs: 1_000_000,
-      runProcessSnapshot: async () => snapshot,
-      runEnvForPid: async (pid) =>
-        ["FIRST_TREE_HOME=/x", `FIRST_TREE_CHAT_ID=${pid === 100 ? "chat-A" : "chat-B"}`, ""].join("\0"),
-    });
-    await probe.refresh();
-    expect(probe.hasLiveSubprocess("chat-A")).toBe(true);
-    expect(probe.hasLiveSubprocess("chat-B")).toBe(false);
-    probe.stop();
-  });
-
   it("does not call a long-lived stdio MCP server session-spawned work", async () => {
-    // The shape that made this distinction necessary: on a host running
-    // MCP-configured agents, EVERY provider has a permanent `npm exec … mcp`
-    // child. Reading that as "background task" would put the qualifier on
-    // every idle chat on the machine — the opposite of what it is for.
-    const mcpOnly = [`300  ${daemonPid} /opt/homebrew/bin/claude`, "301  300 npm exec momentic mcp --config /x.yaml"];
-    let rows = [...mcpOnly];
-    const probe = new PsSubprocessProbe({
-      log: silentLogger(),
-      daemonPid,
-      intervalMs: 1_000_000,
-      runProcessSnapshot: async () => rows.join("\n"),
-      runEnvForPid: async () => "FIRST_TREE_CHAT_ID=chat-mcp /bin/claude",
-    });
+    // Every provider on an MCP-configured host has a permanent `npm exec … mcp`
+    // child. Reading that as "background task" would put the qualifier on every
+    // idle chat on the machine — the opposite of what it is for.
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    const chatId = "chat-mcp";
+    let rows = [proc(300, daemonPid, 120, "/opt/homebrew/bin/claude"), proc(301, 300, 119, "npm exec momentic mcp")];
+    const probe = probeOver(() => rows, chatId);
 
     await probe.refresh();
-    // Broad predicate still true — the eviction deferral it feeds is meant to
-    // be conservative — but nothing this session started is running.
-    expect(probe.hasLiveSubprocess("chat-mcp")).toBe(true);
-    expect(probe.hasSessionSpawnedSubprocess("chat-mcp")).toBe(false);
-
-    // A turn begins: the boundary snapshot records the MCP child as infrastructure.
-    probe.sealBaseline("chat-mcp");
-    await flushBoundaryCapture();
-
-    // That turn launches a background watcher.
-    rows = [...mcpOnly, "302  300 /bin/zsh", "303  302 sleep"];
-    await probe.refresh();
-    expect(probe.hasSessionSpawnedSubprocess("chat-mcp")).toBe(true);
-
-    // It finishes; the permanent MCP child alone must not keep the claim alive.
-    rows = [...mcpOnly];
-    await probe.refresh();
-    expect(probe.hasSessionSpawnedSubprocess("chat-mcp")).toBe(false);
-    probe.stop();
-  });
-
-  it("takes the baseline at the turn boundary, whenever the MCP child happened to start", async () => {
-    // The interleaving that defeats any scan-order rule: a scan lands while the
-    // provider is still alone, THEN its MCP server starts, and only then does a
-    // turn begin. "Observed before the turn" is true of that first scan and
-    // tells you nothing, because what it observed was incomplete.
-    const chatId = "chat-mcp-after-scan";
-    let rows = [`900  ${daemonPid} /opt/homebrew/bin/claude`];
-    const probe = new PsSubprocessProbe({
-      log: silentLogger(),
-      daemonPid,
-      intervalMs: 1_000_000,
-      runProcessSnapshot: async () => rows.join("\n"),
-      runEnvForPid: async () => `FIRST_TREE_CHAT_ID=${chatId} /bin/claude`,
-    });
-
-    await probe.refresh(); // provider seen alone
-    rows = [`900  ${daemonPid} /opt/homebrew/bin/claude`, "901  900 npm exec momentic mcp"]; // MCP starts after
-    probe.sealBaseline(chatId); // …and only now does the first turn begin
-    await flushBoundaryCapture();
-
-    await probe.refresh();
+    expect(probe.hasLiveSubprocess(chatId)).toBe(true);
     expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(false);
 
-    // The boundary still lets real work through afterwards.
-    rows = [...rows, "902  900 /bin/zsh"];
+    probe.noteTurnBoundary(chatId); // a turn begins at T0
+    vi.setSystemTime(T0 + 30_000); // the next scan is 30s later
+    rows = [
+      proc(300, daemonPid, 150, "/opt/homebrew/bin/claude"),
+      proc(301, 300, 149, "npm exec momentic mcp"),
+      proc(302, 300, 20, "/bin/zsh"), // the watcher the turn launched
+      proc(303, 302, 20, "sleep"),
+    ];
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(true);
+
+    // The watcher exits; the permanent MCP child must not keep the claim alive.
+    vi.setSystemTime(T0 + 60_000);
+    rows = [proc(300, daemonPid, 180, "/opt/homebrew/bin/claude"), proc(301, 300, 179, "npm exec momentic mcp")];
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(false);
+    probe.stop();
+  });
+
+  it("classifies by process age, not by when the scan happens to run", async () => {
+    // The interleaving that defeats every observation-order rule: a scan lands
+    // while the provider is still alone, its MCP child starts afterwards, and
+    // only then does the first turn begin. Ages settle it whatever the scans did.
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    const chatId = "chat-late-mcp";
+    let rows = [proc(900, daemonPid, 2, "/opt/homebrew/bin/claude")];
+    const probe = probeOver(() => rows, chatId);
+
+    await probe.refresh(); // provider observed alone — an incomplete picture
+    vi.setSystemTime(T0 + 5_000);
+    rows = [proc(900, daemonPid, 7, "/opt/homebrew/bin/claude"), proc(901, 900, 4, "npm exec momentic mcp")];
+    probe.noteTurnBoundary(chatId); // MCP is up by the time the turn begins
+    vi.setSystemTime(T0 + 40_000);
+    rows = [proc(900, daemonPid, 42, "/opt/homebrew/bin/claude"), proc(901, 900, 39, "npm exec momentic mcp")];
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(false);
+    probe.stop();
+  });
+
+  it("reports a watcher even when the scan proving it runs long afterwards", async () => {
+    // Nothing about the boundary is captured asynchronously, so a scan that
+    // completes well after the work began still classifies it correctly — the
+    // false negative a fire-and-forget snapshot had.
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    const chatId = "chat-late-scan";
+    let rows = [proc(950, daemonPid, 120, "/opt/homebrew/bin/claude"), proc(951, 950, 119, "npm exec momentic mcp")];
+    const probe = probeOver(() => rows, chatId);
+    await probe.refresh();
+    probe.noteTurnBoundary(chatId);
+
+    vi.setSystemTime(T0 + 120_000); // two minutes of no scans at all
+    rows = [
+      proc(950, daemonPid, 240, "/opt/homebrew/bin/claude"),
+      proc(951, 950, 239, "npm exec momentic mcp"),
+      proc(952, 950, 118, "/bin/zsh"), // started right after the boundary
+    ];
     await probe.refresh();
     expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(true);
     probe.stop();
   });
 
   it("keeps reporting a background task that survives into a later turn", async () => {
-    // The boundary is taken once per provider. Re-taking it at every turn would
-    // absorb a task that outlived the previous turn and silence it — the exact
-    // case this feature exists to report.
+    // The provider keeps its first boundary, so a task that outlived turn 1 is
+    // not reclassified as infrastructure when turn 2 opens.
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
     const chatId = "chat-survives";
-    let rows = [`700  ${daemonPid} /opt/homebrew/bin/claude`, "701  700 npm exec momentic mcp"];
-    const probe = new PsSubprocessProbe({
-      log: silentLogger(),
-      daemonPid,
-      intervalMs: 1_000_000,
-      runProcessSnapshot: async () => rows.join("\n"),
-      runEnvForPid: async () => `FIRST_TREE_CHAT_ID=${chatId} /bin/claude`,
-    });
+    let rows = [proc(700, daemonPid, 120, "/opt/homebrew/bin/claude"), proc(701, 700, 119, "npm exec momentic mcp")];
+    const probe = probeOver(() => rows, chatId);
     await probe.refresh();
-    probe.sealBaseline(chatId);
-    await flushBoundaryCapture();
+    probe.noteTurnBoundary(chatId);
 
-    // Turn 1 launches a watcher that outlives it.
-    rows = [...rows, "702  700 /bin/zsh"];
+    vi.setSystemTime(T0 + 30_000);
+    rows = [
+      proc(700, daemonPid, 150, "/opt/homebrew/bin/claude"),
+      proc(701, 700, 149, "npm exec momentic mcp"),
+      proc(702, 700, 20, "/bin/zsh"),
+    ];
     await probe.refresh();
     expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(true);
 
-    // Turn 2 starts with that watcher still running: it must stay reported.
-    probe.sealBaseline(chatId);
-    await flushBoundaryCapture();
+    vi.setSystemTime(T0 + 90_000);
+    probe.noteTurnBoundary(chatId); // turn 2, with the watcher still running
+    rows = [
+      proc(700, daemonPid, 210, "/opt/homebrew/bin/claude"),
+      proc(701, 700, 209, "npm exec momentic mcp"),
+      proc(702, 700, 80, "/bin/zsh"),
+    ];
     await probe.refresh();
     expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(true);
     probe.stop();
   });
 
   it("claims nothing for a provider that has not reached a turn boundary", async () => {
-    // A replacement provider between turns has no boundary yet. Silence until
-    // its next turn, rather than guessing which of its children are its own.
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
     const chatId = "chat-no-boundary-yet";
-    const probe = new PsSubprocessProbe({
-      log: silentLogger(),
-      daemonPid,
-      intervalMs: 1_000_000,
-      runProcessSnapshot: async () =>
-        [`800  ${daemonPid} /opt/homebrew/bin/claude`, "801  800 npm exec momentic mcp", "802  800 /bin/zsh"].join(
-          "\n",
-        ),
-      runEnvForPid: async () => `FIRST_TREE_CHAT_ID=${chatId} /bin/claude`,
-    });
+    const probe = probeOver(
+      () => [
+        proc(800, daemonPid, 60, "/opt/homebrew/bin/claude"),
+        proc(801, 800, 59, "npm exec momentic mcp"),
+        proc(802, 800, 5, "/bin/zsh"),
+      ],
+      chatId,
+    );
     await probe.refresh();
     expect(probe.hasLiveSubprocess(chatId)).toBe(true);
     expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(false);
     probe.stop();
   });
 
-  it("gives a seamless replacement provider its own boundary at the next turn", async () => {
-    // The chat never loses a live provider across a restart, so a chat-level
-    // seal would never re-arm. Baselines are per pid and taken at a boundary,
-    // so the replacement gets its own — including when it is seen before its
-    // MCP child exists.
-    const chatId = "chat-seamless-replace";
-    let rows = [`1000 ${daemonPid} /opt/homebrew/bin/claude`, "1001 1000 npm exec momentic mcp"];
+  it("gives a replacement provider its own boundary, with no scan in between", async () => {
+    // The chat keeps a live provider across the swap, so a chat-level seal
+    // would never re-arm. A boundary older than the process cannot belong to
+    // it, so the replacement waits for its own turn.
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    const chatId = "chat-replace";
+    let rows = [proc(1000, daemonPid, 300, "/opt/homebrew/bin/claude"), proc(1001, 1000, 299, "npm exec momentic mcp")];
+    const probe = probeOver(() => rows, chatId);
+    await probe.refresh();
+    probe.noteTurnBoundary(chatId);
+    vi.setSystemTime(T0 + 30_000);
+    rows = [proc(1000, daemonPid, 330, "/opt/homebrew/bin/claude"), proc(1001, 1000, 329, "npm exec momentic mcp")];
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(false);
+
+    // Replaced with no scan in between: the new pid is younger than the old
+    // boundary, so it does not adopt it and claims nothing yet.
+    vi.setSystemTime(T0 + 60_000);
+    rows = [proc(1100, daemonPid, 2, "/opt/homebrew/bin/claude"), proc(1101, 1100, 1, "npm exec momentic mcp")];
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(false);
+
+    // Its own first turn, then a watcher it launches.
+    probe.noteTurnBoundary(chatId);
+    vi.setSystemTime(T0 + 120_000);
+    rows = [
+      proc(1100, daemonPid, 62, "/opt/homebrew/bin/claude"),
+      proc(1101, 1100, 61, "npm exec momentic mcp"),
+      proc(1102, 1100, 30, "/bin/zsh"),
+    ];
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(true);
+    probe.stop();
+  });
+
+  it("attributes providers from NUL-separated env (Linux /proc form)", async () => {
     const probe = new PsSubprocessProbe({
       log: silentLogger(),
       daemonPid,
       intervalMs: 1_000_000,
-      runProcessSnapshot: async () => rows.join("\n"),
-      runEnvForPid: async () => `FIRST_TREE_CHAT_ID=${chatId} /bin/claude`,
+      runProcessSnapshot: async () =>
+        [proc(100, daemonPid, 60, "/opt/homebrew/bin/claude"), proc(101, 100, 50, "/bin/zsh")].join("\n"),
+      runEnvForPid: async () => ["FIRST_TREE_HOME=/x", "FIRST_TREE_CHAT_ID=chat-A", ""].join("\0"),
     });
     await probe.refresh();
-    probe.sealBaseline(chatId);
-    await flushBoundaryCapture();
-    await probe.refresh();
-    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(false);
-
-    // Replaced between scans, observed before its MCP child.
-    rows = [`1100 ${daemonPid} /opt/homebrew/bin/claude`];
-    await probe.refresh();
-    rows = [`1100 ${daemonPid} /opt/homebrew/bin/claude`, "1101 1100 npm exec momentic mcp"];
-    probe.sealBaseline(chatId); // the next turn on the new provider
-    await flushBoundaryCapture();
-
-    await probe.refresh();
-    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(false);
-
-    rows = [...rows, "1102 1100 /bin/zsh"];
-    await probe.refresh();
-    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(true);
+    expect(probe.hasLiveSubprocess("chat-A")).toBe(true);
     probe.stop();
   });
 
@@ -263,7 +300,7 @@ describe("PsSubprocessProbe", () => {
       runProcessSnapshot: async () => {
         throw new Error("ps unavailable");
       },
-      runEnvForPid: envForPid,
+      runEnvForPid: async () => "FIRST_TREE_CHAT_ID=chat-A /bin/claude",
     });
     await probe.refresh();
     expect(probe.hasLiveSubprocess("chat-A")).toBe(false);

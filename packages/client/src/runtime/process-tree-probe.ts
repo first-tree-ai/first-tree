@@ -37,36 +37,59 @@ export interface SubprocessProbe {
    */
   hasSessionSpawnedSubprocess(chatId: string): boolean;
   /**
-   * A turn has begun for `chatId`, so whatever the provider is running now is
-   * its startup infrastructure and nothing more. Until this is called, the
-   * probe keeps absorbing newly observed children into that provider's
-   * baseline; after it, new children are session-spawned work.
+   * A turn has begun for `chatId`. Records the instant, nothing more.
    *
-   * The seal needs a lifecycle point rather than a scan count: the poll starts
-   * before any provider exists, so a scan can catch a `claude` process in the
-   * window before its stdio MCP server appears. Freezing on first sight would
-   * baseline nothing, and the MCP child arriving one scan later would read as
-   * background work for the rest of that provider's life — the exact false
-   * claim the baseline exists to prevent.
+   * The instant is the whole mechanism: a child that started before its
+   * provider's first turn is startup infrastructure (a stdio MCP server), and
+   * one that started after it is work the session launched. Both facts are
+   * read from each process's own age, so this call does no I/O and the answer
+   * does not depend on when a scan happens to run, how many scans have run, or
+   * whether one is in flight — the failure modes of every version of this that
+   * inferred the boundary from observation order.
    */
-  sealBaseline(chatId: string): void;
+  noteTurnBoundary(chatId: string): void;
   /** Stop the background refresh loop (called on SessionRuntime shutdown). */
   stop(): void;
 }
 
-export type ProcessRow = { pid: number; ppid: number; comm: string };
+export type ProcessRow = { pid: number; ppid: number; elapsedSec: number; comm: string };
 
-/** Parse `ps -axo pid=,ppid=,comm=` output into rows. Unparseable lines are skipped. */
+/**
+ * Parse `[[dd-]hh:]mm:ss` elapsed time into seconds. Returns null when the
+ * field is not an elapsed time, which is how a row from an older column layout
+ * is rejected rather than silently misread as a pid.
+ */
+export function parseElapsedSeconds(field: string): number | null {
+  const match = field.match(/^(?:(\d+)-)?(?:(\d+):)?(\d{1,2}):(\d{2})$/);
+  if (!match) return null;
+  const [, days, hours, minutes, seconds] = match;
+  return Number(days ?? 0) * 86_400 + Number(hours ?? 0) * 3_600 + Number(minutes ?? 0) * 60 + Number(seconds ?? 0);
+}
+
+/** Parse `ps -axo pid=,ppid=,etime=,comm=` output into rows. Unparseable lines are skipped. */
 export function parseProcessRows(output: string): ProcessRow[] {
   const rows: ProcessRow[] = [];
   for (const line of output.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    const match = trimmed.match(/^(\d+)\s+(\d+)\s+(.*)$/);
+    const match = trimmed.match(/^(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/);
     if (!match) continue;
-    rows.push({ pid: Number(match[1]), ppid: Number(match[2]), comm: match[3] ?? "" });
+    const elapsedSec = parseElapsedSeconds(match[3] ?? "");
+    if (elapsedSec === null) continue;
+    rows.push({ pid: Number(match[1]), ppid: Number(match[2]), elapsedSec, comm: match[4] ?? "" });
   }
   return rows;
+}
+
+/**
+ * The earliest instant a process with this elapsed time could have started.
+ * `etime` has one-second resolution, so a whole extra second is subtracted:
+ * every comparison then asks "did this definitely start after the boundary",
+ * and a child too close to call reads as infrastructure — silence rather than
+ * a false claim, the same bias as everywhere else in this signal.
+ */
+function earliestStartMs(row: ProcessRow, nowMs: number): number {
+  return nowMs - (row.elapsedSec + 1) * 1_000;
 }
 
 /** Build a parent-pid -> child-pids adjacency index. */
@@ -102,27 +125,29 @@ export function hasDescendant(pid: number, childrenByParent: ReadonlyMap<number,
 }
 
 /**
- * True if `pid` has a direct child outside `baseline` — the children this
- * provider was running before its first turn.
+ * True if `pid` has a direct child that definitely started after `boundaryMs` —
+ * the instant its provider's first turn began.
  *
- * The baseline is what a provider starts a session with and keeps: stdio MCP
- * servers, most visibly. Work the session itself launches appears as a pid the
- * baseline has never seen, which is exactly the distinction the plain
- * descendant check cannot draw.
- *
- * Both error directions are deliberate. A provider whose baseline seals mid-turn
- * absorbs that turn's children and under-reports until they exit — silence
- * rather than a false claim. An MCP server that crashes and respawns after the
- * seal takes a new pid and over-reports for the rest of that provider process;
- * that is a rare, self-limiting case, unlike the permanent misreading it
- * replaces.
+ * This is the distinction the plain descendant check cannot draw. A stdio MCP
+ * server starts with the provider, so it predates that boundary for the whole
+ * session; a task the session launches starts after it. Reading each child's
+ * own age makes the answer independent of when the process scan runs, which is
+ * what every earlier version of this got wrong: they inferred the boundary
+ * from the order of observations, and an observation that lands in a startup
+ * gap, or a snapshot that completes after the work has begun, tells you
+ * nothing about what came first.
  */
-export function hasNonBaselineChild(
+export function hasChildStartedAfter(
   pid: number,
   childrenByParent: ReadonlyMap<number, number[]>,
-  baseline: ReadonlySet<number>,
+  rowsByPid: ReadonlyMap<number, ProcessRow>,
+  boundaryMs: number,
+  nowMs: number,
 ): boolean {
-  return (childrenByParent.get(pid) ?? []).some((childPid) => !baseline.has(childPid));
+  return (childrenByParent.get(pid) ?? []).some((childPid) => {
+    const row = rowsByPid.get(childPid);
+    return row !== undefined && earliestStartMs(row, nowMs) > boundaryMs;
+  });
 }
 
 /**
@@ -172,17 +197,19 @@ async function defaultEnvForPid(pid: number): Promise<string> {
  * synchronous `hasLiveSubprocess` lookup used inside `evictIdle` never blocks on
  * a process scan.
  */
+
 export class PsSubprocessProbe implements SubprocessProbe {
   private chatIdsWithLiveWork = new Set<string>();
   private chatIdsWithSessionSpawnedWork = new Set<string>();
+  /** Most recent turn-start instant per chat. Written synchronously, no I/O. */
+  private readonly turnBoundaryMsByChat = new Map<string, number>();
   /**
-   * Per provider pid: the children it was running at its first turn boundary.
-   * Written once, from a snapshot taken at that instant, and never revised —
-   * so a later turn cannot absorb a watcher an earlier turn left running.
+   * Per provider pid: the instant its first turn began. Assigned once — from a
+   * chat boundary that is not older than the provider itself — and never
+   * revised, so a later turn cannot reclassify a task an earlier turn left
+   * running. A pid with no boundary claims nothing.
    */
-  private readonly baselineChildrenByProvider = new Map<number, Set<number>>();
-  /** Last known provider pid -> chat, so a boundary capture can skip a scan. */
-  private readonly chatIdByProviderPid = new Map<number, string>();
+  private readonly boundaryMsByProviderPid = new Map<number, number>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private inflight: Promise<void> | null = null;
   private readonly daemonPid: number;
@@ -207,54 +234,8 @@ export class PsSubprocessProbe implements SubprocessProbe {
     return this.chatIdsWithSessionSpawnedWork.has(chatId);
   }
 
-  sealBaseline(chatId: string): void {
-    // Skip the scan when every provider known for this chat already has its
-    // boundary, so the extra `ps` costs one turn per session, not every turn.
-    let known = false;
-    for (const [pid, mapped] of this.chatIdByProviderPid) {
-      if (mapped !== chatId) continue;
-      known = true;
-      if (!this.baselineChildrenByProvider.has(pid)) break;
-    }
-    const allBaselined =
-      known &&
-      [...this.chatIdByProviderPid].every(
-        ([pid, mapped]) => mapped !== chatId || this.baselineChildrenByProvider.has(pid),
-      );
-    if (allBaselined) return;
-    void this.captureBaselineAtBoundary(chatId);
-  }
-
-  /**
-   * Record what this chat's provider is running *right now*, at a turn
-   * boundary, for any provider pid that does not have a baseline yet.
-   *
-   * The snapshot is the whole point. Deriving the boundary from scan order
-   * cannot work: a periodic scan lands wherever it lands, so "the provider was
-   * observed before the turn" is true even for a scan that ran before the
-   * provider's MCP server existed, and any grace window bought against that
-   * has the mirror defect of absorbing a watcher that is already running. A
-   * turn boundary is a real instant — the provider is initialized, so its
-   * infrastructure is up, and the turn has not yet launched anything.
-   *
-   * A pid with no baseline claims nothing until its next turn boundary, which
-   * is the safe direction for a provider that appears between turns.
-   */
-  private async captureBaselineAtBoundary(chatId: string): Promise<void> {
-    try {
-      const rows = parseProcessRows(await this.runProcessSnapshot());
-      const childrenByParent = buildChildrenIndex(rows);
-      for (const providerPid of findProviderPids(rows, this.daemonPid)) {
-        if (this.baselineChildrenByProvider.has(providerPid)) continue;
-        const owner = extractChatId(await this.runEnvForPid(providerPid));
-        if (owner !== chatId) continue;
-        this.chatIdByProviderPid.set(providerPid, owner);
-        this.baselineChildrenByProvider.set(providerPid, new Set(childrenByParent.get(providerPid) ?? []));
-      }
-    } catch (err) {
-      // No baseline means no claim, so a failed capture degrades to silence.
-      this.opts.log.debug({ err }, "subprocess probe boundary capture failed; leaving this provider unbaselined");
-    }
+  noteTurnBoundary(chatId: string): void {
+    this.turnBoundaryMsByChat.set(chatId, Date.now());
   }
 
   stop(): void {
@@ -279,8 +260,10 @@ export class PsSubprocessProbe implements SubprocessProbe {
 
   private async doRefresh(): Promise<void> {
     try {
+      const now = Date.now();
       const rows = parseProcessRows(await this.runProcessSnapshot());
       const childrenByParent = buildChildrenIndex(rows);
+      const rowsByPid = new Map(rows.map((row) => [row.pid, row]));
       const next = new Set<string>();
       const nextSessionSpawned = new Set<string>();
       const chatsWithLiveProvider = new Set<string>();
@@ -290,13 +273,24 @@ export class PsSubprocessProbe implements SubprocessProbe {
         // exists: baseline growth has to happen during provider startup, which
         // is exactly the window where there may be no children yet.
         const chatId = extractChatId(await this.runEnvForPid(providerPid));
-        const baseline = this.baselineChildrenByProvider.get(providerPid);
+        const providerRow = rowsByPid.get(providerPid);
+        let boundaryMs = this.boundaryMsByProviderPid.get(providerPid);
+        if (boundaryMs === undefined && chatId && providerRow) {
+          const chatBoundary = this.turnBoundaryMsByChat.get(chatId);
+          // Only a turn that began at or after this provider started belongs to
+          // it. A replacement provider therefore ignores the boundary of the
+          // process it replaced and waits for its own first turn.
+          if (chatBoundary !== undefined && chatBoundary >= earliestStartMs(providerRow, now)) {
+            boundaryMs = chatBoundary;
+            this.boundaryMsByProviderPid.set(providerPid, chatBoundary);
+          }
+        }
         const live = hasDescendant(providerPid, childrenByParent);
-        // No boundary captured yet — this provider has not reached a turn since
-        // it appeared, so nothing here is known to be work.
-        const sessionSpawned = baseline !== undefined && hasNonBaselineChild(providerPid, childrenByParent, baseline);
+        // No boundary yet — this provider has not reached a turn since it
+        // appeared, so nothing under it is known to be work.
+        const sessionSpawned =
+          boundaryMs !== undefined && hasChildStartedAfter(providerPid, childrenByParent, rowsByPid, boundaryMs, now);
         if (!chatId) continue;
-        this.chatIdByProviderPid.set(providerPid, chatId);
         chatsWithLiveProvider.add(chatId);
         if (live) next.add(chatId);
         if (sessionSpawned) nextSessionSpawned.add(chatId);
@@ -304,11 +298,8 @@ export class PsSubprocessProbe implements SubprocessProbe {
       // Drop baselines for providers that are gone, so a recycled pid cannot
       // inherit a previous provider's session infrastructure.
       const alive = new Set(providerPids);
-      for (const pid of this.baselineChildrenByProvider.keys()) {
-        if (!alive.has(pid)) this.baselineChildrenByProvider.delete(pid);
-      }
-      for (const pid of this.chatIdByProviderPid.keys()) {
-        if (!alive.has(pid)) this.chatIdByProviderPid.delete(pid);
+      for (const pid of this.boundaryMsByProviderPid.keys()) {
+        if (!alive.has(pid)) this.boundaryMsByProviderPid.delete(pid);
       }
       this.chatIdsWithLiveWork = next;
       this.chatIdsWithSessionSpawnedWork = nextSessionSpawned;

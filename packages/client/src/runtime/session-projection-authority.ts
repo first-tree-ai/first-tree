@@ -63,9 +63,9 @@ export type SessionProjectionAuthorityDeps = {
    */
   hasReportableBackgroundWork: (chatId: string) => boolean;
   /**
-   * A turn opened for this chat. The subprocess probe uses it to close the
-   * provider's startup-infrastructure baseline: whatever is running when the
-   * first turn begins is infrastructure, and anything later is work.
+   * A turn opened for this chat. The subprocess probe records the instant, and
+   * later reads each provider child's own age against it: what predates the
+   * first turn is startup infrastructure, what started after it is work.
    */
   onProviderTurnStarted: (chatId: string) => void;
   onRuntimeStateChange: () => ((state: RuntimeState) => void) | undefined;

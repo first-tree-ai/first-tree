@@ -3316,7 +3316,7 @@ describe("SessionRuntime subprocess-aware suspend/eviction", () => {
       const probe: SubprocessProbe = {
         hasLiveSubprocess: hasLive,
         hasSessionSpawnedSubprocess: vi.fn(() => false),
-        sealBaseline: vi.fn(),
+        noteTurnBoundary: vi.fn(),
         stop: vi.fn(),
       };
       const sm = createSessionRuntime({
@@ -3357,7 +3357,7 @@ describe("SessionRuntime subprocess-aware suspend/eviction", () => {
       const probe: SubprocessProbe = {
         hasLiveSubprocess: vi.fn().mockReturnValue(true),
         hasSessionSpawnedSubprocess: vi.fn(() => false),
-        sealBaseline: vi.fn(),
+        noteTurnBoundary: vi.fn(),
         stop: vi.fn(),
       };
       const sm = createSessionRuntime({
@@ -3399,7 +3399,7 @@ describe("SessionRuntime subprocess-aware suspend/eviction", () => {
     const probe: SubprocessProbe = {
       hasLiveSubprocess: vi.fn((chatId: string) => chatId === "chat-1"),
       hasSessionSpawnedSubprocess: vi.fn(() => false),
-      sealBaseline: vi.fn(),
+      noteTurnBoundary: vi.fn(),
       stop: vi.fn(),
     };
     const sm = createSessionRuntime({ handlerFactory: factory, concurrency: 2, subprocessProbe: probe });
