@@ -57,6 +57,12 @@ import {
 } from "./binary.js";
 import { type OpenCodeStreamEvent, OpenCodeStreamParser, type OpenCodeUsage } from "./parser.js";
 import { acquireOpenCodePrivateConfigLease, type OpenCodePrivateConfigLease } from "./private-config.js";
+import {
+  describeOpenCodeTurnAbortFailure,
+  inferOpenCodeTurnAbortRecord,
+  type OpenCodeTurnAbortRecord,
+  settlementPolicyForOpenCodeTurnAbort,
+} from "./turn-abort.js";
 
 export const OPENCODE_PENDING_SESSION_PREFIX = "opencode-pending-";
 
@@ -351,6 +357,19 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
   const handlerGenerationId = randomUUID().replaceAll("-", "");
   let privateConfigLease: OpenCodePrivateConfigLease | null = null;
   const queue: QueuedDelivery[] = [];
+  const turnAbortRecords = new Map<number, OpenCodeTurnAbortRecord>();
+
+  function markTurnAborted(turnGeneration: number, record: OpenCodeTurnAbortRecord): void {
+    if (!turnAbortRecords.has(turnGeneration)) {
+      turnAbortRecords.set(turnGeneration, record);
+    }
+  }
+
+  function takeTurnAbortRecord(turnGeneration: number): OpenCodeTurnAbortRecord | null {
+    const record = turnAbortRecords.get(turnGeneration) ?? null;
+    turnAbortRecords.delete(turnGeneration);
+    return record;
+  }
 
   function deliveryAttemptKey(sessionCtx: SessionContext, messages: readonly SessionMessage[]): string {
     const deliveryHead = messages[0];
@@ -474,6 +493,17 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
     label: string;
   }): Promise<ProcessOutcome> {
     return new Promise((resolveOutcome) => {
+      const abortedBeforeSpawn = input.abortSignal.aborted || generation !== input.turnGeneration || !sessionActive;
+      if (abortedBeforeSpawn) {
+        resolveOutcome({
+          exitCode: null,
+          signal: "SIGTERM",
+          stdoutTail: "",
+          stderrTail: "",
+        });
+        return;
+      }
+
       let supervised: ReturnType<ProviderProcessSupervisor["spawn"]>;
       try {
         supervised = processSupervisor.spawn({
@@ -586,6 +616,16 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
       child.stdin?.on("error", () => {
         // EPIPE is classified from close + stderr.
       });
+      // Abort that won during spawn (before this listener) does not replay — close that race.
+      if (input.abortSignal.aborted || generation !== input.turnGeneration || !sessionActive) {
+        terminate();
+        try {
+          child.stdin?.end();
+        } catch {
+          // stdin may already be closed.
+        }
+        return;
+      }
       if (input.prompt !== undefined) child.stdin?.write(input.prompt);
       child.stdin?.end();
     });
@@ -828,6 +868,7 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
 
   async function settleFailure(input: {
     failure: string;
+    classificationError?: string;
     spawnError?: Error;
     state: Pick<TurnState, "sawProviderActivity" | "sawUnsafeTool" | "text">;
     sessionCtx: SessionContext;
@@ -843,6 +884,7 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
         : input.state.sawProviderActivity
           ? "pre_visible"
           : "pre_provider";
+    const classificationError = input.classificationError ?? input.failure;
     const displayMessage = isOpenCodeAuthError(input.failure)
       ? formatAuthHint("opencode", input.failure)
       : input.failure;
@@ -854,9 +896,16 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
     });
     attempt.recordSignal({
       kind: input.spawnError ? "local_error" : "provider_error",
-      error: input.spawnError ?? input.failure,
-      messagePreview: displayMessage,
+      error: input.spawnError ?? new Error(classificationError),
+      messagePreview: classificationError,
     });
+    if (displayMessage !== classificationError) {
+      attempt.recordSignal({
+        kind: "diagnostic",
+        error: new Error(displayMessage),
+        messagePreview: displayMessage,
+      });
+    }
     const attemptNumber = nextProviderAttempt(
       attemptKey,
       () => input.sessionCtx.hasPendingDelivery?.(input.messages) ?? true,
@@ -927,6 +976,11 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
       return false;
     }
     const turnGeneration = ++generation;
+    const previousAbort = currentAbort;
+    if (previousAbort) {
+      markTurnAborted(generation - 1, { cause: "superseded", disposition: "silent" });
+      previousAbort.abort();
+    }
     const abort = new AbortController();
     currentAbort = abort;
     let observedState: TurnState | null = null;
@@ -978,7 +1032,10 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
       };
       observedState = state;
       token.processingStarted(messages);
-      const timeout = setTimeout(() => abort.abort(), turnTimeoutMs);
+      const timeout = setTimeout(() => {
+        markTurnAborted(turnGeneration, { cause: "timeout", disposition: "settle" });
+        abort.abort();
+      }, turnTimeoutMs);
       timeout.unref?.();
       let outcome: ProcessOutcome;
       try {
@@ -1018,9 +1075,28 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
       }
 
       if (abort.signal.aborted || generation !== turnGeneration || !sessionActive) {
+        const record =
+          takeTurnAbortRecord(turnGeneration) ??
+          inferOpenCodeTurnAbortRecord({
+            turnGeneration,
+            currentGeneration: generation,
+            sessionActive,
+            timedOut: false,
+            abortSignal: abort.signal,
+          });
+        if (record.disposition === "silent") {
+          return false;
+        }
+        const failure = describeOpenCodeTurnAbortFailure({
+          cause: record.cause,
+          turnTimeoutMs,
+          state,
+        });
+        const { classificationError } = settlementPolicyForOpenCodeTurnAbort(record.cause);
         return settleFailure({
-          failure: "OpenCode turn aborted or timed out before a safe terminal event",
-          spawnError: new Error("OpenCode turn aborted or timed out"),
+          failure,
+          classificationError,
+          spawnError: new Error(classificationError),
           state,
           sessionCtx,
           messages,
@@ -1149,6 +1225,7 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
         turnGeneration,
       });
     } finally {
+      turnAbortRecords.delete(turnGeneration);
       if (generation === turnGeneration) {
         currentAbort = null;
         currentTurnPromise = null;
@@ -1431,6 +1508,9 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
       const recoveryReason = reason ?? "opencode_suspend_before_terminal";
       sessionActive = false;
       drainCancellationReason = recoveryReason;
+      if (currentAbort) {
+        markTurnAborted(generation, { cause: "lifecycle", disposition: "settle" });
+      }
       generation++;
       currentAbort?.abort();
       unsafeDiscoveryWaitAbort?.abort();
@@ -1448,6 +1528,9 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
       const recoveryReason = reason ?? "opencode_shutdown_before_terminal";
       sessionActive = false;
       drainCancellationReason = recoveryReason;
+      if (currentAbort) {
+        markTurnAborted(generation, { cause: "lifecycle", disposition: "settle" });
+      }
       generation++;
       currentAbort?.abort();
       unsafeDiscoveryWaitAbort?.abort();
