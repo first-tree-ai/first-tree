@@ -5,6 +5,7 @@ import {
   type RuntimeProvider,
 } from "@first-tree/shared";
 import { probeAmpCapability } from "./amp/capability.js";
+import { probeAntigravityCapability } from "./antigravity/capability.js";
 import { probeClaudeCodeCapability } from "./claude/capability.js";
 import { probeClaudeCodeTuiCapability } from "./claude/capability-tui.js";
 import { probeCodexCapability } from "./codex/capability.js";
@@ -88,6 +89,7 @@ export const BUILTIN_PROVIDER_PROBES: BuiltinProviderProbeTable = Object.freeze(
   codex: probeCodexCapability,
   cursor: probeCursorCapability,
   grok: probeGrokCapability,
+  antigravity: probeAntigravityCapability,
   "kimi-code": probeKimiCodeCapability,
   opencode: probeOpenCodeCapability,
   pi: probePiCapability,

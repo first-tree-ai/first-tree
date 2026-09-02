@@ -1,0 +1,751 @@
+import { type ChildProcess, spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { PassThrough } from "node:stream";
+import type { AgentRuntimeConfig } from "@first-tree/shared";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { FirstTreeHubSDK } from "../../../cloud/sdk.js";
+import type { AgentConfigCache } from "../../../runtime/agent-config-cache.js";
+import type { DeliveryToken, SessionContext, SessionMessage } from "../../../runtime/contracts.js";
+import type { ProviderProcessSpec, ProviderProcessSupervisor } from "../../../runtime/provider-process-supervisor.js";
+import { computeAntigravityUsageDelta, createAntigravityHandler } from "../index.js";
+
+const roots: string[] = [];
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+function runtimeConfig(): AgentRuntimeConfig {
+  return {
+    agentId: "agent-1",
+    version: 1,
+    payload: {
+      kind: "antigravity",
+      prompt: { append: "managed prompt" },
+      model: "gemini-3-pro",
+      mcpServers: [],
+      env: [{ key: "AGY_TEST_ENV", value: "present", sensitive: true }],
+      gitRepos: [],
+      resourceSkills: [],
+      reasoningEffort: "high",
+    },
+    updatedAt: new Date(0).toISOString(),
+    updatedBy: "test",
+  };
+}
+
+function cache(config: AgentRuntimeConfig): AgentConfigCache {
+  return {
+    get: () => config,
+    refresh: async () => config,
+    refreshIfNewer: async () => config,
+    updateSdk: () => {},
+    updateUrls: () => {},
+    allReferencedUrls: () => new Set(),
+    forget: () => {},
+  };
+}
+
+function message(id: string, content: string): SessionMessage {
+  return {
+    inboxEntryId: Number(id.slice(1)) || 1,
+    id,
+    chatId: "chat-1",
+    senderId: "human-1",
+    format: "text",
+    content,
+    metadata: null,
+  };
+}
+
+function deliveryToken() {
+  return {
+    processingStarted: vi.fn(),
+    complete: vi.fn(async () => "settled" as const),
+    retry: vi.fn(),
+    terminalRejected: vi.fn(async () => {}),
+  } satisfies DeliveryToken;
+}
+
+function context(events: unknown[], forwarded: string[]): SessionContext {
+  const agentId = "agent-1";
+  const chatId = "chat-1";
+  return {
+    agent: {
+      agentId,
+      inboxId: "inbox-1",
+      displayName: "Agent",
+      type: "agent",
+      visibility: "organization",
+      delegateMention: null,
+      metadata: {},
+    },
+    sdk: {
+      serverUrl: "https://example.test",
+      getChatDetail: async () => ({
+        id: chatId,
+        title: "Antigravity test",
+        topic: "Antigravity",
+        description: null,
+      }),
+      listChatParticipants: async () => [
+        {
+          agentId: "human-1",
+          name: "human",
+          displayName: "Human",
+          type: "human",
+          role: "member",
+          mode: "default",
+          accessMode: "speaker",
+        },
+      ],
+    } as unknown as FirstTreeHubSDK,
+    log: vi.fn(),
+    chatId,
+    recordProviderActivity: vi.fn(),
+    emitEvent: (event) => events.push(event),
+    forwardResult: async (text) => {
+      forwarded.push(text);
+    },
+    markMessagesConsumed: vi.fn(),
+    finishTurn: vi.fn(async () => "settled" as const),
+    retryTurn: vi.fn(),
+    failSessionForRecovery: vi.fn(),
+    replaceSessionId: vi.fn(),
+    buildAgentEnv: (env) => ({
+      ...env,
+      FIRST_TREE_AGENT_ID: agentId,
+      FIRST_TREE_CHAT_ID: chatId,
+      FIRST_TREE_PROVIDER: "antigravity",
+    }),
+    formatInboundContent: async (entry) => `[From: human]\n${String(entry.content)}`,
+    resolveSenderLabel: async () => "human",
+    formatFromHeader: async () => "[From: human]",
+    publishTeamSkillCommands: () => {},
+  };
+}
+
+const PROVIDER_SCRIPT = `
+const conversationId = process.env.FIRST_TREE_TEST_CONVERSATION_ID;
+const inputTokens = Number(process.env.FIRST_TREE_TEST_INPUT_TOKENS ?? "3");
+const cachedInputTokens = Number(process.env.FIRST_TREE_TEST_CACHED_INPUT_TOKENS ?? "0");
+const outputTokens = Number(process.env.FIRST_TREE_TEST_OUTPUT_TOKENS ?? "2");
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  JSON.parse(input.trim());
+  process.stdout.write(JSON.stringify({event:"init",conversation_id:conversationId}) + "\\n");
+  process.stdout.write(JSON.stringify({event:"step_update",step_update:{conversation_id:conversationId,step_type:"agent_response",text_delta:"hello"}}) + "\\n");
+  process.stdout.write(JSON.stringify({event:"result",result:{conversation_id:conversationId,status:"SUCCESS",response:"hello",usage:{input_tokens:inputTokens,cache_read_tokens:cachedInputTokens,output_tokens:outputTokens}}}) + "\\n");
+});
+`;
+
+type TestUsage = {
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+};
+
+function createSupervisor(
+  specs: ProviderProcessSpec[],
+  inputs: string[],
+  conversationIds: readonly string[] = ["conversation-1"],
+  providerScript = PROVIDER_SCRIPT,
+  usages: readonly TestUsage[] = [],
+): ProviderProcessSupervisor {
+  let turn = 0;
+  return {
+    spawn(spec) {
+      specs.push(spec);
+      const conversationId = conversationIds[turn] ?? conversationIds[conversationIds.length - 1] ?? "conversation-1";
+      const usage = usages[turn] ?? usages[usages.length - 1];
+      turn += 1;
+      const child = spawn(process.execPath, ["-e", providerScript], {
+        ...spec.options,
+        env: {
+          ...spec.options.env,
+          FIRST_TREE_TEST_CONVERSATION_ID: conversationId,
+          FIRST_TREE_TEST_TURN: String(turn - 1),
+          ...(usage
+            ? {
+                FIRST_TREE_TEST_INPUT_TOKENS: String(usage.inputTokens),
+                FIRST_TREE_TEST_CACHED_INPUT_TOKENS: String(usage.cachedInputTokens),
+                FIRST_TREE_TEST_OUTPUT_TOKENS: String(usage.outputTokens),
+              }
+            : {}),
+        },
+        detached: false,
+      });
+      if (!child.stdin) throw new Error("synthetic provider stdin is unavailable");
+      const write = child.stdin.write.bind(child.stdin);
+      child.stdin.write = ((chunk: string | Uint8Array, ...args: unknown[]) => {
+        inputs.push(String(chunk));
+        return Reflect.apply(write, child.stdin, [chunk, ...args]);
+      }) as typeof child.stdin.write;
+      return { child, exited: new Promise<void>((resolve) => child.once("exit", () => resolve())) };
+    },
+  };
+}
+
+function createControlledSupervisor(
+  specs: ProviderProcessSpec[],
+  inputs: string[],
+  outputLines: readonly string[],
+  outputLinesByTurn: readonly (readonly string[])[] = [],
+  closeAfterTurn: readonly boolean[] = [],
+  lateOutputLinesByTurn: readonly (readonly string[])[] = [],
+): ProviderProcessSupervisor {
+  let turn = 0;
+  return {
+    spawn(spec) {
+      specs.push(spec);
+      const currentOutputLines = outputLinesByTurn[turn] ?? outputLines;
+      const shouldCloseAfterOutput = closeAfterTurn[turn] ?? false;
+      const lateOutputLines = lateOutputLinesByTurn[turn] ?? [];
+      turn += 1;
+      const stdin = new PassThrough();
+      const stdout = new PassThrough();
+      const stderr = new PassThrough();
+      let closed = false;
+      const close = (): void => {
+        if (closed) return;
+        closed = true;
+        stdout.end();
+        stderr.end();
+        queueMicrotask(() => child.emit("close", null, "SIGTERM"));
+      };
+      const complete = (): void => {
+        if (closed) return;
+        closed = true;
+        stdout.end();
+        stderr.end();
+        queueMicrotask(() => child.emit("close", 0, null));
+      };
+      const child = Object.assign(new EventEmitter(), {
+        pid: undefined,
+        stdin,
+        stdout,
+        stderr,
+        kill: vi.fn(() => {
+          for (const line of lateOutputLines) stdout.write(`${line}\n`);
+          close();
+          return true;
+        }),
+      }) as unknown as ChildProcess;
+      const write = stdin.write.bind(stdin);
+      stdin.write = ((chunk: string | Uint8Array, ...args: unknown[]) => {
+        inputs.push(String(chunk));
+        return Reflect.apply(write, stdin, [chunk, ...args]);
+      }) as typeof stdin.write;
+      setImmediate(() => {
+        for (const line of currentOutputLines) stdout.write(`${line}\n`);
+        if (shouldCloseAfterOutput) complete();
+      });
+      return { child, exited: new Promise<void>((resolve) => child.once("close", () => resolve())) };
+    },
+  };
+}
+
+describe("Antigravity V1 handler", () => {
+  it("computes per-turn deltas from cumulative usage and skips an unknown cold-resume baseline", () => {
+    expect(
+      computeAntigravityUsageDelta(
+        { inputTokens: 10, cachedInputTokens: 4, outputTokens: 7 },
+        { inputTokens: 3, cachedInputTokens: 1, outputTokens: 2 },
+        false,
+      ),
+    ).toEqual({ inputTokens: 7, cachedInputTokens: 3, outputTokens: 5 });
+    expect(
+      computeAntigravityUsageDelta({ inputTokens: 10, cachedInputTokens: 4, outputTokens: 7 }, null, false),
+    ).toBeNull();
+    expect(computeAntigravityUsageDelta({ inputTokens: 3, cachedInputTokens: 1, outputTokens: 2 }, null, true)).toEqual(
+      { inputTokens: 3, cachedInputTokens: 1, outputTokens: 2 },
+    );
+  });
+
+  it("sends stream-json on stdin and resumes the confirmed conversation id", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-handler-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createSupervisor(specs, inputs),
+      antigravityTurnTimeoutMs: 5_000,
+    });
+
+    const firstToken = deliveryToken();
+    const first = await handler.start(message("m1", "first prompt"), sessionCtx, firstToken);
+
+    expect(first.sessionId).toBe("conversation-1");
+    expect(specs).toHaveLength(1);
+    expect(specs[0]?.args).toEqual([
+      "--input-format",
+      "stream-json",
+      "--output-format",
+      "stream-json",
+      "--dangerously-skip-permissions",
+      "--print-timeout",
+      "1m",
+      "--model",
+      "gemini-3-pro",
+      "--effort",
+      "high",
+    ]);
+    expect(specs[0]?.options.cwd).toBe(root);
+    expect(specs[0]?.options.env?.AGY_TEST_ENV).toBe("present");
+    expect(specs[0]?.args.join(" ")).not.toContain("first prompt");
+    const firstInput = inputs[0];
+    expect(firstInput).toBeDefined();
+    expect(JSON.parse(firstInput ?? "")).toMatchObject({
+      event: "user",
+      message: { content: expect.stringContaining("first prompt") },
+    });
+    expect(forwarded).toEqual(["hello"]);
+    expect(firstToken.processingStarted).toHaveBeenCalledTimes(1);
+    expect(firstToken.complete).toHaveBeenCalledTimes(1);
+
+    const secondToken = deliveryToken();
+    expect(handler.inject(message("m2", "follow-up"), secondToken)).toMatchObject({
+      kind: "owned",
+      mode: "queued",
+    });
+    await vi.waitFor(() => expect(secondToken.complete).toHaveBeenCalledTimes(1), { timeout: 3_000 });
+
+    expect(specs).toHaveLength(2);
+    expect(specs[1]?.args).toContain("--conversation");
+    expect(specs[1]?.args).toContain("conversation-1");
+    const secondInput = inputs[1];
+    expect(secondInput).toBeDefined();
+    expect(JSON.parse(secondInput ?? "")).toMatchObject({
+      event: "user",
+      message: { content: expect.stringContaining("follow-up") },
+    });
+    expect(forwarded).toEqual(["hello", "hello"]);
+    await handler.shutdown();
+  });
+
+  it("emits cumulative usage as per-turn deltas for the exact resumed conversation", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-usage-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createSupervisor(
+        specs,
+        inputs,
+        ["conversation-usage", "conversation-usage"],
+        PROVIDER_SCRIPT,
+        [
+          { inputTokens: 3, cachedInputTokens: 1, outputTokens: 2 },
+          { inputTokens: 10, cachedInputTokens: 4, outputTokens: 7 },
+        ],
+      ),
+      antigravityTurnTimeoutMs: 5_000,
+    });
+
+    await handler.start(message("m1", "first prompt"), sessionCtx, deliveryToken());
+    const secondToken = deliveryToken();
+    handler.inject(message("m2", "follow-up"), secondToken);
+    await vi.waitFor(() => expect(secondToken.complete).toHaveBeenCalledTimes(1), { timeout: 3_000 });
+
+    const usageEvents = events.filter(
+      (event): event is { kind: "token_usage"; payload: unknown } =>
+        typeof event === "object" && event !== null && (event as { kind?: unknown }).kind === "token_usage",
+    );
+    expect(usageEvents.map((event) => event.payload)).toEqual([
+      { provider: "antigravity", model: "gemini-3-pro", inputTokens: 3, cachedInputTokens: 1, outputTokens: 2 },
+      { provider: "antigravity", model: "gemini-3-pro", inputTokens: 7, cachedInputTokens: 3, outputTokens: 5 },
+    ]);
+    await handler.shutdown();
+  });
+
+  it("keeps a failed fresh attempt as the exact conversation usage baseline for recovery", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-usage-recovery-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const recoveryScript = `
+const conversationId = process.env.FIRST_TREE_TEST_CONVERSATION_ID;
+const turn = Number(process.env.FIRST_TREE_TEST_TURN ?? "0");
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  JSON.parse(input.trim());
+  process.stdout.write(JSON.stringify({event:"init",conversation_id:conversationId}) + "\\n");
+  if (turn === 0) {
+    process.stdout.write(JSON.stringify({event:"result",result:{conversation_id:conversationId,status:"ERROR",response:"failed",usage:{input_tokens:3,cache_read_tokens:1,output_tokens:2}}}) + "\\n");
+    process.exitCode = 1;
+    return;
+  }
+  process.stdout.write(JSON.stringify({event:"result",result:{conversation_id:conversationId,status:"SUCCESS",response:"recovered",usage:{input_tokens:10,cache_read_tokens:4,output_tokens:7}}}) + "\\n");
+});
+`;
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createSupervisor(
+        specs,
+        inputs,
+        ["conversation-recovery", "conversation-recovery"],
+        recoveryScript,
+      ),
+      antigravityTurnTimeoutMs: 5_000,
+      antigravityRetrySleep: async () => true,
+    });
+
+    const firstToken = deliveryToken();
+    const first = await handler.start(message("m1", "first prompt"), sessionCtx, firstToken);
+    expect(first.sessionId).toBe("conversation-recovery");
+    expect(firstToken.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "error", completion: "consumed" }),
+    );
+
+    const recoveryToken = deliveryToken();
+    await handler.resume(message("m2", "recovery"), "conversation-recovery", sessionCtx, recoveryToken);
+    expect(recoveryToken.complete).toHaveBeenCalledWith(expect.anything(), { status: "success" });
+    expect(events.filter((event) => (event as { kind?: string }).kind === "token_usage")).toEqual([
+      {
+        kind: "token_usage",
+        payload: {
+          provider: "antigravity",
+          model: "gemini-3-pro",
+          inputTokens: 7,
+          cachedInputTokens: 3,
+          outputTokens: 5,
+        },
+      },
+    ]);
+    await handler.shutdown();
+  });
+
+  it("settles a timeout after a mutating tool without replaying the delivery", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-unsafe-timeout-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const unsafeTimeoutOutput = [
+      JSON.stringify({ event: "init", conversation_id: "conversation-timeout" }),
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "conversation-timeout",
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "run_command",
+          tool_call_id: "call-1",
+          tool_info: { parameters: { command: "touch side-effect-marker" } },
+        },
+      }),
+    ];
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(specs, inputs, unsafeTimeoutOutput),
+      antigravityTurnTimeoutMs: 50,
+      antigravityRetrySleep: vi.fn(async () => true),
+    });
+    const token = deliveryToken();
+
+    const started = await handler.start(message("m1", "mutate this"), sessionCtx, token);
+
+    expect(started.sessionId).toBe("conversation-timeout");
+    expect(specs).toHaveLength(1);
+    expect(token.retry).not.toHaveBeenCalled();
+    expect(token.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "error", completion: "consumed", reason: "unsafe_replay" }),
+    );
+    await handler.shutdown();
+  });
+
+  it.each([
+    ["operator suspend", "suspend", true, false],
+    ["full graceful shutdown", "shutdown", true, false],
+    ["concurrency preemption", "suspend", false, false],
+    ["route retirement", "shutdown", false, false],
+    ["operator suspend overlapped by route retirement", "suspend", true, true],
+  ] as const)("preserves the exact conversation, custody, and late-event fence on %s", async (_label, lifecycle, shouldSettleProviderEntered, overlapsRouteRetirement) => {
+    const root = mkdtempSync(join(tmpdir(), `ft-antigravity-lifecycle-${lifecycle}-`));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const lifecycleOutput = [
+      JSON.stringify({ event: "init", conversation_id: "conversation-lifecycle" }),
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "conversation-lifecycle",
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "run_command",
+          tool_call_id: "call-lifecycle",
+          tool_info: { parameters: { command: "touch side-effect-marker" } },
+        },
+      }),
+    ];
+    const recoveredOutput = [
+      JSON.stringify({ event: "init", conversation_id: "conversation-lifecycle" }),
+      JSON.stringify({
+        event: "result",
+        result: { conversation_id: "conversation-lifecycle", status: "SUCCESS", response: "recovered" },
+      }),
+    ];
+    const lateOutput = [
+      JSON.stringify({ event: "init", conversation_id: "conversation-late" }),
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "conversation-late",
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "run_command",
+          tool_call_id: "call-late",
+          tool_info: { parameters: { command: "touch late-side-effect-marker" } },
+        },
+      }),
+    ];
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(
+        specs,
+        inputs,
+        lifecycleOutput,
+        [lifecycleOutput, recoveredOutput],
+        [false, true],
+        [lateOutput],
+      ),
+      antigravityTurnTimeoutMs: 5_000,
+    });
+    const token = deliveryToken();
+    const startPromise = handler.start(message("m-lifecycle", "mutate this"), sessionCtx, token);
+
+    await vi.waitFor(() => expect(specs).toHaveLength(1), { timeout: 3_000 });
+    await vi.waitFor(() =>
+      expect(events.some((event) => (event as { kind?: string }).kind === "tool_call")).toBe(true),
+    );
+    const lifecycleOptions = shouldSettleProviderEntered ? { settleProviderEntered: true } : undefined;
+    const lifecyclePromise =
+      lifecycle === "suspend"
+        ? handler.suspend("test lifecycle suspend", lifecycleOptions)
+        : handler.shutdown("test lifecycle shutdown", lifecycleOptions);
+    if (overlapsRouteRetirement) {
+      await Promise.all([lifecyclePromise, handler.shutdown("test lifecycle route retirement")]);
+    } else {
+      await lifecyclePromise;
+    }
+
+    const started = await startPromise;
+    expect(started.sessionId).toBe("conversation-lifecycle");
+    if (shouldSettleProviderEntered) {
+      expect(token.retry).not.toHaveBeenCalled();
+      expect(token.complete).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ status: "error", completion: "consumed", reason: "unsafe_replay" }),
+      );
+    } else {
+      expect(token.complete).not.toHaveBeenCalled();
+      expect(token.retry).toHaveBeenCalledWith(expect.anything(), `test lifecycle ${lifecycle}`);
+    }
+
+    const recoveryToken = deliveryToken();
+    const resumed = await handler.resume(
+      message("m-recovery", "recover without replay"),
+      started.sessionId,
+      sessionCtx,
+      recoveryToken,
+    );
+    expect(resumed.sessionId).toBe("conversation-lifecycle");
+    expect(specs).toHaveLength(2);
+    expect(specs[1]?.args).toEqual(expect.arrayContaining(["--conversation", "conversation-lifecycle"]));
+    expect(inputs[1]).toContain("recover without replay");
+    expect(inputs[1]).not.toContain("mutate this");
+    expect(recoveryToken.complete).toHaveBeenCalledWith(expect.anything(), { status: "success" });
+    expect(forwarded).toEqual(["recovered"]);
+    expect(events.filter((event) => (event as { kind?: string }).kind === "tool_call")).toHaveLength(1);
+    await handler.shutdown();
+  });
+
+  it("adopts the exact conversation when a pending-id resume is settled during lifecycle", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-pending-resume-lifecycle-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const lifecycleOutput = [
+      JSON.stringify({ event: "init", conversation_id: "conversation-resume-lifecycle" }),
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "conversation-resume-lifecycle",
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "run_command",
+          tool_call_id: "call-resume-lifecycle",
+          tool_info: { parameters: { command: "touch side-effect-marker" } },
+        },
+      }),
+    ];
+    const recoveredOutput = [
+      JSON.stringify({ event: "init", conversation_id: "conversation-resume-lifecycle" }),
+      JSON.stringify({
+        event: "result",
+        result: { conversation_id: "conversation-resume-lifecycle", status: "SUCCESS", response: "recovered" },
+      }),
+    ];
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(
+        specs,
+        inputs,
+        [],
+        [[], lifecycleOutput, recoveredOutput],
+        [false, false, true],
+      ),
+      antigravityTurnTimeoutMs: 50,
+      antigravityRetrySleep: vi.fn(async () => true),
+    });
+    const firstToken = deliveryToken();
+    const pending = await handler.start(message("m-pending", "prepare this"), sessionCtx, firstToken);
+    expect(pending.sessionId).toMatch(/^antigravity-pending-/);
+    expect(firstToken.retry).toHaveBeenCalledWith(expect.anything(), "operation_timeout");
+
+    const lifecycleToken = deliveryToken();
+    const resumePromise = handler.resume(
+      message("m-lifecycle", "mutate this"),
+      pending.sessionId,
+      sessionCtx,
+      lifecycleToken,
+    );
+    await vi.waitFor(() => expect(specs).toHaveLength(2), { timeout: 3_000 });
+    await vi.waitFor(() =>
+      expect(events.some((event) => (event as { kind?: string }).kind === "tool_call")).toBe(true),
+    );
+    await handler.suspend("operator suspend", { settleProviderEntered: true });
+    const resumed = await resumePromise;
+    expect(resumed.sessionId).toBe("conversation-resume-lifecycle");
+    expect(lifecycleToken.retry).not.toHaveBeenCalled();
+    expect(lifecycleToken.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "error", completion: "consumed", reason: "unsafe_replay" }),
+    );
+
+    const recoveryToken = deliveryToken();
+    await handler.resume(message("m-recovery", "recover without replay"), resumed.sessionId, sessionCtx, recoveryToken);
+    expect(specs[2]?.args).toEqual(expect.arrayContaining(["--conversation", "conversation-resume-lifecycle"]));
+    expect(inputs[2]).toContain("recover without replay");
+    expect(inputs[2]).not.toContain("mutate this");
+    expect(events.filter((event) => (event as { kind?: string }).kind === "tool_call")).toHaveLength(1);
+    expect(recoveryToken.complete).toHaveBeenCalledWith(expect.anything(), { status: "success" });
+    await handler.shutdown();
+  });
+
+  it("routes a pre-provider timeout through retry settlement", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-pre-provider-timeout-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const retrySleep = vi.fn(async () => true);
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(specs, inputs, []),
+      antigravityTurnTimeoutMs: 50,
+      antigravityRetrySleep: retrySleep,
+    });
+    const token = deliveryToken();
+
+    await handler.start(message("m1", "please respond"), sessionCtx, token);
+
+    expect(token.retry).toHaveBeenCalledWith(expect.anything(), "operation_timeout");
+    expect(token.complete).not.toHaveBeenCalled();
+    expect(retrySleep).toHaveBeenCalledWith(500, expect.any(AbortSignal));
+    await handler.shutdown();
+  });
+
+  it("fails closed when a resumed turn returns a different conversation id", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-resume-mismatch-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createSupervisor(specs, inputs, ["conversation-1", "conversation-2"]),
+      antigravityTurnTimeoutMs: 5_000,
+    });
+
+    await handler.start(message("m1", "first prompt"), sessionCtx, deliveryToken());
+    const secondToken = deliveryToken();
+    handler.inject(message("m2", "follow-up"), secondToken);
+    await vi.waitFor(() => expect(secondToken.complete).toHaveBeenCalledTimes(1), { timeout: 3_000 });
+
+    expect(specs[1]?.args).toContain("conversation-1");
+    expect(forwarded).toEqual(["hello"]);
+    expect(secondToken.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "error", completion: "consumed", reason: "unsafe_replay" }),
+    );
+    expect(events.some((event) => JSON.stringify(event).includes("unsafe_replay"))).toBe(true);
+    await handler.shutdown();
+  });
+});

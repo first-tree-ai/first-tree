@@ -274,6 +274,7 @@ describe("runtime provider architecture guard", () => {
       ["providers/codex/binary.ts", "isCodexBinaryMissingError"],
       ["providers/cursor/binary.ts", "isCursorBinaryMissingError"],
       ["providers/grok/binary.ts", "isGrokBinaryMissingError"],
+      ["providers/antigravity/binary.ts", "isAntigravityBinaryMissingError"],
       ["providers/pi/binary.ts", "isPiBinaryMissingError"],
     ] as const) {
       const source = readFileSync(join(clientSrc, file), "utf8");
@@ -283,7 +284,7 @@ describe("runtime provider architecture guard", () => {
       expect(source).toContain(symbol);
       // No second owner of the match tables / regexes.
       expect(source).not.toMatch(/BINARY_MISSING_PATTERNS/);
-      expect(source).not.toMatch(/function is(?:Codex|Cursor|Grok|Pi)BinaryMissingError/);
+      expect(source).not.toMatch(/function is(?:Codex|Cursor|Grok|Antigravity|Pi)BinaryMissingError/);
       // Fail closed: no deep provider-support group import.
       expect(source).not.toMatch(/provider-support\/binary-failure\.js/);
     }
@@ -309,6 +310,7 @@ describe("runtime provider architecture guard", () => {
     expect(productionRels).toContain("providers/pi/capability.ts");
     expect(productionRels).toContain("providers/amp/capability.ts");
     expect(productionRels).toContain("providers/deepseek-harness/capability.ts");
+    expect(productionRels).toContain("providers/antigravity/capability.ts");
 
     // Local regex / phrase tables that re-recognize provider binary absence.
     const codexBundledLocateMatcher = /unable to locate codex cli binaries/i;
@@ -321,15 +323,18 @@ describe("runtime provider architecture guard", () => {
       codexBundledLocateMatcher,
       /cursor agent cli is missing/i,
       /grok build cli is missing/i,
+      /antigravity cli is missing/i,
     ] as const;
     const reasonLiterals = [
       '"codex_binary_missing"',
       '"cursor_binary_missing"',
       '"grok_binary_missing"',
+      '"antigravity_binary_missing"',
       '"pi_binary_missing"',
       "'codex_binary_missing'",
       "'cursor_binary_missing'",
       "'grok_binary_missing'",
+      "'antigravity_binary_missing'",
       "'pi_binary_missing'",
     ] as const;
 
@@ -1518,6 +1523,7 @@ describe("runtime provider architecture guard", () => {
       "providers/pi/index.ts",
       "providers/amp/index.ts",
       "providers/deepseek-harness/index.ts",
+      "providers/antigravity/index.ts",
       "providers/handlers/turn-settlement.ts",
       "providers/builtin-registry.ts",
       "providers/auth-driver.ts",
@@ -2095,6 +2101,7 @@ describe("runtime provider architecture guard", () => {
       "providers/pi/index.ts",
       "providers/amp/index.ts",
       "providers/deepseek-harness/index.ts",
+      "providers/antigravity/index.ts",
     ] as const;
     for (const rel of mustUseProviderSupport) {
       const source = readFileSync(join(clientSrc, rel), "utf8");

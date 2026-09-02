@@ -73,10 +73,13 @@ FT_BIN="$HOME/.local/bin/first-tree" # Use first-tree-staging for staging.
 
 `--type` accepts `human` or `agent`. The `client-id` argument is required
 because an agent is permanently bound to exactly one client machine.
-`--runtime` accepts `claude-code`, `claude-code-tui`, `codex`, `cursor`,
-`kimi-code`, or `opencode`, and defaults to `claude-code`. OpenCode requires an
-operator-installed CLI (`npm install -g opencode-ai@^1.18.7`) plus
-provider-owned authentication (`opencode auth login`) on macOS or Linux.
+`--runtime` accepts `claude-code`, `claude-code-tui`, `codex`, `cursor`, `grok`,
+`antigravity`, `kimi-code`, or `opencode`, and defaults to `claude-code`.
+OpenCode requires an operator-installed CLI (`npm install -g
+opencode-ai@^1.18.7`) plus provider-owned authentication (`opencode auth login`)
+on macOS or Linux. Antigravity requires its operator-installed CLI
+(`curl -fsSL https://antigravity.google/cli/install.sh | bash`) and provider-owned
+setup by running `agy` once on macOS or Linux.
 After installing a provider, run `first-tree daemon probe` to force immediate
 artifact/platform re-detection and upload the machine's advertised
 capabilities. The probe does not inspect authentication; credentials are

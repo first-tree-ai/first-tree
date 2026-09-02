@@ -100,6 +100,19 @@ export function classifyProviderFailure(
       sourceKind: base.kind,
     };
   }
+  // A resolved binary failure is a capability problem even when the
+  // provider's own error text names the provider (for example, "Antigravity
+  // CLI is missing"). Keep it ahead of provider-gated auth heuristics so an
+  // installation issue cannot surface as a misleading re-login prompt.
+  if (isCapability(text, base)) {
+    return {
+      category: "capability",
+      reasonCode: base.reasonCode,
+      message: base.message,
+      retryAfterMs,
+      sourceKind: base.kind,
+    };
+  }
   if (isCredential(text, base, status, context.provider)) {
     return {
       category: "credential",
@@ -142,6 +155,15 @@ export function classifyProviderFailure(
       sourceKind: base.kind,
     };
   }
+  if (context.provider === "antigravity" && /not supported on windows in v1/.test(text)) {
+    return {
+      category: "capability",
+      reasonCode: "antigravity_platform_unsupported",
+      message: base.message,
+      retryAfterMs,
+      sourceKind: base.kind,
+    };
+  }
   if (context.provider === "grok" && /is not a supported grok build version/.test(text)) {
     return {
       category: "capability",
@@ -178,15 +200,6 @@ export function classifyProviderFailure(
     return {
       category: "capability",
       reasonCode: "pi_protocol_error",
-      message: base.message,
-      retryAfterMs,
-      sourceKind: base.kind,
-    };
-  }
-  if (isCapability(text, base)) {
-    return {
-      category: "capability",
-      reasonCode: base.reasonCode,
       message: base.message,
       retryAfterMs,
       sourceKind: base.kind,
@@ -576,6 +589,14 @@ function isCredential(
   // "not logged in" / "grok login" / "auth.json" carry no generic auth token
   // the shared classifier already covers, so they need a grok-only branch.
   if (provider === "grok" && /not logged in|grok login|auth\.json/.test(text)) return true;
+  // Antigravity headless auth failures are provider-owned and may mention a
+  // credential without using the generic "authentication required" wording.
+  if (
+    provider === "antigravity" &&
+    /gemini_api_key|credential|sign in|token (?:is )?(?:missing|expired)|invalid token/.test(text)
+  ) {
+    return true;
+  }
   // Pi CLI logged-out / missing-key phrasings (kept in sync with isPiAuthError).
   return (
     provider === "pi" &&
@@ -630,6 +651,14 @@ function isConfiguration(text: string, base: Classification, provider: RuntimePr
     return true;
   }
   if (provider === "pi" && (isPiModelConfiguration(text) || isPiMcpConfiguration(text))) return true;
+  if (
+    provider === "antigravity" &&
+    /expected one conversation id|resume conversation mismatch|terminal result event|malformed antigravity stream|antigravity returned an error result/.test(
+      text,
+    )
+  ) {
+    return true;
+  }
   // Cursor CLI literal invalid-model / explicit-deny / trust-wall phrasings
   // (captured in Phase 0). Gated to the cursor provider: this classifier is
   // shared and configuration wins over capacity in the classify chain, so an
@@ -644,14 +673,48 @@ function configurationReason(text: string, base: Classification, provider: Runti
   if (provider === "codex" && isCodexServiceTierConfiguration(text)) return "codex_service_tier_unsupported";
   if (provider === "pi" && isPiModelConfiguration(text)) return "pi_model_configuration_error";
   if (provider === "pi" && isPiMcpConfiguration(text)) return "pi_mcp_unsupported";
+  if (
+    provider === "antigravity" &&
+    /expected one conversation id|resume conversation mismatch|terminal result event|malformed antigravity stream|antigravity returned an error result/.test(
+      text,
+    )
+  ) {
+    return "antigravity_protocol_error";
+  }
   return base.reasonCode === "unknown" ? "provider_configuration_error" : base.reasonCode;
 }
 
 function isCodexServiceTierConfiguration(text: string): boolean {
   return (
-    /configured service tier .* is not advertised as supported .* will be omitted from requests/.test(text) ||
-    /configured service tier .* was not activated by codex .* will not be used for requests/.test(text)
+    containsOrderedFragmentsOnOneLine(text, [
+      "configured service tier ",
+      " is not advertised as supported ",
+      " will be omitted from requests",
+    ]) ||
+    containsOrderedFragmentsOnOneLine(text, [
+      "configured service tier ",
+      " was not activated by codex ",
+      " will not be used for requests",
+    ])
   );
+}
+
+/** Match a fixed same-line sequence without backtracking over provider-controlled text. */
+function containsOrderedFragmentsOnOneLine(text: string, fragments: readonly string[]): boolean {
+  for (const line of text.split("\n")) {
+    let offset = 0;
+    let matched = true;
+    for (const fragment of fragments) {
+      const index = line.indexOf(fragment, offset);
+      if (index === -1) {
+        matched = false;
+        break;
+      }
+      offset = index + fragment.length;
+    }
+    if (matched) return true;
+  }
+  return false;
 }
 
 function isDeterministicInput(text: string, base: Classification): boolean {

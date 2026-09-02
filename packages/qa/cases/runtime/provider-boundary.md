@@ -42,8 +42,8 @@ records the human cross-surface checks those tests cannot fully cover.
      from setup-card display order.
    - Confirm the final RuntimeInstallBox output is install-only for all five
      in-product entries (Claude Code, Claude Code CLI, Codex, Cursor, Grok
-     Build), while Kimi, OpenCode, and Pi include their provider-owned
-     host-login guidance.
+     Build), while Antigravity, Kimi, OpenCode, and Pi include their
+     provider-owned host-login guidance.
    - Confirm the four direct in-product providers target themselves and Claude
      Code CLI targets Claude Code's shared credential; host providers expose no
      First Tree runtime-auth target.

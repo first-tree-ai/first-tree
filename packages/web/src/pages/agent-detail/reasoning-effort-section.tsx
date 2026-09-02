@@ -42,6 +42,13 @@ const GROK_EFFORT_OPTIONS: SelectOption[] = [
   { value: "high", label: "high", hint: "default" },
 ];
 
+const ANTIGRAVITY_EFFORT_OPTIONS: SelectOption[] = [
+  { value: "", label: "(unset — inherits local)" },
+  { value: "low", label: "low", hint: "fastest" },
+  { value: "medium", label: "medium" },
+  { value: "high", label: "high", hint: "default" },
+];
+
 const EFFORT_OPTIONS_BY_PROVIDER: Record<RuntimeProvider, SelectOption[]> = {
   amp: [],
   "deepseek-harness": [],
@@ -55,6 +62,7 @@ const EFFORT_OPTIONS_BY_PROVIDER: Record<RuntimeProvider, SelectOption[]> = {
   // cursor agents. The empty entry keeps the Record exhaustive.
   cursor: [],
   grok: GROK_EFFORT_OPTIONS,
+  antigravity: ANTIGRAVITY_EFFORT_OPTIONS,
   "kimi-code": [],
   opencode: [],
   pi: [],
@@ -69,6 +77,8 @@ export const EFFORT_HELP_BY_PROVIDER: Record<RuntimeProvider, string> = {
   codex: "Applies to new sessions. Higher means more reasoning per turn; max and ultra require a compatible model.",
   cursor: "Cursor encodes effort in the model id; there is no separate control.",
   grok: "Applies from the next turn, on new and existing sessions (re-applied AND confirmed via session/set_model after every session open — the turn does not run if the provider does not confirm the effective effort). Unset removes only the effort override — an explicit model is still re-applied; with model also unset, the next turn resets to Grok's default model.",
+  antigravity:
+    "Applies on the next turn. Unset inherits the local Antigravity default; low, medium, and high are passed to `agy` unchanged.",
   "kimi-code": "Kimi thinking configuration is inherited from the local Kimi configuration.",
   opencode: "OpenCode model variants are provider-native; there is no separate First Tree effort control.",
   pi: "Pi thinking level is inherited from the local Pi configuration; there is no separate First Tree effort control.",

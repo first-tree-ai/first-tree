@@ -63,7 +63,7 @@ describe("runtime provider identity + catalog completeness", () => {
     expect(preferencePriorities).toEqual([...preferencePriorities].sort((a, b) => a - b));
     expect(new Set(preferencePriorities).size).toBe(preferencePriorities.length);
 
-    // Phase-1 display: … Grok → Kimi → OpenCode → Pi
+    // Phase-1 display: … Grok → Antigravity → Kimi → OpenCode → Pi
     expect(RUNTIME_PROVIDER_DISPLAY_ORDER.indexOf("kimi-code")).toBeLessThan(
       RUNTIME_PROVIDER_DISPLAY_ORDER.indexOf("opencode"),
     );
@@ -71,7 +71,17 @@ describe("runtime provider identity + catalog completeness", () => {
     expect(RUNTIME_PROVIDER_PREFERRED_ORDER).toEqual(["codex", "claude-code"]);
     expect(
       RUNTIME_PROVIDER_IDS.filter((provider) => RUNTIME_PROVIDER_CATALOG[provider].selectionPriority === null),
-    ).toEqual(["amp", "deepseek-harness", "claude-code-tui", "cursor", "grok", "kimi-code", "opencode", "pi"]);
+    ).toEqual([
+      "amp",
+      "deepseek-harness",
+      "claude-code-tui",
+      "cursor",
+      "grok",
+      "antigravity",
+      "kimi-code",
+      "opencode",
+      "pi",
+    ]);
     expect(PREFERRED_RUNTIME_PROVIDER).toBe("codex");
     expect(orderRuntimeProvidersByPreference(["pi", "opencode", "claude-code", "kimi-code", "codex"])).toEqual([
       "codex",
@@ -137,6 +147,7 @@ describe("runtime provider identity + catalog completeness", () => {
     expect(runtimeProviderShowsHostLoginOnSetup("claude-code-tui")).toBe(false);
     expect(runtimeProviderShowsHostLoginOnSetup("cursor")).toBe(false);
     expect(runtimeProviderShowsHostLoginOnSetup("grok")).toBe(false);
+    expect(runtimeProviderShowsHostLoginOnSetup("antigravity")).toBe(true);
   });
 
   it("keeps in-product auth targets typed and exactly aligned with the server contract", () => {
@@ -180,6 +191,10 @@ describe("runtime provider identity + catalog completeness", () => {
     expect(runtimeProviderInstallCommand("opencode")).toBe(`npm install -g ${OPENCODE_NPM_PACKAGE}`);
     expect(runtimeProviderInstallCommand("cursor")).toBe("curl https://cursor.com/install -fsS | bash");
     expect(runtimeProviderInstallCommand("grok")).toBe("curl -fsSL https://x.ai/cli/install.sh | bash");
+    expect(runtimeProviderInstallCommand("antigravity")).toBe(
+      "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+    );
+    expect(runtimeProviderLoginCommand("antigravity")).toBe("agy");
     expect(runtimeProviderInstallCommand("amp")).toBe(AMP_INSTALL_COMMAND);
     expect(runtimeProviderInstallCommand("deepseek-harness")).toBe(`npm install -g ${DEEPSEEK_INSTALL_NPM_PACKAGE}`);
     expect(runtimeProviderLoginCommand("deepseek-harness")).toBe("export DEEPSEEK_API_KEY=<your DeepSeek API key>");

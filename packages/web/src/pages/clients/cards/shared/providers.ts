@@ -197,6 +197,8 @@ export function providerInstallHint(
       return `Run \`${CURSOR_INSTALL_COMMAND}\` on this ${device} (official Cursor installer).`;
     case "grok":
       return `Run \`${GROK_INSTALL_COMMAND}\` on this ${device} (official Grok Build installer).`;
+    case "antigravity":
+      return `Run \`${installCmd}\` on this ${device} (official Google Antigravity installer), then complete provider-owned setup with \`${loginCmd}\`.`;
     case "kimi-code":
       return `Install the official Kimi CLI with \`${installCmd}\` on this ${device}, ${loginCue}. First Tree still executes through its bundled Kimi SDK.`;
     case "opencode":

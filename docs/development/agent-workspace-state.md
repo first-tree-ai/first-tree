@@ -27,6 +27,7 @@ Each runtime discovers Skills from one workspace-relative root:
 | Codex | `.agents/skills/` |
 | Cursor | `.cursor/skills/` |
 | Grok Build | `.grok/skills/` |
+| Google Antigravity | `.agents/skills/` |
 | Kimi Code | `.kimi-code/skills/` |
 | OpenCode | `.opencode/skills/` |
 

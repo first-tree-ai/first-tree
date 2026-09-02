@@ -119,6 +119,7 @@ export const MODEL_OPTIONS_BY_PROVIDER: Record<RuntimeProvider, ModelOption[]> =
   codex: CODEX_MODEL_OPTIONS,
   cursor: [],
   grok: [],
+  antigravity: [],
   "kimi-code": [],
   opencode: [],
   pi: [],
@@ -134,6 +135,8 @@ export const MODEL_HELP_BY_PROVIDER: Record<RuntimeProvider, string> = {
   cursor:
     "Options come from this computer's Cursor CLI when reachable. The Auto · * picks route through the Cursor Router (Cursor Teams/Enterprise only). The id is passed through verbatim on the next turn — one your account or team can't use fails visibly, no silent fallback. Auto · Balance/Intelligence bill per routed model; Auto · Cost uses bundled Auto pricing. Unset uses the Cursor default (auto).",
   grok: "Options come from this computer's Grok Build CLI when reachable. The id is passed through verbatim on the next turn — one your account can't use fails visibly, no silent fallback. Unset uses the Grok default (auto).",
+  antigravity:
+    "Enter an exact provider-native Antigravity model slug. It is passed through verbatim on the next turn; unset uses the local Antigravity default.",
   "kimi-code":
     "Options come from this computer's ~/.kimi-code config when reachable. Passed to new sessions. Unset uses the model configured in ~/.kimi-code.",
   opencode:

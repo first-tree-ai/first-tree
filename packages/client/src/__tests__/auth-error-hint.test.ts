@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   formatAuthHint,
   isAmpAuthError,
+  isAntigravityAuthError,
   isClaudeAuthError,
   isCodexAuthError,
   isDeepseekAuthError,
@@ -130,12 +131,31 @@ describe("isGrokAuthError", () => {
   });
 });
 
+describe("isAntigravityAuthError", () => {
+  it("matches provider-owned headless auth failures without treating capacity as auth", () => {
+    expect(isAntigravityAuthError("authentication required — run agy once to sign in")).toBe(true);
+    expect(isAntigravityAuthError("Gemini API credential is missing")).toBe(true);
+    expect(isAntigravityAuthError("HTTP 429 resource exhausted")).toBe(false);
+    expect(isAntigravityAuthError("")).toBe(false);
+  });
+});
+
 describe("isOpenCodeAuthError", () => {
   it("matches provider-owned credential failures without treating capacity failures as auth", () => {
     expect(isOpenCodeAuthError("Provider returned 401 Unauthorized: invalid API key")).toBe(true);
     expect(isOpenCodeAuthError("Run opencode auth login before using this provider")).toBe(true);
     expect(isOpenCodeAuthError("rate limit exceeded")).toBe(false);
     expect(isOpenCodeAuthError("")).toBe(false);
+  });
+});
+
+describe("formatAuthHint — Antigravity", () => {
+  it("targets the host-local agy login for the Antigravity runtime", () => {
+    const hint = formatAuthHint("antigravity", "authentication required");
+    expect(hint).toContain("antigravity");
+    expect(hint).toContain("agy");
+    expect(hint).toContain("Google Antigravity");
+    expect(hint).toContain("not First Tree's");
   });
 });
 

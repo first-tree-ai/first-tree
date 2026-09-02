@@ -177,28 +177,61 @@ describe("classifyProviderFailure", () => {
     }
   });
 
-  it("maps Codex service-tier omission to a terminal configuration failure", () => {
-    const classification = classifyProviderFailure(
+  it("maps Codex service-tier failures to terminal configuration without provider fallback", () => {
+    for (const message of [
+      "Configured service tier `fast` is not advertised as supported for model `gpt-test` and will be omitted from requests.",
+      "Configured service tier `fast` was not activated by Codex for model `gpt-test` and will not be used for requests.",
+    ]) {
+      const classification = classifyProviderFailure(new Error(message), {
+        provider: "codex",
+        scope: "provider_turn",
+        source: "sdk",
+      });
+      expect(classification, message).toMatchObject({
+        category: "configuration",
+        reasonCode: "codex_service_tier_unsupported",
+      });
+      expect(
+        decideProviderRetry({
+          classification,
+          scope: "provider_turn",
+          attempt: 1,
+          replaySafety: "pre_provider",
+        }),
+      ).toMatchObject({
+        action: "stop",
+        reasonCode: "codex_service_tier_unsupported",
+        terminalKind: "needs_operator",
+      });
+    }
+  });
+
+  it("handles adversarial repeated service-tier text without changing classification", () => {
+    const repeatedPrefix = "configured service tier ".repeat(50_000);
+    const repeatedMiddle = " is not advertised as supported ".repeat(50_000);
+
+    const malformed = classifyProviderFailure(new Error(repeatedPrefix + repeatedMiddle), {
+      provider: "codex",
+      scope: "provider_turn",
+      source: "sdk",
+    });
+    expect(malformed.category).not.toBe("configuration");
+
+    const splitAcrossLines = classifyProviderFailure(
       new Error(
-        "Configured service tier `fast` is not advertised as supported for model `gpt-test` and will be omitted from requests.",
+        "configured service tier fast\n is not advertised as supported by this model\n will be omitted from requests",
       ),
       { provider: "codex", scope: "provider_turn", source: "sdk" },
     );
-    expect(classification).toMatchObject({
+    expect(splitAcrossLines.category).not.toBe("configuration");
+
+    const valid = classifyProviderFailure(
+      new Error(`${repeatedPrefix}${repeatedMiddle} will be omitted from requests`),
+      { provider: "codex", scope: "provider_turn", source: "sdk" },
+    );
+    expect(valid).toMatchObject({
       category: "configuration",
       reasonCode: "codex_service_tier_unsupported",
-    });
-    expect(
-      decideProviderRetry({
-        classification,
-        scope: "provider_turn",
-        attempt: 1,
-        replaySafety: "pre_provider",
-      }),
-    ).toMatchObject({
-      action: "stop",
-      reasonCode: "codex_service_tier_unsupported",
-      terminalKind: "needs_operator",
     });
   });
 
@@ -353,6 +386,36 @@ describe("classifyProviderFailure", () => {
     expect(
       decideProviderRetry({ classification: c, scope: "session_start", attempt: 1, replaySafety: "pre_provider" }),
     ).toMatchObject({ action: "stop", terminalKind: "needs_operator" });
+  });
+
+  it("classifies Antigravity missing/auth/protocol failures deterministically", () => {
+    const missing = classifyProviderFailure(new Error("Antigravity CLI is missing on this machine"), {
+      provider: "antigravity",
+      scope: "session_start",
+      source: "session",
+    });
+    expect(missing).toMatchObject({ category: "capability", reasonCode: "antigravity_binary_missing" });
+
+    const auth = classifyProviderFailure(new Error("Antigravity returned an authentication required error"), {
+      provider: "antigravity",
+      scope: "provider_turn",
+      source: "stream",
+    });
+    expect(auth).toMatchObject({ category: "credential" });
+
+    const protocol = classifyProviderFailure(new Error("expected one conversation ID, observed none"), {
+      provider: "antigravity",
+      scope: "provider_turn",
+      source: "stream",
+    });
+    expect(protocol).toMatchObject({ category: "configuration", reasonCode: "antigravity_protocol_error" });
+
+    const platform = classifyProviderFailure(new Error("Antigravity is not supported on Windows in v1"), {
+      provider: "antigravity",
+      scope: "session_start",
+      source: "session",
+    });
+    expect(platform).toMatchObject({ category: "capability", reasonCode: "antigravity_platform_unsupported" });
   });
 
   it("classifies Pi credential phrasings as needs_operator and does not unknown-retry them", () => {
