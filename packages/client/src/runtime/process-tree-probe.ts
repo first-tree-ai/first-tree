@@ -190,6 +190,13 @@ type PsSubprocessProbeOptions = {
  * parse, both result sets publish empty, and the idle-suspend protection that
  * predates any of this goes with them.
  */
+/**
+ * Cap on unassigned boundary candidates held per chat. A provider that never
+ * appears in a scan would otherwise accumulate one per turn forever; the
+ * oldest are the ones no live provider can still claim.
+ */
+const MAX_PENDING_TURN_BOUNDARIES = 32;
+
 export const PROCESS_SNAPSHOT_PS_ARGS = ["-axo", "pid=,ppid=,etime=,comm="] as const;
 
 export async function defaultProcessSnapshot(): Promise<string> {
@@ -220,16 +227,19 @@ export class PsSubprocessProbe implements SubprocessProbe {
   private chatIdsWithLiveWork = new Set<string>();
   private chatIdsWithSessionSpawnedWork = new Set<string>();
   /**
-   * The latest unassigned turn-start instant per chat. Written synchronously,
-   * no I/O.
+   * Unassigned turn-start instants per chat, oldest first. Written
+   * synchronously, no I/O.
    *
-   * Its caller fires once per distinct turn, so overwriting is what a newer
-   * turn is *for*: a replacement provider's own first turn must supersede a
-   * candidate left over from the process it replaced, even when that turn
-   * happens before any scan has seen the replacement. Repeated events inside
-   * one turn cannot move it, because they never reach here.
+   * A list rather than one slot, because collapsing it forces a choice that
+   * loses real cases either way: keeping only the newest discards turn 1's
+   * boundary when two turns run between scans, so work turn 1 launched reads
+   * as infrastructure; keeping only the oldest discards a replacement
+   * provider's own first turn. Neither is a property of the timestamps — it is
+   * an artifact of throwing candidates away before any provider has had a
+   * chance to claim one. A provider adopts the earliest candidate that
+   * postdates it, so both cases are answered from the same list.
    */
-  private readonly pendingTurnBoundaryMsByChat = new Map<string, number>();
+  private readonly pendingTurnBoundariesMsByChat = new Map<string, number[]>();
   /**
    * Per provider pid: the instant its first turn began. Assigned once — from a
    * chat boundary that is not older than the provider itself — and never
@@ -262,7 +272,17 @@ export class PsSubprocessProbe implements SubprocessProbe {
   }
 
   noteTurnBoundary(chatId: string): void {
-    this.pendingTurnBoundaryMsByChat.set(chatId, Date.now());
+    const now = Date.now();
+    const pending = this.pendingTurnBoundariesMsByChat.get(chatId);
+    if (!pending) {
+      this.pendingTurnBoundariesMsByChat.set(chatId, [now]);
+      return;
+    }
+    // Same-instant duplicates carry no information: the explicit provider hook
+    // and the event floor can both report one turn's boundary.
+    if (pending[pending.length - 1] === now) return;
+    pending.push(now);
+    if (pending.length > MAX_PENDING_TURN_BOUNDARIES) pending.shift();
   }
 
   stop(): void {
@@ -309,17 +329,29 @@ export class PsSubprocessProbe implements SubprocessProbe {
         const providerRow = rowsByPid.get(providerPid);
         let boundaryMs = this.boundaryMsByProviderPid.get(providerPid);
         if (boundaryMs === undefined && chatId && providerRow) {
-          const chatBoundary = this.pendingTurnBoundaryMsByChat.get(chatId);
+          // The earliest candidate this provider could own. Earliest, so a
+          // second turn cannot bury work the first one launched; "could own",
+          // so a replacement skips its predecessor's leftovers.
+          const providerLatestStart = latestStartMs(providerRow, scanEndMs);
+          const chatBoundary = (this.pendingTurnBoundariesMsByChat.get(chatId) ?? []).find(
+            (candidate) => candidate >= providerLatestStart,
+          );
           // Adopt only a boundary DEFINITELY at or after this provider started:
           // the latest instant its age allows, measured from the latest instant
           // `ps` could have sampled. Comparing against the earliest instead
           // would let a replacement born in the same second adopt its
           // predecessor's boundary and then read its own startup MCP child as
           // work.
-          if (chatBoundary !== undefined && chatBoundary >= latestStartMs(providerRow, scanEndMs)) {
+          if (chatBoundary !== undefined) {
             boundaryMs = chatBoundary;
             this.boundaryMsByProviderPid.set(providerPid, chatBoundary);
-            this.pendingTurnBoundaryMsByChat.delete(chatId);
+            // Everything up to and including the adopted candidate is spent:
+            // older ones can never be owned by a later provider either.
+            const remaining = (this.pendingTurnBoundariesMsByChat.get(chatId) ?? []).filter(
+              (candidate) => candidate > chatBoundary,
+            );
+            if (remaining.length > 0) this.pendingTurnBoundariesMsByChat.set(chatId, remaining);
+            else this.pendingTurnBoundariesMsByChat.delete(chatId);
           }
         }
         const live = hasDescendant(providerPid, childrenByParent);

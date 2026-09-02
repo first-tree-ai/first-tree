@@ -62,12 +62,6 @@ export type SessionProjectionAuthorityDeps = {
    * owns both the probe and the cap).
    */
   hasReportableBackgroundWork: (chatId: string) => boolean;
-  /**
-   * A turn opened for this chat. The subprocess probe records the instant, and
-   * later reads each provider child's own age against it: what predates the
-   * first turn is startup infrastructure, what started after it is work.
-   */
-  onProviderTurnStarted: (chatId: string) => void;
   onRuntimeStateChange: () => ((state: RuntimeState) => void) | undefined;
   /** Inbox processing ownership still lives on InboxDeliveryCoordinator. */
   hasProcessingOwnedWork: (chatId: string) => boolean;
@@ -401,16 +395,12 @@ export class SessionProjectionAuthority<
    * and projecting `idle` for it made a busy agent read as "Idle" on every
    * chat surface.
    */
-  noteProviderTurnStart(chatId: string): void {
-    if (this.providerTurnInFlight.has(chatId)) return;
+  /** Returns true when this opened a turn, false when one was already in flight. */
+  noteProviderTurnStart(chatId: string): boolean {
+    if (this.providerTurnInFlight.has(chatId)) return false;
     this.providerTurnInFlight.add(chatId);
-    // Below the in-flight guard on purpose: this fires once per DISTINCT turn,
-    // never once per in-turn event. That is what lets the subprocess probe
-    // treat each call as a newer boundary candidate — a later turn supersedes
-    // an unassigned one — without a turn's own second tool call being able to
-    // move the boundary past work its first one already launched.
-    this.deps.onProviderTurnStarted(chatId);
     this.projectSessionRuntime(chatId);
+    return true;
   }
 
   /**

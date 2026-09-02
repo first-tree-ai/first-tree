@@ -68,7 +68,7 @@ type SessionRuntimeInternals = {
     recomputeRuntimeState(): void;
     reaffirmRuntimeStates(): void;
     hasBackgroundWork(chatId: string): boolean;
-    noteProviderTurnStart(chatId: string): void;
+    noteProviderTurnStart(chatId: string): boolean;
     noteProviderTurnEnd(chatId: string): void;
     persistRegistry(): void;
     recordHandlerSource(entry: SessionRecord, sourceKey: string): void;
@@ -7882,10 +7882,9 @@ describe("SessionRuntime edge coverage", () => {
   });
 
   it("signals one turn boundary per turn, not one per in-turn event", async () => {
-    // The probe treats each boundary call as a newer candidate, so this guard
-    // is what stops a turn's second tool call from moving the boundary past a
-    // watcher its first one already launched. It lives here rather than in the
-    // probe because only the projection knows where a turn begins and ends.
+    // Only the projection knows where a turn begins and ends, so it owns the
+    // "did this open a turn" answer; the runtime turns that into at most one
+    // boundary candidate per turn from the noisy event floor.
     const chatId = "chat-one-boundary-per-turn";
     const boundaries: string[] = [];
     const probe: SubprocessProbe = {
@@ -7898,15 +7897,17 @@ describe("SessionRuntime edge coverage", () => {
     const i = internals(sm);
     bindSeededSession(i, makeSessionRecord(chatId, { status: "active", lastActivity: Date.now() }));
 
-    i.projection.noteProviderTurnStart(chatId);
-    i.projection.noteProviderTurnStart(chatId);
-    i.projection.noteProviderTurnStart(chatId);
-    expect(boundaries).toEqual([chatId]);
+    // The projection reports whether a call actually opened a turn; that
+    // boolean is what the runtime gates the probe boundary on, so repeated
+    // in-turn events cannot each become a candidate.
+    expect(i.projection.noteProviderTurnStart(chatId)).toBe(true);
+    expect(i.projection.noteProviderTurnStart(chatId)).toBe(false);
+    expect(i.projection.noteProviderTurnStart(chatId)).toBe(false);
 
-    // A distinct turn must be able to supersede the previous candidate.
+    // A distinct turn is a new candidate.
     i.projection.noteProviderTurnEnd(chatId);
-    i.projection.noteProviderTurnStart(chatId);
-    expect(boundaries).toEqual([chatId, chatId]);
+    expect(i.projection.noteProviderTurnStart(chatId)).toBe(true);
+    expect(boundaries).toEqual([]);
 
     await sm.shutdown();
   });

@@ -242,6 +242,34 @@ describe("PsSubprocessProbe", () => {
     probe.stop();
   });
 
+  it("keeps work from turn 1 when a second turn opens before the next scan", async () => {
+    // Two turns can easily run inside one 10s poll interval. If a later
+    // candidate displaced the earlier one, the watcher turn 1 launched would
+    // predate the surviving boundary and read as infrastructure for its life.
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    const chatId = "chat-two-turns";
+    let rows = [proc(2100, daemonPid, 120, "/opt/homebrew/bin/claude"), proc(2101, 2100, 119, "npm exec momentic mcp")];
+    const probe = probeOver(() => rows, chatId);
+    await probe.refresh();
+
+    probe.noteTurnBoundary(chatId); // turn 1 at T0
+    vi.setSystemTime(T0 + 2_000);
+    rows = [...rows, proc(2102, 2100, 0, "/bin/zsh")]; // …which launches a watcher
+    vi.setSystemTime(T0 + 5_000);
+    probe.noteTurnBoundary(chatId); // turn 2, still before any scan
+
+    vi.setSystemTime(T0 + 30_000);
+    rows = [
+      proc(2100, daemonPid, 150, "/opt/homebrew/bin/claude"),
+      proc(2101, 2100, 149, "npm exec momentic mcp"),
+      proc(2102, 2100, 28, "/bin/zsh"),
+    ];
+    await probe.refresh();
+    expect(probe.hasSessionSpawnedSubprocess(chatId)).toBe(true);
+    probe.stop();
+  });
+
   it("takes a replacement provider's own first turn even before any scan sees it", async () => {
     // The ordering the poll cannot exclude: A leaves an unassigned candidate,
     // B replaces A, and B's first turn happens before any scan. If that turn

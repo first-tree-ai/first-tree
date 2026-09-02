@@ -611,7 +611,6 @@ export class SessionRuntime {
         onRuntimeStateChange: () => this.config.onRuntimeStateChange,
         hasProcessingOwnedWork: (chatId) => this.inboxDelivery.hasProcessingOwnedWork(chatId),
         hasReportableBackgroundWork: (chatId) => this.slotScheduler.hasReportableBackgroundWork(chatId),
-        onProviderTurnStarted: (chatId) => this.config.subprocessProbe?.noteTurnBoundary(chatId),
         drainPendingOnIdle: () => {
           this.slotScheduler.drainPendingQueue();
         },
@@ -1611,7 +1610,11 @@ export class SessionRuntime {
       return;
     }
     if (event.kind === "assistant_text" || event.kind === "thinking" || event.kind === "tool_call") {
-      this.projection.noteProviderTurnStart(chatId);
+      // The event floor is noisy — several of these arrive per turn — so only
+      // the one that actually opens a turn becomes a boundary candidate.
+      if (this.projection.noteProviderTurnStart(chatId)) {
+        this.config.subprocessProbe?.noteTurnBoundary(chatId);
+      }
     }
   }
 
