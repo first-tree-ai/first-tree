@@ -7,7 +7,7 @@ import {
   defaultDataDir,
   defaultHome,
   initConfig,
-  readContextTreeRepository,
+  readContextTreeRepositorySetting,
   resetConfig,
   resetConfigMeta,
 } from "@first-tree/shared/config";
@@ -74,8 +74,15 @@ const doctorRemoteLatchSchema = z
  * resolvable or the `context-tree-*` Skills were never installed.
  */
 export async function checkContextTreeCli(): Promise<CheckResult> {
-  const repository = readContextTreeRepository();
+  const { raw, repository } = readContextTreeRepositorySetting();
   if (!repository) {
+    if (raw !== null) {
+      return {
+        label: "Context Tree CLI",
+        ok: false,
+        detail: `context_tree.repository value ${JSON.stringify(raw)} is unusable; external mode is off`,
+      };
+    }
     return { label: "Context Tree CLI", ok: true, detail: "external mode off (context_tree.repository unset)" };
   }
   if (!resolveContextTreeCli()) {
@@ -88,7 +95,7 @@ export async function checkContextTreeCli(): Promise<CheckResult> {
   // `list` is the cheapest JSON-emitting probe: no connection, no network, and
   // it tolerates an absent managed root. `--version` prints a bare string, so it
   // is not usable through the JSON envelope parser.
-  const probe = await runContextTreeCommand(["list"]);
+  const probe = await runContextTreeCommand(["list", "--json"]);
   if (!probe.ok) {
     return { label: "Context Tree CLI", ok: false, detail: `${repository}: ${probe.reason}` };
   }

@@ -2,7 +2,12 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { readContextTreeRepository } from "../client-config.js";
+import {
+  clientConfigSchema,
+  normalizeContextTreeRepository,
+  readContextTreeRepository,
+  readContextTreeRepositorySetting,
+} from "../client-config.js";
 import { resetConfigMeta } from "../resolver.js";
 import { resetConfig } from "../singleton.js";
 
@@ -38,6 +43,24 @@ describe("readContextTreeRepository", () => {
     expect(readContextTreeRepository()).toBe("acme/context");
   });
 
+  it("returns a canonical repository when the stored value is a GitHub URL", () => {
+    writeClientConfig(
+      "server:\n  url: http://localhost:8000\ncontext_tree:\n  repository: https://github.com/acme/context.git\n",
+    );
+    expect(readContextTreeRepository()).toBe("acme/context");
+  });
+
+  it("transforms the field schema output to the canonical repository", () => {
+    expect(clientConfigSchema.context_tree.repository.schema.parse("https://github.com/acme/context.git")).toBe(
+      "acme/context",
+    );
+  });
+
+  it("preserves a set-but-unusable value for diagnostics", () => {
+    writeClientConfig("server:\n  url: http://localhost:8000\ncontext_tree:\n  repository: owner/.hidden\n");
+    expect(readContextTreeRepositorySetting()).toEqual({ raw: "owner/.hidden", repository: null });
+  });
+
   it("returns null rather than throwing when there is no config at all", () => {
     // Login and the standalone runtime boot both call this before any config
     // exists. Throwing here would fail the login instead of reporting a mode.
@@ -69,8 +92,36 @@ describe("readContextTreeRepository", () => {
     "acme.co/context",
     "acme",
     "acme/context/extra",
+    "owner/-repo",
+    "owner/_repo",
+    "owner/.hidden",
+    "owner/repo.git.git",
+    `${"a".repeat(40)}/context`,
+    `acme/${"r".repeat(101)}`,
   ])("rejects %s, leaving external mode off", (repository) => {
     writeClientConfig(`server:\n  url: http://localhost:8000\ncontext_tree:\n  repository: "${repository}"\n`);
     expect(readContextTreeRepository()).toBeNull();
+  });
+});
+
+describe("normalizeContextTreeRepository", () => {
+  it.each([
+    ["https://github.com/acme/context", "acme/context"],
+    ["git@github.com:acme/context.git", "acme/context"],
+    ["acme/context.git", "acme/context"],
+    ["acme/context/", "acme/context"],
+    [" acme/context ", "acme/context"],
+  ])("normalizes %s", (value, expected) => {
+    expect(normalizeContextTreeRepository(value)).toBe(expected);
+  });
+
+  it.each([
+    "owner/-repo",
+    "owner/_repo",
+    "owner/.hidden",
+    `${"a".repeat(40)}/repo`,
+    `owner/${"r".repeat(101)}`,
+  ])("rejects %s", (value) => {
+    expect(normalizeContextTreeRepository(value)).toBeNull();
   });
 });

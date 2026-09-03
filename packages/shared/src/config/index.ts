@@ -11,7 +11,9 @@ export type { ClientConfig } from "./client-config.js";
 export {
   clientConfigSchema,
   getClientConfig,
+  normalizeContextTreeRepository,
   readContextTreeRepository,
+  readContextTreeRepositorySetting,
   updatePolicySchema,
 } from "./client-config.js";
 // Agent loader

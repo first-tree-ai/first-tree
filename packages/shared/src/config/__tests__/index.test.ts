@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { agentConfigSchema, DEFAULT_AGENT_CONCURRENCY, DEFAULT_AGENT_MAX_SESSIONS } from "../agent-config.js";
-import { clientConfigSchema, getClientConfig, updatePolicySchema } from "../client-config.js";
+import {
+  clientConfigSchema,
+  getClientConfig,
+  normalizeContextTreeRepository,
+  readContextTreeRepositorySetting,
+  updatePolicySchema,
+} from "../client-config.js";
 import * as config from "../index.js";
 import { loadAgents } from "../loader.js";
 import { UPDATE_POLICY_DEFAULT } from "../phase.js";
@@ -29,6 +35,8 @@ describe("config barrel", () => {
     expect(config.DEFAULT_AGENT_MAX_SESSIONS).toBe(DEFAULT_AGENT_MAX_SESSIONS);
     expect(config.clientConfigSchema).toBe(clientConfigSchema);
     expect(config.getClientConfig).toBe(getClientConfig);
+    expect(config.normalizeContextTreeRepository).toBe(normalizeContextTreeRepository);
+    expect(config.readContextTreeRepositorySetting).toBe(readContextTreeRepositorySetting);
     expect(config.updatePolicySchema).toBe(updatePolicySchema);
     expect(config.loadAgents).toBe(loadAgents);
     expect(config.UPDATE_POLICY_DEFAULT).toBe(UPDATE_POLICY_DEFAULT);

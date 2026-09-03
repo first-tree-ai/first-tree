@@ -223,6 +223,8 @@ export function registerLoginCommand(program: Command): void {
           print.line(`  ✓ ${formatContextTreeSetupReport(contextTree)}\n`);
         } else if (contextTree.status === "failed") {
           print.line(`  ⚠️  ${formatContextTreeSetupReport(contextTree)}\n`);
+        } else if (contextTree.status === "removed" && (contextTree.removedSkillPaths?.length ?? 0) > 0) {
+          print.line(`  ✓ ${formatContextTreeSetupReport(contextTree)}\n`);
         }
 
         const shouldInstallService = options.start !== false && isServiceSupported();

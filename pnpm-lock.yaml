@@ -68,8 +68,8 @@ importers:
         specifier: 0.0.1-rc.5
         version: 0.0.1-rc.5(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.0.1-rc.5(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/dsh-session-persistence@0.0.1-rc.5(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-brand@0.0.1-rc.5(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.0.1-rc.5(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.0.1-rc.5(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/dsh-session@0.0.1-rc.5(3bc9615f24fec432407688de3dac7a2f))(@deepseek-ai/dsh-timeout@0.0.1-rc.5(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.0.1-rc.5(@deepseek-ai/cordis@4.0.1))))(@deepseek-ai/dsh-session@0.0.1-rc.5(3bc9615f24fec432407688de3dac7a2f))
       '@first-tree-ai/context-tree':
-        specifier: ^0.1.7
-        version: 0.1.7
+        specifier: ^0.1.9
+        version: 0.1.9
       '@inquirer/prompts':
         specifier: ^8.3.0
         version: 8.3.2(@types/node@22.19.15)
@@ -1942,8 +1942,8 @@ packages:
   '@fastify/websocket@11.2.0':
     resolution: {integrity: sha512-3HrDPbAG1CzUCqnslgJxppvzaAZffieOVbLp1DAy1huCSynUWPifSvfdEDUR8HlJLp3sp1A36uOM2tJogADS8w==}
 
-  '@first-tree-ai/context-tree@0.1.7':
-    resolution: {integrity: sha512-cbCSxD6AB0Z50b4i094unUQ49va/DvRyaTEBQWhTZd8OKD/XpJPnrrLFBpLA2Csh3+DJRXvekMgcdARHiT2tcg==}
+  '@first-tree-ai/context-tree@0.1.9':
+    resolution: {integrity: sha512-RQvvgbJlr6lj7r8bupTs0YwV5uecdZyreDlLrFvD/mz/p4fdYZ4BIoF9sGHq3jMP1WabQRQgiJ9A1szhZ6/NXw==}
     engines: {node: '>=22.13.0'}
     hasBin: true
 
@@ -7581,7 +7581,7 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  '@first-tree-ai/context-tree@0.1.7':
+  '@first-tree-ai/context-tree@0.1.9':
     dependencies:
       commander: 15.0.0
       mdast-util-from-markdown: 2.0.3

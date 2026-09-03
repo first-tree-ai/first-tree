@@ -1283,6 +1283,15 @@ first-tree login <code>      # installs the Skills and links the tree
 first-tree doctor            # "Context Tree CLI" line reports the mode
 ```
 
+The setting accepts canonical `OWNER/REPO`, GitHub HTTPS URLs, GitHub SSH URLs,
+an optional trailing slash, and an optional `.git` suffix. `config set`
+normalizes these to `OWNER/REPO`; for example,
+`https://github.com/acme/context.git` is stored as `acme/context`. Repository
+names must start with an alphanumeric character, so identities such as
+`owner/-repo`, `owner/_repo`, and `owner/.hidden` are refused. If an unusable
+value already exists in `client.yaml`, external mode stays off and `doctor`
+reports the value rather than calling it unset.
+
 With it set, `login` runs `context-tree install`, which writes
 the `context-tree-{setup,create,connect,read,write,publish}` Skills into
 `~/.claude/skills` and `~/.codex/skills`, then `context-tree connect
@@ -1327,13 +1336,13 @@ Re-running `first-tree login` also links any workspace created since.
 `https` URL and the `context-tree` package holds no tokens of its own, so run
 `gh auth setup-git` (or configure a credential helper) first.
 
-**To revert**, unset the key and re-run `first-tree login`. The external CLI has
-no uninstall command, so First Tree records what it installed in
-`<dataDir>/context-tree-install.json` and removes exactly that — the Skills it
-wrote and the shim — then the First Tree Skills are reprojected on the next
-session. Only ledger entries are ever deleted, so a `context-tree install` you
-ran yourself is left alone, as are the tree checkouts under
-`~/.context-tree/trees/` and the connection records in
+**To revert**, unset the key and re-run `first-tree login`. First Tree runs
+`context-tree uninstall`, which removes every `context-tree-*` Skill from this
+machine's Claude and Codex Skill directories, including one installed by hand,
+and removes only a shim that First Tree still owns. First Tree's Skills are
+reprojected on the next session. The uninstall does not prune host directories
+or touch project `AGENTS.md` pointers, tree checkouts under
+`~/.context-tree/trees/`, or connection records in
 `~/.context-tree/connections.json`.
 
 This matters because a *global* npm install runs the bundled dependency's own

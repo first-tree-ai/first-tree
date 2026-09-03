@@ -15,6 +15,9 @@ const sharedConfigMocks = vi.hoisted(() => ({
   defaultDataDir: vi.fn(),
   defaultHome: vi.fn(),
   getConfigValue: vi.fn(),
+  normalizeContextTreeRepository: vi.fn((value: string) =>
+    value === "https://github.com/acme/context" ? "acme/context" : null,
+  ),
   readConfigFile: vi.fn(),
   setConfigValue: vi.fn(),
 }));
@@ -203,6 +206,16 @@ describe("config commands", () => {
       "feature.enabled",
       true,
     );
+    await runConfig(["set", "context_tree.repository", "https://github.com/acme/context"]);
+    expect(sharedConfigMocks.setConfigValue).toHaveBeenLastCalledWith(
+      join(tempDir, "config", "client.yaml"),
+      "context_tree.repository",
+      "acme/context",
+    );
+    await expect(runConfig(["set", "context_tree.repository", "owner/.hidden"])).rejects.toMatchObject({
+      code: "INVALID_CONTEXT_TREE_REPOSITORY",
+      exitCode: 2,
+    });
 
     sharedConfigMocks.readConfigFile.mockReturnValueOnce({});
     await runConfig(["show"]);
