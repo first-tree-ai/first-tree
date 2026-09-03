@@ -6,7 +6,7 @@ import type {
   SessionEventKind,
 } from "@first-tree/shared";
 import { sessionEventSchema } from "@first-tree/shared";
-import { and, asc, desc, eq, gt, gte, inArray, lt, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, lt, sql } from "drizzle-orm";
 import type { Database } from "../../../db/connection.js";
 import { agentChatSessions } from "../../../db/schema/agent-chat-sessions.js";
 import { agents } from "../../../db/schema/agents.js";
@@ -273,8 +273,21 @@ export async function listEvents(
  * The caller-facing route gates the viewer with `requireChatAccess`; this
  * query independently constrains event owners to current speaker membership.
  * That makes chat membership the disclosure boundary without broadening the
- * agent's org-level discoverability. A window function applies `limit` per
- * agent, so one noisy speaker cannot crowd every sibling out of the response.
+ * agent's org-level discoverability.
+ *
+ * Query shape (one SQL statement / snapshot):
+ *   - `authorized_speakers`: the chat's current speaker membership with the
+ *     agent type / same-org constraints — the disclosure boundary.
+ *   - Per speaker, a `CROSS JOIN LATERAL` event window that uses the unique
+ *     `(agent_id, chat_id, seq)` index (`ORDER BY seq` + `LIMIT limit + 1`,
+ *     asc or desc). Payloads are carried ONLY for these returned rows.
+ *   - Per speaker, current-turn metadata (last `turn_end` seq + `MIN(created_at)`
+ *     of the eligible kinds after it) is computed ONCE per speaker in a
+ *     MATERIALIZED CTE over seq/kind/created_at only — never once per
+ *     returned event, and never over full-history window sorts. It stays
+ *     independent of the capped event window, so a limit=2 desc page still
+ *     reports a turn that started outside the window. `MIN(created_at)` is
+ *     kept exactly — seq order does not prove monotonic timestamps.
  */
 export async function listChatSpeakerEvents(
   db: Database,
@@ -285,75 +298,65 @@ export async function listChatSpeakerEvents(
   const direction = options?.direction ?? "asc";
   const orderFragment = direction === "desc" ? sql`DESC` : sql`ASC`;
 
-  const scoped = db
-    .select({
-      id: sessionEvents.id,
-      agentId: sessionEvents.agentId,
-      chatId: sessionEvents.chatId,
-      seq: sessionEvents.seq,
-      kind: sessionEvents.kind,
-      payload: sessionEvents.payload,
-      createdAt: sessionEvents.createdAt,
-      lastTurnEndSeq: sql<number>`coalesce(
-        max(${sessionEvents.seq}) filter (where ${sessionEvents.kind} = 'turn_end')
-          over (partition by ${sessionEvents.agentId}),
-        0
-      )`.as("last_turn_end_seq"),
-    })
-    .from(sessionEvents)
-    .innerJoin(
-      chatMembership,
-      and(eq(chatMembership.chatId, sessionEvents.chatId), eq(chatMembership.agentId, sessionEvents.agentId)),
+  const rows = await db.execute<SpeakerWindowRow>(sql`
+    WITH authorized_speakers AS MATERIALIZED (
+      SELECT cm.agent_id AS agent_id
+        FROM chat_membership cm
+        INNER JOIN agents a ON a.uuid = cm.agent_id
+        INNER JOIN chats ch ON ch.id = cm.chat_id
+       WHERE cm.chat_id = ${chatId}
+         AND cm.access_mode = 'speaker'
+         AND a.type = 'agent'
+         AND a.organization_id = ch.organization_id
+    ),
+    -- Per-speaker current-turn metadata, computed once per speaker from
+    -- seq/kind/created_at only (never full payloads): the last turn_end seq
+    -- and the earliest created_at of the eligible current-turn kinds after
+    -- it. Materialized so the planner cannot inline it per returned row.
+    speaker_meta AS MATERIALIZED (
+      SELECT sp.agent_id                    AS agent_id,
+             coalesce(last_end.last_turn_end_seq, 0) AS last_turn_end_seq,
+             turn_start.turn_started_at     AS turn_started_at
+        FROM authorized_speakers sp
+        LEFT JOIN LATERAL (
+          SELECT max(se.seq) AS last_turn_end_seq
+            FROM session_events se
+           WHERE se.agent_id = sp.agent_id
+             AND se.chat_id  = ${chatId}
+             AND se.kind     = 'turn_end'
+        ) last_end ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT min(se.created_at) AS turn_started_at
+            FROM session_events se
+           WHERE se.agent_id = sp.agent_id
+             AND se.chat_id  = ${chatId}
+             AND se.kind     IN ('tool_call', 'thinking', 'assistant_text')
+             AND se.seq > coalesce(last_end.last_turn_end_seq, 0)
+        ) turn_start ON TRUE
     )
-    .innerJoin(agents, eq(agents.uuid, sessionEvents.agentId))
-    .innerJoin(chats, eq(chats.id, sessionEvents.chatId))
-    .where(
-      and(
-        eq(sessionEvents.chatId, chatId),
-        eq(chatMembership.accessMode, "speaker"),
-        eq(agents.type, "agent"),
-        eq(agents.organizationId, chats.organizationId),
-      ),
-    )
-    .as("scoped_chat_session_events");
+    SELECT sp.agent_id       AS "agentId",
+           w.id              AS id,
+           w.chat_id         AS "chatId",
+           w.seq             AS seq,
+           w.kind            AS kind,
+           w.payload         AS payload,
+           w.created_at      AS "createdAt",
+           m.turn_started_at AS "turnStartedAt"
+      FROM authorized_speakers sp
+      CROSS JOIN LATERAL (
+        SELECT se.id AS id, se.chat_id AS chat_id, se.seq AS seq, se.kind AS kind,
+               se.payload AS payload, se.created_at AS created_at
+          FROM session_events se
+         WHERE se.agent_id = sp.agent_id
+           AND se.chat_id  = ${chatId}
+         ORDER BY se.seq ${orderFragment}
+         LIMIT ${limit + 1}
+      ) w
+      LEFT JOIN speaker_meta m ON m.agent_id = sp.agent_id
+     ORDER BY sp.agent_id, w.seq ${orderFragment}
+  `);
 
-  const ranked = db
-    .select({
-      id: scoped.id,
-      agentId: scoped.agentId,
-      chatId: scoped.chatId,
-      seq: scoped.seq,
-      kind: scoped.kind,
-      payload: scoped.payload,
-      createdAt: scoped.createdAt,
-      turnStartedAt: sql<Date | string | null>`min(${scoped.createdAt}) filter (
-        where ${scoped.seq} > ${scoped.lastTurnEndSeq}
-          and ${scoped.kind} in ('tool_call', 'thinking', 'assistant_text')
-      ) over (partition by ${scoped.agentId})`.as("turn_started_at"),
-      rank: sql<number>`row_number() over (
-        partition by ${scoped.agentId}
-        order by ${scoped.seq} ${orderFragment}
-      )`.as("event_rank"),
-    })
-    .from(scoped)
-    .as("ranked_chat_session_events");
-
-  const rows = await db
-    .select({
-      id: ranked.id,
-      agentId: ranked.agentId,
-      chatId: ranked.chatId,
-      seq: ranked.seq,
-      kind: ranked.kind,
-      payload: ranked.payload,
-      createdAt: ranked.createdAt,
-      turnStartedAt: ranked.turnStartedAt,
-    })
-    .from(ranked)
-    .where(lte(ranked.rank, limit + 1))
-    .orderBy(asc(ranked.agentId), direction === "desc" ? desc(ranked.seq) : asc(ranked.seq));
-
-  const rowsByAgent = new Map<string, typeof rows>();
+  const rowsByAgent = new Map<string, SpeakerWindowRow[]>();
   for (const row of rows) {
     const feedRows = rowsByAgent.get(row.agentId);
     if (feedRows) feedRows.push(row);
@@ -363,7 +366,7 @@ export async function listChatSpeakerEvents(
   return {
     feeds: [...rowsByAgent].map(([agentId, feedRows]) => {
       const hasMore = feedRows.length > limit;
-      const items = (hasMore ? feedRows.slice(0, limit) : feedRows).map(rowToEvent);
+      const items = (hasMore ? feedRows.slice(0, limit) : feedRows).map(toEventRow).map(rowToEvent);
       const last = items[items.length - 1];
       const turnStartedAt = feedRows[0]?.turnStartedAt ?? null;
       const turnStartedAtIso =
@@ -379,6 +382,41 @@ export async function listChatSpeakerEvents(
         turnStartedAt: turnStartedAtIso,
       };
     }),
+  };
+}
+
+/** Raw row shape returned by `listChatSpeakerEvents` (snake_case columns
+ *  aliased to camelCase in SQL). Timestamp values may arrive as JS `Date` or
+ *  as ISO/format strings depending on the driver's timestamp parsing, so
+ *  `createdAt` / `turnStartedAt` are normalized defensively before use. */
+type SpeakerWindowRow = {
+  agentId: string;
+  id: string;
+  chatId: string;
+  seq: number;
+  kind: string;
+  payload: unknown;
+  createdAt: Date | string;
+  turnStartedAt: Date | string | null;
+};
+
+function toEventRow(row: SpeakerWindowRow): {
+  id: string;
+  agentId: string;
+  chatId: string;
+  seq: number;
+  kind: string;
+  payload: unknown;
+  createdAt: Date;
+} {
+  return {
+    id: row.id,
+    agentId: row.agentId,
+    chatId: row.chatId,
+    seq: row.seq,
+    kind: row.kind,
+    payload: row.payload,
+    createdAt: row.createdAt instanceof Date ? row.createdAt : new Date(row.createdAt),
   };
 }
 

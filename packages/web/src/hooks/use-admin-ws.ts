@@ -51,9 +51,9 @@ let refCount = 0;
 // 1s is the long-enough-to-fold-a-burst, short-enough-to-feel-live
 // trade-off — `liveActivity` (WorkingChip / chat-list dot) updates with at
 // most ~1s lag, well inside the 60s server-side `liveActivity` window. Also
-// applied to `chat:message`
-// to fold storm-of-messages flurries (formerly invalidated every frame
-// without a throttle).
+// applied to `chat:message` to fold storm-of-messages flurries, and to the
+// `session:event` timeline keys (per-chat / per-pair throttle below) — all
+// formerly invalidated every frame without a throttle.
 //
 // Each cache key gets its OWN leading + trailing pair via the factory
 // below so bursts in one channel don't starve another. The server's
@@ -171,6 +171,129 @@ function disposeSessionPairThrottle(): void {
   sessionPairThrottle.clear();
 }
 
+// `session:event` frames stream once per tool_call / thinking /
+// assistant_text / turn_end. ChatView mounts two reads off that stream — the
+// per-(agent, chat) agent feed `["session-events", agentId, chatId]` and the
+// per-chat aggregate `["chat-session-events", chatId]` — and every frame used
+// to invalidate both: one invalidation per frame per mounted timeline while
+// an agent ticks through a burst (each invalidation is a potential refetch;
+// the query library may coalesce concurrent requests). Same window as
+// everything above (INVALIDATE_THROTTLE_MS): a leading fire keeps the
+// timeline feeling live, a trailing fire folds the burst into at most one
+// extra refresh once it settles.
+//
+// The window is keyed per (agentId, chatId) pair for the agent feed and per
+// chatId for the aggregate, so concurrent chats — and concurrent agents
+// streaming into the same chat — never block one another (same per-pair
+// reasoning as `sessionPairThrottle` above).
+//
+// Unlike the fixed invalidators, these keys arrive for arbitrary chats, so
+// the maps self-clean instead of accumulating one entry per chat ever seen:
+// every actual fire (leading or trailing) keeps `lastAt` for a full cooldown
+// — so a frame landing right on a fire boundary schedules the next trailing
+// refresh instead of re-firing a leading one — and an idle sweep drops the
+// entry once the cooldown elapses with no pending trailing refresh.
+type SessionEventThrottleEntry = {
+  lastAt: number;
+  trailingTimer: ReturnType<typeof setTimeout> | null;
+  sweepTimer: ReturnType<typeof setTimeout> | null;
+};
+
+const chatSessionEventsThrottle = new Map<string, SessionEventThrottleEntry>();
+const sessionEventPairThrottle = new Map<string, SessionEventThrottleEntry>();
+
+function armSessionEventThrottleSweep(
+  map: Map<string, SessionEventThrottleEntry>,
+  key: string,
+  entry: SessionEventThrottleEntry,
+): void {
+  if (entry.sweepTimer !== null) {
+    clearTimeout(entry.sweepTimer);
+  }
+  entry.sweepTimer = setTimeout(() => {
+    entry.sweepTimer = null;
+    // Idle cleanup only: a pending trailing refresh still owns the entry, and
+    // a re-armed entry (fresh `lastAt`) must not be deleted by a stale sweep
+    // that fires late.
+    if (map.get(key) !== entry || entry.trailingTimer !== null) return;
+    if (Date.now() - entry.lastAt >= INVALIDATE_THROTTLE_MS) {
+      map.delete(key);
+    }
+  }, INVALIDATE_THROTTLE_MS);
+}
+
+/**
+ * Leading + trailing throttle for one keyed timeline invalidation. Fires
+ * `fire` immediately on the first frame of a burst (or once the previous
+ * cooldown fully elapsed), then at most once more via a trailing timer while
+ * frames keep arriving inside the cooldown. `lastAt` is retained for a full
+ * cooldown after every actual fire so frames at the fire boundary fold into
+ * the next trailing refresh; entries are swept once idle, keeping the maps
+ * bounded. Note a fire is a cache-invalidation request, not a promise that
+ * exactly one HTTP/DB execution follows — query libraries coalesce.
+ */
+function scheduleSessionEventInvalidation(
+  map: Map<string, SessionEventThrottleEntry>,
+  key: string,
+  fire: () => void,
+): void {
+  const now = Date.now();
+  let entry = map.get(key);
+  if (!entry) {
+    // Fresh key (map self-cleans, so absence means idle). Seed `lastAt` a
+    // full window back so the first-ever frame fires immediately even when
+    // `Date.now()` is 0 under a fake clock.
+    entry = { lastAt: now - INVALIDATE_THROTTLE_MS, trailingTimer: null, sweepTimer: null };
+    map.set(key, entry);
+  }
+  if (entry.trailingTimer !== null) {
+    // A trailing refresh for this key is already pending and will refetch at
+    // the end of the cooldown — this frame is folded into it.
+    return;
+  }
+  const elapsed = now - entry.lastAt;
+  if (elapsed >= INVALIDATE_THROTTLE_MS) {
+    // Leading edge of a fresh burst (or the previous cooldown elapsed):
+    // refresh immediately and keep the entry for the full cooldown.
+    entry.lastAt = now;
+    armSessionEventThrottleSweep(map, key, entry);
+    fire();
+    return;
+  }
+  // Inside the cooldown with no trailing pending: guarantee exactly one
+  // refresh once the burst settles. The entry (with the refreshed `lastAt`)
+  // stays in place for the next cooldown.
+  entry.trailingTimer = setTimeout(() => {
+    entry.trailingTimer = null;
+    if (map.get(key) !== entry) return;
+    entry.lastAt = Date.now();
+    armSessionEventThrottleSweep(map, key, entry);
+    fire();
+  }, INVALIDATE_THROTTLE_MS - elapsed);
+}
+
+function invalidateChatSessionEvents(chatId: string): void {
+  scheduleSessionEventInvalidation(chatSessionEventsThrottle, chatId, () => {
+    if (latestQc) latestQc.invalidateQueries({ queryKey: ["chat-session-events", chatId] });
+  });
+}
+
+function invalidateSessionEventPair(agentId: string, chatId: string): void {
+  scheduleSessionEventInvalidation(sessionEventPairThrottle, `${agentId}:${chatId}`, () => {
+    if (latestQc) latestQc.invalidateQueries({ queryKey: ["session-events", agentId, chatId] });
+  });
+}
+
+function disposeSessionEventThrottles(): void {
+  for (const map of [chatSessionEventsThrottle, sessionEventPairThrottle]) {
+    for (const entry of map.values()) {
+      if (entry.trailingTimer) clearTimeout(entry.trailingTimer);
+      if (entry.sweepTimer) clearTimeout(entry.sweepTimer);
+    }
+    map.clear();
+  }
+}
+
 /**
  * Apply a session frame's per-agent status delta. When the server attached the
  * recomputed `status` (only for sockets whose viewer can access the chat),
@@ -254,14 +377,18 @@ function broadcast(msg: WsMessage) {
       meChatsInvalidator.invalidate(latestQc);
       patchOrInvalidateAgentStatus(latestQc, msg);
       // Frame carries `chatId` (api/orgs/ws.ts:82 spreads the notifier
-      // payload), so target the single chat-scoped batch ChatView reads.
+      // payload), so target the two timeline reads ChatView mounts — the
+      // per-(agent, chat) agent feed and the per-chat aggregate. Both ride
+      // the leading + trailing per-key throttle above: a tool-call burst
+      // otherwise fires one invalidation per frame per timeline (each a
+      // potential refetch, not a guaranteed SQL execution).
       const agentId = typeof msg.agentId === "string" ? msg.agentId : null;
       const chatId = typeof msg.chatId === "string" ? msg.chatId : null;
-      if (agentId && chatId) {
-        latestQc.invalidateQueries({ queryKey: ["session-events", agentId, chatId] });
-      }
       if (chatId) {
-        latestQc.invalidateQueries({ queryKey: ["chat-session-events", chatId] });
+        invalidateChatSessionEvents(chatId);
+        if (agentId) {
+          invalidateSessionEventPair(agentId, chatId);
+        }
       }
     } else if (msg.type === "chat:message") {
       // Best-effort realtime nudge for the chat-first workspace. The frame
@@ -486,6 +613,7 @@ function teardown() {
   sessionsInvalidator.dispose();
   chatAgentStatusInvalidator.dispose();
   disposeSessionPairThrottle();
+  disposeSessionEventThrottles();
   if (ws) {
     ws.close(1000, "unmount");
     ws = null;
@@ -508,6 +636,11 @@ function reconnectForOrgChange(): void {
   }
   reconnectAttempt = 0;
   cancelCurrentAdmissionTimer?.();
+  // A user-driven org switch clears the React-Query cache (auth-context
+  // selectOrganization) and swaps this socket to the new org. Drop in-flight
+  // session-event throttle state so a pending trailing timer from the
+  // previous org cannot fire against the new org's cache.
+  disposeSessionEventThrottles();
   const previous = ws;
   // Detach before closing so the stale socket's onclose (`socket !== ws`)
   // no-ops instead of scheduling a backoff reconnect to the previous org.

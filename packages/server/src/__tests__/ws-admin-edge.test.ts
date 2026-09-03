@@ -101,6 +101,8 @@ function makeDb(options: {
   humanRows?: unknown[];
   audienceRows?: unknown[][];
   finalMemberRows?: unknown[];
+  /** Rows for chat-status selects (speaker membership / session rows share the chatId-keyed projection). */
+  statusRows?: unknown[];
   liveMembershipError?: Error;
   handshakeMembershipError?: Error;
   visibleAgentError?: Error;
@@ -141,6 +143,7 @@ function makeDb(options: {
       }
       if (keys.has("organizationId")) return makeSelectBuilder(memberRows);
       if (keys.has("uuid")) return makeSelectBuilder(humanRows);
+      if (keys.has("chatId")) return makeSelectBuilder(options.statusRows ?? []);
       return makeSelectBuilder(visibleRows);
     }),
   } as unknown as Database;
@@ -381,6 +384,83 @@ describe("Admin WS route edge paths", () => {
     expect(sentPayloads(own.send).map((payload) => payload.type)).toEqual(["admin:connected", "me-chats:changed"]);
     // The other-org socket (same user) never sees org-1's pin.
     expect(sentPayloads(otherOrg.send).map((payload) => payload.type)).toEqual(["admin:connected"]);
+  });
+
+  it("skips session-frame status enrichment when no connected socket is in the chat audience (performance gate)", async () => {
+    const handlers: CapturedHandlers = {};
+    // The only admitted socket's human agent is human-1; the cached audience
+    // names human-2 only, so no enriched frame could be delivered — the
+    // audience query is the ONLY execute (no derive scans follow).
+    const db = makeDb({ audienceRows: [[{ agent_id: "human-2" }]] });
+    const { app, getRoute } = makeApp(db);
+    await orgWsRoutes(makeNotifier(handlers), JWT_SECRET)(app as never);
+    const route = getRoute();
+    const socket = makeSocket();
+    await route(socket.socket, request(await signToken({ sub: "user-1", type: "access" })));
+    const dbExecuteMock = (db as unknown as { execute: ReturnType<typeof vi.fn> }).execute;
+    dbExecuteMock.mockClear();
+
+    handlers.sessionState?.({ agentId: "agent-1", chatId: "chat-gate-skip", organizationId: "org-1" });
+    await waitForAsyncDispatch();
+
+    // Bare frame still delivered to the live org socket (delivery contract).
+    const frame = sentPayloads(socket.send).find((p) => p.type === "session:state");
+    expect(frame).toBeDefined();
+    expect(frame).not.toHaveProperty("status");
+    // Audience resolution ran; the status compute (2 derive executes) did not.
+    expect(dbExecuteMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips session-frame status enrichment for an empty audience", async () => {
+    const handlers: CapturedHandlers = {};
+    const db = makeDb({ audienceRows: [[]] });
+    const { app, getRoute } = makeApp(db);
+    await orgWsRoutes(makeNotifier(handlers), JWT_SECRET)(app as never);
+    const route = getRoute();
+    const socket = makeSocket();
+    await route(socket.socket, request(await signToken({ sub: "user-1", type: "access" })));
+    const dbExecuteMock = (db as unknown as { execute: ReturnType<typeof vi.fn> }).execute;
+    dbExecuteMock.mockClear();
+
+    handlers.sessionEvent?.({ agentId: "agent-1", chatId: "chat-gate-empty", organizationId: "org-1" });
+    await waitForAsyncDispatch();
+
+    expect(dbExecuteMock).toHaveBeenCalledTimes(1);
+    const frame = sentPayloads(socket.send).find((p) => p.type === "session:event");
+    expect(frame).not.toHaveProperty("status");
+  });
+
+  it("enriches a session frame via single-target status resolution when an audience socket is connected", async () => {
+    const handlers: CapturedHandlers = {};
+    // The admitted socket (human-1) IS in the cached audience, so the gate
+    // passes and the event's own agent status is resolved (audience + 2
+    // derive executes) — scoped to (chat-enrich-1, agent-1).
+    const db = makeDb({
+      audienceRows: [[{ agent_id: "human-1" }]],
+      statusRows: [
+        {
+          chatId: "chat-enrich-1",
+          agentId: "agent-1",
+          state: "active",
+          runtimeState: "idle",
+          runtimeStateAt: null,
+        },
+      ],
+    });
+    const { app, getRoute } = makeApp(db);
+    await orgWsRoutes(makeNotifier(handlers), JWT_SECRET)(app as never);
+    const route = getRoute();
+    const socket = makeSocket();
+    await route(socket.socket, request(await signToken({ sub: "user-1", type: "access" })));
+    const dbExecuteMock = (db as unknown as { execute: ReturnType<typeof vi.fn> }).execute;
+    dbExecuteMock.mockClear();
+
+    handlers.sessionState?.({ agentId: "agent-1", chatId: "chat-enrich-1", organizationId: "org-1" });
+    await waitForAsyncDispatch();
+
+    expect(dbExecuteMock).toHaveBeenCalledTimes(3); // audience + deriveActivities + deriveStatusReasons
+    const frame = sentPayloads(socket.send).find((p) => p.type === "session:state");
+    expect(frame?.status).toMatchObject({ agentId: "agent-1" });
   });
 
   it("closes affected sockets with 1013 when live authorization cannot be revalidated", async () => {

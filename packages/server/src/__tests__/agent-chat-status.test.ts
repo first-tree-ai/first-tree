@@ -2,15 +2,18 @@ import { randomUUID } from "node:crypto";
 import {
   agentChatStatusSchema,
   encodeProviderRetryEventMessage,
+  LIVE_ACTIVITY_STALE_MS,
   type LiveActivity,
   RUNTIME_STALE_MS,
 } from "@first-tree/shared";
 import { sql } from "drizzle-orm";
-import { describe, expect, it } from "vitest";
+import type { FastifyInstance } from "fastify";
+import { describe, expect, it, vi } from "vitest";
 import { createAgent } from "../services/agents/identity.js";
 import {
   computeErrored,
   computeWorking,
+  getChatAgentStatus,
   getChatAgentStatuses,
   isRuntimeFresh,
   previewAssistantTextFull,
@@ -708,6 +711,376 @@ describe("agent-chat-status", () => {
       expect(byChat.get(a.chatId)?.find((s) => s.agentId === peer.agent.uuid)?.main).toBe("working");
       expect(byChat.get(b.chatId)?.find((s) => s.agentId === peer.agent.uuid)?.main).toBe("working");
       expect(byChat.get(c.chatId)?.find((s) => s.agentId === peer.agent.uuid)?.main).toBe("ready");
+    });
+  });
+
+  describe("resolveAgentChatStatuses target workset / getChatAgentStatus", () => {
+    type CapturedStatement = { sql: string; params: unknown[] };
+
+    /**
+     * Capture every statement the resolve flow executes by intercepting the
+     * Drizzle session's `prepareQuery` chokepoint (both query-builder selects
+     * and raw `db.execute` SQL arrive here as `{ sql, params }`). Pure
+     * pass-through — execution is untouched.
+     */
+    async function captureStatements(app: FastifyInstance, run: () => Promise<unknown>): Promise<CapturedStatement[]> {
+      const session = (app.db as unknown as { session: { prepareQuery: (...args: unknown[]) => unknown } }).session;
+      const originalPrepareQuery = session.prepareQuery.bind(session);
+      const captured: CapturedStatement[] = [];
+      const spy = vi.spyOn(session, "prepareQuery").mockImplementation(((query: unknown, ...rest: unknown[]) => {
+        const q = query as { sql?: unknown; params?: unknown } | null;
+        if (q && typeof q.sql === "string" && Array.isArray(q.params)) {
+          captured.push({ sql: q.sql, params: q.params as unknown[] });
+        }
+        return originalPrepareQuery(query, ...rest);
+      }) satisfies (...args: unknown[]) => unknown);
+      try {
+        await run();
+      } finally {
+        spy.mockRestore();
+      }
+      return captured;
+    }
+
+    /**
+     * The (agentId, chatId) pairs carried by a statement's parameters, from
+     * the row-value pair predicates `(col, col) IN ((a1,c1),(a2,c2),…)`.
+     * Only meaningful for statements whose parameters are exactly the pair
+     * list; non-identifier literal params (e.g. `speaker` / `human` filter
+     * values on the membership read) are skipped.
+     */
+    const statementPairs = (statement: CapturedStatement): Array<readonly [string, string]> => {
+      const pairs: Array<readonly [string, string]> = [];
+      for (let i = 0; i + 1 < statement.params.length; i += 2) {
+        const agentId = statement.params[i];
+        const chatId = statement.params[i + 1];
+        if (
+          typeof agentId === "string" &&
+          typeof chatId === "string" &&
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(agentId) &&
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(chatId)
+        ) {
+          pairs.push([agentId, chatId] as const);
+        }
+      }
+      return pairs;
+    };
+
+    const pairList = (pairs: ReadonlyArray<readonly [string, string]>): string =>
+      [...pairs]
+        .sort()
+        .map(([a, c]) => `${a}/${c}`)
+        .join(",");
+
+    /** Insert a session event with an explicit ISO timestamp (raw Date
+     *  binding is unsupported by the installed driver — always ISO text). */
+    async function insertEventAtMs(
+      app: FastifyInstance,
+      agentId: string,
+      chatId: string,
+      seq: number,
+      kind: string,
+      payload: unknown,
+      createdAtIso: string,
+    ): Promise<void> {
+      await app.db.execute(sql`
+        INSERT INTO session_events (id, agent_id, chat_id, seq, kind, payload, created_at)
+        VALUES (${randomUUID()}, ${agentId}, ${chatId}, ${seq}, ${kind},
+                ${JSON.stringify(payload)}::jsonb, ${createdAtIso}::timestamptz)
+      `);
+    }
+
+    it("downpushes the target workset into every executed query (no sibling pair parameters)", async () => {
+      const app = getApp();
+      const admin = await createTestAdmin(app);
+      const first = await createTestAgent(app, { name: `tgt-a-${randomUUID().slice(0, 6)}` });
+      const second = await createTestAgent(app, { name: `tgt-b-${randomUUID().slice(0, 6)}` });
+      const { chatId } = await createMeChat(app.db, admin.humanAgentUuid, admin.organizationId, {
+        participantIds: [first.agent.uuid, second.agent.uuid],
+      });
+      for (const peer of [first, second]) {
+        await bindPresence(peer.agent.uuid, peer.clientId);
+        await setSession(peer.agent.uuid, chatId, "active");
+        await setRuntime(peer.agent.uuid, chatId, "idle");
+        await insertEvent(peer.agent.uuid, chatId, 1, "tool_call", {
+          toolUseId: "t1",
+          name: "Bash",
+          args: null,
+          status: "pending",
+        });
+      }
+
+      const single = await captureStatements(app, () =>
+        resolveAgentChatStatuses(app.db, [chatId], {
+          targets: new Map([[chatId, new Set([first.agent.uuid])]]),
+        }),
+      );
+      // Membership read + session-row read + Q3 + Q2 all ran, and every one
+      // of them carries only the (first, chat) pair.
+      const singleWorkset = single.filter(
+        (s) => s.sql.includes("agent_chat_sessions") || s.sql.includes("chat_membership"),
+      );
+      expect(singleWorkset.length).toBeGreaterThanOrEqual(3);
+      for (const statement of singleWorkset) {
+        expect(pairList(statementPairs(statement))).toBe(pairList([[first.agent.uuid, chatId]]));
+      }
+      const singleParams = singleWorkset.flatMap((s) => s.params);
+      expect(singleParams).not.toContain(second.agent.uuid);
+
+      const full = await captureStatements(app, () => resolveAgentChatStatuses(app.db, [chatId]));
+      const fullWorkset = full.filter((s) => s.sql.includes("agent_chat_sessions"));
+      expect(fullWorkset.some((s) => s.params.includes(second.agent.uuid))).toBe(true);
+    });
+
+    it("multi-chat targets execute pair-exact SQL — crossed pairs are never fetched", async () => {
+      const app = getApp();
+      const admin = await createTestAdmin(app);
+      const peerX = await createTestAgent(app, { name: `cross-x-${randomUUID().slice(0, 6)}` });
+      const peerY = await createTestAgent(app, { name: `cross-y-${randomUUID().slice(0, 6)}` });
+      // Both agents speak in BOTH chats and hold session rows in BOTH chats —
+      // the exact scenario where a chat × agent cross product would fetch
+      // (X, chatB) / (Y, chatA) rows the workset never asked for.
+      const chatA = await createMeChat(app.db, admin.humanAgentUuid, admin.organizationId, {
+        participantIds: [peerX.agent.uuid, peerY.agent.uuid],
+        topic: "A",
+      });
+      const chatB = await createMeChat(app.db, admin.humanAgentUuid, admin.organizationId, {
+        participantIds: [peerX.agent.uuid, peerY.agent.uuid],
+        topic: "B",
+      });
+      for (const peer of [peerX, peerY]) {
+        await bindPresence(peer.agent.uuid, peer.clientId);
+        await setSession(peer.agent.uuid, chatA.chatId, "active");
+        await setSession(peer.agent.uuid, chatB.chatId, "active");
+      }
+      await setRuntime(peerX.agent.uuid, chatA.chatId, "working");
+      await setRuntime(peerY.agent.uuid, chatB.chatId, "working");
+
+      const captured = await captureStatements(app, () =>
+        resolveAgentChatStatuses(app.db, [chatA.chatId, chatB.chatId], {
+          targets: new Map([
+            [chatA.chatId, new Set([peerX.agent.uuid])],
+            [chatB.chatId, new Set([peerY.agent.uuid])],
+          ]),
+        }),
+      );
+
+      // Every statement touching a session- or membership-bearing table is
+      // parameterised by EXACTLY the two requested pairs — the crossed pairs
+      // (X, B) and (Y, A) exist as real session rows here, so an independent
+      // chat IN + agent IN filter would have fetched them.
+      const worksetStatements = captured.filter(
+        (s) => s.sql.includes("agent_chat_sessions") || s.sql.includes("chat_membership"),
+      );
+      expect(worksetStatements.length).toBeGreaterThanOrEqual(3);
+      const expected = pairList([
+        [peerX.agent.uuid, chatA.chatId],
+        [peerY.agent.uuid, chatB.chatId],
+      ]);
+      for (const statement of worksetStatements) {
+        expect(pairList(statementPairs(statement))).toBe(expected);
+      }
+
+      const byChat = await resolveAgentChatStatuses(app.db, [chatA.chatId, chatB.chatId], {
+        targets: new Map([
+          [chatA.chatId, new Set([peerX.agent.uuid])],
+          [chatB.chatId, new Set([peerY.agent.uuid])],
+        ]),
+      });
+      expect(byChat.get(chatA.chatId)?.map((s) => s.agentId)).toEqual([peerX.agent.uuid]);
+      expect(byChat.get(chatB.chatId)?.map((s) => s.agentId)).toEqual([peerY.agent.uuid]);
+    });
+
+    it("single-target status equals the full projection's entry for the same pair (working + narration preserved)", async () => {
+      const { app, peer, chatId } = await newChatWithAgent();
+      await bindPresence(peer.agent.uuid, peer.clientId);
+      await setSession(peer.agent.uuid, chatId, "active");
+      await setRuntime(peer.agent.uuid, chatId, "working");
+      await insertEvent(peer.agent.uuid, chatId, 1, "assistant_text", { text: "narration text" });
+
+      const single = await getChatAgentStatus(app.db, chatId, peer.agent.uuid);
+      const full = (await getChatAgentStatuses(app.db, chatId)).find((s) => s.agentId === peer.agent.uuid);
+      expect(single).toEqual(full);
+      expect(single?.main).toBe("working");
+      expect(single?.activity?.kind).toBe("assistant_text");
+      expect(single?.activity?.turnText).toBe("narration text");
+      expect(single?.sessionResetSupported).toBe(full?.sessionResetSupported);
+    });
+
+    it("same agent across chats: per-chat target pairs stay exact and independent", async () => {
+      const app = getApp();
+      const admin = await createTestAdmin(app);
+      const peer = await createTestAgent(app, { name: `pair-a-${randomUUID().slice(0, 6)}` });
+      const sibling = await createTestAgent(app, { name: `pair-b-${randomUUID().slice(0, 6)}` });
+      const chatA = await createMeChat(app.db, admin.humanAgentUuid, admin.organizationId, {
+        participantIds: [peer.agent.uuid],
+        topic: "A",
+      });
+      const chatB = await createMeChat(app.db, admin.humanAgentUuid, admin.organizationId, {
+        participantIds: [peer.agent.uuid, sibling.agent.uuid],
+        topic: "B",
+      });
+      await bindPresence(peer.agent.uuid, peer.clientId);
+      await bindPresence(sibling.agent.uuid, sibling.clientId);
+      await setSession(peer.agent.uuid, chatA.chatId, "active");
+      await setRuntime(peer.agent.uuid, chatA.chatId, "working");
+      await setSession(peer.agent.uuid, chatB.chatId, "suspended");
+      await setSession(sibling.agent.uuid, chatB.chatId, "active");
+      await setRuntime(sibling.agent.uuid, chatB.chatId, "idle");
+
+      const byChat = await resolveAgentChatStatuses(app.db, [chatA.chatId, chatB.chatId], {
+        targets: new Map([
+          [chatA.chatId, new Set([peer.agent.uuid])],
+          [chatB.chatId, new Set([sibling.agent.uuid])],
+        ]),
+      });
+      expect(byChat.get(chatA.chatId)?.map((s) => s.agentId)).toEqual([peer.agent.uuid]);
+      expect(byChat.get(chatA.chatId)?.[0]?.main).toBe("working");
+      // chat B targets only the sibling: the peer speaks there too, but the
+      // pair-exact workset must not widen to it.
+      expect(byChat.get(chatB.chatId)?.map((s) => s.agentId)).toEqual([sibling.agent.uuid]);
+      expect(byChat.get(chatB.chatId)?.map((s) => s.agentId)).not.toContain(peer.agent.uuid);
+
+      // The single-target getter reads each chat's own row for the same agent.
+      const inA = await getChatAgentStatus(app.db, chatA.chatId, peer.agent.uuid);
+      const inB = await getChatAgentStatus(app.db, chatB.chatId, peer.agent.uuid);
+      expect(inA?.main).toBe("working");
+      expect(inB?.main).toBe("paused");
+    });
+
+    it("non-speaker targets resolve to nothing and never widen to the chat's speakers", async () => {
+      const { app, admin, peer, chatId } = await newChatWithAgent();
+      await bindPresence(peer.agent.uuid, peer.clientId);
+      await setSession(peer.agent.uuid, chatId, "active");
+      const outsider = await createTestAgent(app, { name: `outsider-${randomUUID().slice(0, 6)}` });
+      // A member of the same org, but no membership row in this chat.
+      const otherChat = await createMeChat(app.db, admin.humanAgentUuid, admin.organizationId, {
+        participantIds: [outsider.agent.uuid],
+      });
+
+      await expect(getChatAgentStatus(app.db, chatId, outsider.agent.uuid)).resolves.toBeUndefined();
+      // The outsider speaks in a DIFFERENT chat — targeting it for this chat
+      // must not pull the peer in either.
+      const byChat = await resolveAgentChatStatuses(app.db, [chatId], {
+        targets: new Map([[chatId, new Set([outsider.agent.uuid])]]),
+      });
+      expect(byChat.size).toBe(0);
+
+      // Sanity: the same target in its own chat resolves.
+      const own = await getChatAgentStatus(app.db, otherChat.chatId, outsider.agent.uuid);
+      expect(own?.agentId).toBe(outsider.agent.uuid);
+    });
+
+    it("empty target sets and absent chat keys never mean all agents — and skip the pair reads entirely", async () => {
+      const { app, peer, chatId } = await newChatWithAgent();
+      await bindPresence(peer.agent.uuid, peer.clientId);
+      await setSession(peer.agent.uuid, chatId, "active");
+
+      const emptySet = await captureStatements(app, () =>
+        resolveAgentChatStatuses(app.db, [chatId], {
+          targets: new Map([[chatId, new Set()]]),
+        }),
+      );
+      expect(
+        emptySet.filter((s) => s.sql.includes("agent_chat_sessions") || s.sql.includes("chat_membership")),
+      ).toHaveLength(0);
+
+      const absentKey = await captureStatements(app, () =>
+        resolveAgentChatStatuses(app.db, [chatId], {
+          targets: new Map([[`chat-${crypto.randomUUID()}`, new Set([peer.agent.uuid])]]),
+        }),
+      );
+      expect(
+        absentKey.filter((s) => s.sql.includes("agent_chat_sessions") || s.sql.includes("chat_membership")),
+      ).toHaveLength(0);
+    });
+
+    it("holds the exact LIVE_ACTIVITY_STALE_MS boundary on activity + narration (frozen application clock)", async () => {
+      const app = getApp();
+      const admin = await createTestAdmin(app);
+      const justFresh = await createTestAgent(app, { name: `bound-f-${randomUUID().slice(0, 6)}` });
+      const justStale = await createTestAgent(app, { name: `bound-s-${randomUUID().slice(0, 6)}` });
+      const { chatId } = await createMeChat(app.db, admin.humanAgentUuid, admin.organizationId, {
+        participantIds: [justFresh.agent.uuid, justStale.agent.uuid],
+      });
+      for (const peer of [justFresh, justStale]) {
+        await bindPresence(peer.agent.uuid, peer.clientId);
+        await setSession(peer.agent.uuid, chatId, "active");
+        await setRuntime(peer.agent.uuid, chatId, "working");
+      }
+
+      // Freeze the application clock so the JS stale check and the SQL-side
+      // narration cutoff share one reference instant; DB timestamps are
+      // inserted explicitly relative to it (ISO text params — raw Date
+      // binding is not supported by the installed driver).
+      const frozenNow = Date.now();
+      const nowSpy = vi.spyOn(Date, "now").mockReturnValue(frozenNow);
+      try {
+        await insertEventAtMs(
+          app,
+          justFresh.agent.uuid,
+          chatId,
+          1,
+          "assistant_text",
+          { text: "one millisecond fresh" },
+          new Date(frozenNow - LIVE_ACTIVITY_STALE_MS + 1).toISOString(),
+        );
+        await insertEventAtMs(
+          app,
+          justStale.agent.uuid,
+          chatId,
+          1,
+          "tool_call",
+          { toolUseId: "t1", name: "Bash", args: null, status: "pending" },
+          new Date(frozenNow - LIVE_ACTIVITY_STALE_MS - 1).toISOString(),
+        );
+
+        const byChat = await resolveAgentChatStatuses(app.db, [chatId], { withTurnText: true });
+        const fresh = byChat.get(chatId)?.find((s) => s.agentId === justFresh.agent.uuid);
+        const stale = byChat.get(chatId)?.find((s) => s.agentId === justStale.agent.uuid);
+        // Age 59,999 ms: kept by the JS stale check AND the SQL narration
+        // guard — narration rides along.
+        expect(fresh?.activity?.kind).toBe("assistant_text");
+        expect(fresh?.activity?.turnText).toBe("one millisecond fresh");
+        // Age 60,001 ms: dropped by the JS stale check; the guarded narration
+        // may not keep it alive (nothing resurrects across the boundary). The
+        // schema carries `activity: null` when working without a live
+        // activity descriptor.
+        expect(stale?.activity).toBeNull();
+        expect(stale?.activity?.turnText).toBeUndefined();
+        expect(fresh?.working).toBe(true);
+        expect(stale?.working).toBe(true); // runtime axis is independent of activity
+      } finally {
+        nowSpy.mockRestore();
+      }
+    });
+
+    it("terminal / stale latest events never resurrect older narration or activity", async () => {
+      const { app, peer, chatId } = await newChatWithAgent();
+      await bindPresence(peer.agent.uuid, peer.clientId);
+      await setSession(peer.agent.uuid, chatId, "active");
+      await setRuntime(peer.agent.uuid, chatId, "working");
+      await insertEvent(peer.agent.uuid, chatId, 1, "assistant_text", { text: "old narration" });
+
+      // A fresh terminal event as the latest row: no activity descriptor
+      // (null when working without one), no narration.
+      await insertEvent(peer.agent.uuid, chatId, 2, "turn_end", { status: "success" });
+      let s = await getChatAgentStatus(app.db, chatId, peer.agent.uuid);
+      expect(s?.working).toBe(true); // runtime axis unaffected
+      expect(s?.activity).toBeNull();
+
+      // A stale activity-kind latest event (older than LIVE_ACTIVITY_STALE_MS):
+      // dropped by the JS stale check — the guarded narration may not keep it
+      // alive either.
+      await getApp().db.execute(sql`
+        INSERT INTO session_events (id, agent_id, chat_id, seq, kind, payload, created_at)
+        VALUES (${randomUUID()}, ${peer.agent.uuid}, ${chatId}, 3, 'tool_call',
+                ${JSON.stringify({ toolUseId: "t1", name: "Bash", args: null, status: "pending" })}::jsonb,
+                NOW() - (${LIVE_ACTIVITY_STALE_MS + 5_000}::int * interval '1 millisecond'))
+      `);
+      s = await getChatAgentStatus(app.db, chatId, peer.agent.uuid);
+      expect(s?.activity).toBeNull();
+      expect(s?.activity?.turnText).toBeUndefined();
     });
   });
 
