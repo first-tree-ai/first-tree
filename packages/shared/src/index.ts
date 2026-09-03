@@ -302,8 +302,12 @@ export {
   ATTACHMENT_MIME_HEADER,
   type AttachmentMetadata,
   attachmentMetadataSchema,
+  getAttachmentFilenameError,
   MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENT_FILENAME_BYTES,
   MESSAGE_ATTACHMENT_RETENTION_DAYS,
+  normalizeAttachmentFilename,
+  truncateUtf8ByBytes,
   type UploadAttachmentResponse,
   uploadAttachmentResponseSchema,
 } from "./schemas/attachment.js";
