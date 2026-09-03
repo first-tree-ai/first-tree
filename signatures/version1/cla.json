@@ -136,7 +136,9 @@
       "comment_id": 5519880889,
       "created_at": "2026-09-03T03:27:04Z",
       "repoId": 1186836943,
-      "pullRequestNo": 2383
+      "pullRequestNo": 2383,
+      "full_name": "Gabriel Gordon-Hall",
+      "public_email": null
     }
   ]
 }
