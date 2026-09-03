@@ -7,6 +7,7 @@ import {
   defaultDataDir,
   defaultHome,
   initConfig,
+  readContextTreeRepositorySetting,
   resetConfig,
   resetConfigMeta,
 } from "@first-tree/shared/config";
@@ -25,7 +26,9 @@ import {
   inspectLocalContextTree,
   listLocalContextDataLoss,
   reconcileAgentConfigs,
+  resolveContextTreeCli,
   resolveServerUrl,
+  runContextTreeCommand,
   runtimeProviderChecks,
 } from "../../core/index.js";
 import { verifyTreeRoot } from "../tree/verify.js";
@@ -62,6 +65,42 @@ const doctorRemoteLatchSchema = z
     schemaVersion: z.literal(1),
   })
   .strict();
+
+/**
+ * External Context Tree mode readiness.
+ *
+ * Off is a healthy state, not a gap: an unconfigured machine keeps First Tree's
+ * own Context Tree Skills. When it IS configured, the packaged CLI must be
+ * resolvable or the `context-tree-*` Skills were never installed.
+ */
+export async function checkContextTreeCli(): Promise<CheckResult> {
+  const { raw, repository } = readContextTreeRepositorySetting();
+  if (!repository) {
+    if (raw !== null) {
+      return {
+        label: "Context Tree CLI",
+        ok: false,
+        detail: `context_tree.repository value ${JSON.stringify(raw)} is unusable; external mode is off`,
+      };
+    }
+    return { label: "Context Tree CLI", ok: true, detail: "external mode off (context_tree.repository unset)" };
+  }
+  if (!resolveContextTreeCli()) {
+    return {
+      label: "Context Tree CLI",
+      ok: false,
+      detail: `configured for ${repository} but @first-tree-ai/context-tree is not installed beside this CLI`,
+    };
+  }
+  // `list` is the cheapest JSON-emitting probe: no connection, no network, and
+  // it tolerates an absent managed root. `--version` prints a bare string, so it
+  // is not usable through the JSON envelope parser.
+  const probe = await runContextTreeCommand(["list", "--json"]);
+  if (!probe.ok) {
+    return { label: "Context Tree CLI", ok: false, detail: `${repository}: ${probe.reason}` };
+  }
+  return { label: "Context Tree CLI", ok: true, detail: `external mode on (${repository})` };
+}
 
 export function checkLocalContexts(): CheckResult {
   const contexts = listLocalContextDataLoss({ dataDir: defaultDataDir(), home: defaultHome() });
@@ -199,6 +238,7 @@ export async function runDaemonChecks(): Promise<CheckResult[]> {
     checkBackgroundService(),
     checkDaemonRuntimeOwnership(),
     checkLocalContexts(),
+    await checkContextTreeCli(),
     ...(await checkRuntimeProviders()),
   ];
 }

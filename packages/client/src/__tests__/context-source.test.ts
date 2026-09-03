@@ -17,6 +17,7 @@ import {
   applyContextSourceToHandlerConfig,
   classifyAgentContextTreeInfo,
   contextSourceFromHandlerConfig,
+  effectiveContextSourceKind,
   hasRemoteLatch,
   inspectRemoteLatch,
   recordRemoteBindingObservation,
@@ -443,5 +444,32 @@ describe("contextSourceFromHandlerConfig", () => {
         contextTreePath: "/ws/local-context",
       }),
     ).toEqual({ kind: "none", reason: "unknown" });
+  });
+});
+
+describe("effectiveContextSourceKind", () => {
+  it("keeps external only for the providers the external installer supports", () => {
+    // The external CLI's installer accepts exactly `claude` and `codex`; the
+    // Claude family shares one home directory.
+    for (const provider of ["claude-code", "claude-code-tui", "codex"] as const) {
+      expect(effectiveContextSourceKind("external", provider)).toBe("external");
+    }
+  });
+
+  it("falls back to none for providers it cannot install Skills for", () => {
+    // Standing down `first-tree-{read,write,seed}` here would leave the machine
+    // with no Context Tree Skills at all, because `context-tree install` reports
+    // these hosts as skipped and writes nothing.
+    for (const provider of ["cursor", "grok", "kimi-code", "opencode", "amp", "deepseek-harness", "pi"] as const) {
+      expect(effectiveContextSourceKind("external", provider)).toBe("none");
+    }
+  });
+
+  it("passes every other kind through untouched for every provider", () => {
+    for (const provider of ["claude-code", "codex", "cursor", "grok"] as const) {
+      for (const kind of ["remote", "local", "none"] as const) {
+        expect(effectiveContextSourceKind(kind, provider)).toBe(kind);
+      }
+    }
   });
 });

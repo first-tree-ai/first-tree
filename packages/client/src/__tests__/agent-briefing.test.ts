@@ -1283,3 +1283,72 @@ describe("buildAgentBriefing — Skills", () => {
     expect(skills.indexOf("## Team Skills")).toBeLessThan(skills.indexOf("## First Tree Family"));
   });
 });
+
+describe("buildAgentBriefing — external Context Tree mode", () => {
+  const externalOpts = () => makeOpts({ contextSourceKind: "external", contextTreeRepository: "acme/context" });
+
+  it("names the context-tree Skills and never the stood-down First Tree ones", () => {
+    const briefing = buildAgentBriefing(externalOpts());
+    const tree = topLevelSection(briefing, "# Context Tree (First Tree Managed)");
+    const skills = topLevelSection(briefing, "# Skills (First Tree Managed)");
+
+    for (const section of [tree, skills]) {
+      expect(section).toContain("context-tree-read");
+      expect(section).toContain("context-tree-write");
+    }
+    expect(tree).toContain("context-tree-setup");
+    expect(tree).toContain("acme/context");
+
+    // The whole point of external mode: the Agent is never *directed* to a Skill
+    // this machine does not project. The superseded names may appear once, in the
+    // Operating Boundary notice that says they are unavailable — that notice is a
+    // feature, so assert on the actionable form (a load directive) instead.
+    const named = `${tree}\n${skills}`;
+    for (const superseded of [
+      "first-tree-read",
+      "first-tree-write",
+      "first-tree-seed",
+      // Review and Audit are stood down too: both act on a Team binding this
+      // mode bypasses, and both route through the Skills above.
+      "context-tree-review",
+      "context-tree-audit",
+    ]) {
+      expect(named).not.toContain(`load \`${superseded}\``);
+      expect(named).not.toContain(`| \`${superseded}\``);
+    }
+    expect(tree).toContain("are not installed");
+  });
+
+  it("does not fall through to the unbound-tree prose", () => {
+    const tree = topLevelSection(buildAgentBriefing(externalOpts()), "# Context Tree (First Tree Managed)");
+    // The `none` arm is the one that would otherwise catch external mode.
+    expect(tree).not.toContain("this agent had no Context Tree bound");
+    expect(tree).toContain("external Context Tree mode");
+  });
+
+  it("keeps the Context Tree Policy baseline, which governs what belongs in a tree", () => {
+    const tree = topLevelSection(buildAgentBriefing(externalOpts()), "# Context Tree (First Tree Managed)");
+    expect(tree).toContain("## Core Model");
+    expect(tree.length).toBeGreaterThan(500);
+  });
+
+  it("still projects welcome, qa, and file-bug", () => {
+    const skills = topLevelSection(buildAgentBriefing(externalOpts()), "# Skills (First Tree Managed)");
+    for (const kept of ["first-tree-welcome", "first-tree-qa", "first-tree-file-bug"]) {
+      expect(skills).toContain(kept);
+    }
+  });
+
+  it("leaves every other mode's briefing untouched", () => {
+    const remote = buildAgentBriefing(makeOpts({ contextTreePath: "/tree" }));
+    expect(remote).toContain("`first-tree-read`");
+    // Review and Audit are stood down only in external mode.
+    expect(remote).toContain("| `context-tree-review`");
+    expect(remote).toContain("| `context-tree-audit`");
+    expect(remote).not.toContain("external Context Tree mode");
+
+    const none = buildAgentBriefing(makeOpts());
+    expect(none).toContain("`first-tree-seed`");
+    expect(none).not.toContain("external Context Tree mode");
+  });
+});

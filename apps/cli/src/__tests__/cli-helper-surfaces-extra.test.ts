@@ -18,7 +18,9 @@ const doctorCoreMocks = vi.hoisted(() => ({
   inspectLocalContextTree: vi.fn(),
   listLocalContextDataLoss: vi.fn(),
   reconcileAgentConfigs: vi.fn(),
+  resolveContextTreeCli: vi.fn(),
   resolveServerUrl: vi.fn(),
+  runContextTreeCommand: vi.fn(),
   runtimeProviderChecks: vi.fn(),
 }));
 
@@ -33,6 +35,7 @@ const configMocks = vi.hoisted(() => ({
   defaultDataDir: vi.fn(),
   defaultHome: vi.fn(),
   initConfig: vi.fn(),
+  readContextTreeRepositorySetting: vi.fn(),
   resetConfig: vi.fn(),
   resetConfigMeta: vi.fn(),
 }));
@@ -93,6 +96,9 @@ beforeEach(() => {
   doctorCoreMocks.checkWebSocket.mockResolvedValue({ label: "WebSocket", ok: true, detail: "ok" });
   doctorCoreMocks.ensureFreshAccessToken.mockResolvedValue("token");
   doctorCoreMocks.listLocalContextDataLoss.mockReturnValue([]);
+  // External Context Tree mode off — the default for a machine that has not set
+  // `context_tree.repository`. The check reports that as healthy.
+  configMocks.readContextTreeRepositorySetting.mockReturnValue({ raw: null, repository: null });
   doctorCoreMocks.reconcileAgentConfigs.mockResolvedValue({ label: "Agents", ok: true, detail: "reconciled" });
   doctorCoreMocks.resolveServerUrl.mockReturnValue("https://hub.example");
   doctorCoreMocks.runtimeProviderChecks.mockReturnValue([{ label: "codex", ok: true, detail: "ok — bundled" }]);
@@ -182,6 +188,7 @@ describe("doctor checks and agent resolver", () => {
       { label: "Service", ok: true, detail: "running" },
       { label: "Owner", ok: true, detail: "pid 123" },
       { label: "Local Context", ok: true, detail: "no Agent Local Context directories" },
+      { label: "Context Tree CLI", ok: true, detail: "external mode off (context_tree.repository unset)" },
       { label: "codex", ok: true, detail: "ok — bundled" },
     ]);
     expect(configMocks.resetConfig).toHaveBeenCalled();
@@ -190,6 +197,50 @@ describe("doctor checks and agent resolver", () => {
     configMocks.initConfig.mockRejectedValueOnce(new Error("no config"));
     const fallback = await runDaemonChecks();
     expect(fallback[3]).toEqual({ label: "Agents", ok: true, detail: "local" });
+  });
+
+  it("fails the Context Tree check when external mode is configured but the CLI is unresolvable", async () => {
+    const { runDaemonChecks } = await import("../commands/_shared/doctor-checks.js");
+    configMocks.readContextTreeRepositorySetting.mockReturnValue({ raw: "acme/context", repository: "acme/context" });
+    doctorCoreMocks.resolveContextTreeCli.mockReturnValue(null);
+
+    const checks = await runDaemonChecks();
+    const contextTree = checks.find((check) => check.label === "Context Tree CLI");
+    expect(contextTree?.ok).toBe(false);
+    expect(contextTree?.detail).toContain("acme/context");
+    expect(contextTree?.detail).toContain("not installed");
+    // Nothing was probed: an unresolvable bin short-circuits before spawning.
+    expect(doctorCoreMocks.runContextTreeCommand).not.toHaveBeenCalled();
+  });
+
+  it("reports external mode on when the CLI answers a probe", async () => {
+    const { runDaemonChecks } = await import("../commands/_shared/doctor-checks.js");
+    configMocks.readContextTreeRepositorySetting.mockReturnValue({ raw: "acme/context", repository: "acme/context" });
+    doctorCoreMocks.resolveContextTreeCli.mockReturnValue({ command: "node", args: ["/cli.mjs"] });
+    doctorCoreMocks.runContextTreeCommand.mockResolvedValue({ ok: true, payload: { trees: [] } });
+
+    const checks = await runDaemonChecks();
+    expect(checks.find((check) => check.label === "Context Tree CLI")).toEqual({
+      label: "Context Tree CLI",
+      ok: true,
+      detail: "external mode on (acme/context)",
+    });
+    // `list` is the probe: no connection, no network, tolerates an absent root.
+    expect(doctorCoreMocks.runContextTreeCommand).toHaveBeenCalledWith(["list", "--json"]);
+  });
+
+  it("reports a set-but-unusable Context Tree repository", async () => {
+    const { runDaemonChecks } = await import("../commands/_shared/doctor-checks.js");
+    configMocks.readContextTreeRepositorySetting.mockReturnValue({ raw: "owner/.hidden", repository: null });
+
+    const checks = await runDaemonChecks();
+
+    expect(checks.find((check) => check.label === "Context Tree CLI")).toEqual({
+      label: "Context Tree CLI",
+      ok: false,
+      detail: 'context_tree.repository value "owner/.hidden" is unusable; external mode is off',
+    });
+    expect(doctorCoreMocks.resolveContextTreeCli).not.toHaveBeenCalled();
   });
 
   it.each([

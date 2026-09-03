@@ -82,6 +82,18 @@ export {
   validateContextTreeBindingInput,
 } from "./context-tree-binding-write.js";
 export type {
+  ContextTreeCliInvocation,
+  ContextTreeCliResult,
+  ContextTreeConnectFailure,
+  ContextTreeSetupReport,
+} from "./context-tree-cli.js";
+export {
+  ensureContextTreeSkills,
+  formatContextTreeSetupReport,
+  resolveContextTreeCli,
+  runContextTreeCommand,
+} from "./context-tree-cli.js";
+export type {
   ContextTreeForgeCoordinate,
   ContextTreeForgeRunner,
 } from "./context-tree-forge/index.js";
