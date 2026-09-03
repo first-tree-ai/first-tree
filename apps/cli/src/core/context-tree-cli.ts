@@ -1,6 +1,18 @@
 import type { ChildProcess } from "node:child_process";
-import { chmodSync, existsSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import type { Dirent } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
+import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve as resolvePath } from "node:path";
 import { getChildProcessRegistry, getCliBinding } from "@first-tree/client";
 import { defaultDataDir, readContextTreeRepositorySetting } from "@first-tree/shared/config";
@@ -62,6 +74,12 @@ export type ContextTreeSetupReport = {
   shimPath?: string | null;
   /** Skill directories removed when external mode was switched back off. */
   removedSkillPaths?: string[];
+  /**
+   * `context-tree-*` Skill directories left in place because they were not
+   * provably an unmodified packaged copy — a hand-installed or edited Skill a
+   * login must never delete.
+   */
+  preservedSkillPaths?: string[];
 };
 
 /**
@@ -299,11 +317,68 @@ function writeContextTreeShim(): { path: string } | { reason: string } {
   }
 }
 
+/** Host names to their home-relative Skill directories (mirrors the external CLI's host table). */
+const HOST_SKILL_DIRS = [
+  ["claude", join(".claude", "skills")],
+  ["codex", join(".codex", "skills")],
+] as const;
+
+/**
+ * The packaged Skill payload the bundled CLI ships (`<pkg>/skills`), or null
+ * when the dependency is absent. Both the dependency's postinstall and our
+ * `context-tree install` write exactly these bytes, so byte-identity with this
+ * tree is the safe ownership test for removal.
+ */
+function packagedSkillsRoot(): string | null {
+  const entry = resolveContextTreeCli()?.args[0];
+  if (entry === undefined) return null;
+  // …/dist/cli/index.mjs -> …/skills
+  const root = join(dirname(entry), "..", "..", "skills");
+  return existsSync(root) ? root : null;
+}
+
+/** True when `left` and `right` are identical directory trees (same shape, same bytes). */
+function directoriesEqual(left: string, right: string): boolean {
+  let leftEntries: Dirent[];
+  let rightEntries: Dirent[];
+  try {
+    leftEntries = readdirSync(left, { withFileTypes: true });
+    rightEntries = readdirSync(right, { withFileTypes: true });
+  } catch {
+    return false;
+  }
+  if (leftEntries.length !== rightEntries.length) return false;
+  const rightByName = new Map(rightEntries.map((entry) => [entry.name, entry]));
+  for (const leftEntry of leftEntries) {
+    const rightEntry = rightByName.get(leftEntry.name);
+    if (rightEntry === undefined) return false;
+    if (leftEntry.isDirectory() !== rightEntry.isDirectory()) return false;
+    // Never equate or traverse symlinks: a linked-in Skill is not one we own.
+    if (leftEntry.isSymbolicLink() || rightEntry.isSymbolicLink()) return false;
+    if (leftEntry.isDirectory()) {
+      if (!directoriesEqual(join(left, leftEntry.name), join(right, rightEntry.name))) return false;
+    } else if (!readFileSync(join(left, leftEntry.name)).equals(readFileSync(join(right, rightEntry.name)))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /**
  * Undo external mode once the key is unset.
  *
- * The external CLI owns the `context-tree-` prefix in host Skill directories.
- * It deliberately leaves connections, managed trees, and project pointers alone.
+ * Only verifiably First Tree-installed, unmodified artifacts are removed: a
+ * `context-tree-*` Skill directory is deleted solely when its name matches a
+ * packaged Skill AND its contents are byte-identical to the bundled payload
+ * (either the dependency postinstall or our own `install` writes those bytes).
+ * Anything a user wrote or edited by hand is preserved and reported, because an
+ * ordinary login on a machine that never enabled external mode must not delete
+ * independently owned files. The external CLI's own `uninstall --host all` keys
+ * on the `context-tree-` prefix alone, so it is not a safe removal primitive for
+ * this path.
+ *
+ * Connections, managed trees, pointers, and the user's global `context-tree`
+ * binary are deliberately left alone.
  */
 export async function removeContextTreeSkills(): Promise<ContextTreeSetupReport> {
   const base: ContextTreeSetupReport = {
@@ -312,19 +387,47 @@ export async function removeContextTreeSkills(): Promise<ContextTreeSetupReport>
     connectedWorkspaces: [],
     failures: [],
   };
-  if (!resolveContextTreeCli()) {
+
+  const packagedRoot = packagedSkillsRoot();
+  if (packagedRoot === null) {
     return { ...base, reason: `${CONTEXT_TREE_PACKAGE} is not installed beside this CLI` };
   }
 
-  const uninstall = await runContextTreeCommand(["uninstall", "--host", "all"]);
-  if (!uninstall.ok) return { ...base, status: "failed", reason: uninstall.reason };
+  const packagedNames = readdirSync(packagedRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .filter((name) => name.startsWith("context-tree-"));
+
+  let home: string;
+  try {
+    home = realpathSync(homedir());
+  } catch {
+    return { ...base, status: "failed", reason: "could not resolve the user home directory" };
+  }
 
   const removedSkillPaths: string[] = [];
-  if (isRecord(uninstall.payload) && Array.isArray(uninstall.payload.removed)) {
-    for (const entry of uninstall.payload.removed) {
-      if (!isRecord(entry) || typeof entry.path !== "string" || !Array.isArray(entry.skills)) continue;
-      for (const skill of entry.skills) {
-        if (typeof skill === "string") removedSkillPaths.push(join(entry.path, skill));
+  const preservedSkillPaths: string[] = [];
+  for (const [, relative] of HOST_SKILL_DIRS) {
+    const skillsRoot = join(home, relative);
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(skillsRoot, { withFileTypes: true });
+    } catch {
+      continue; // No Skill directory for this host — nothing to clean up.
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !entry.name.startsWith("context-tree-")) continue;
+      const target = join(skillsRoot, entry.name);
+      if (!packagedNames.includes(entry.name) || !directoriesEqual(target, join(packagedRoot, entry.name))) {
+        preservedSkillPaths.push(target);
+        continue;
+      }
+      try {
+        rmSync(target, { recursive: true, force: true });
+        removedSkillPaths.push(target);
+      } catch {
+        // Unremovable (permission, in use) — keep it and report, don't pretend.
+        preservedSkillPaths.push(target);
       }
     }
   }
@@ -351,6 +454,7 @@ export async function removeContextTreeSkills(): Promise<ContextTreeSetupReport>
     status: "removed",
     reason: "context_tree.repository is not set",
     removedSkillPaths,
+    preservedSkillPaths,
   };
 }
 
@@ -430,7 +534,10 @@ export function formatContextTreeSetupReport(report: ContextTreeSetupReport): st
   if (report.status === "failed") return `Context Tree Skills not installed — ${report.reason ?? "unknown error"}`;
   if (report.status === "removed") {
     const count = report.removedSkillPaths?.length ?? 0;
-    return `Context Tree Skills removed (${count} skill${count === 1 ? "" : "s"}) — external mode is off`;
+    const preserved = report.preservedSkillPaths?.length ?? 0;
+    const preservedNote =
+      preserved > 0 ? `; preserved ${preserved} hand-installed Skill${preserved === 1 ? "" : "s"}` : "";
+    return `Context Tree Skills removed (${count} skill${count === 1 ? "" : "s"})${preservedNote} — external mode is off`;
   }
   const hosts = report.installedHosts.length > 0 ? report.installedHosts.join(", ") : "no host";
   const connected = `${report.connectedWorkspaces.length} workspace${

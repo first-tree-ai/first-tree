@@ -1,6 +1,15 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { setCliBinding } from "@first-tree/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -35,6 +44,14 @@ async function loadModule() {
   // Fresh module per test: config resolution caches nothing here, but the import
   // must observe the FIRST_TREE_HOME set by the current test.
   return import("../core/context-tree-cli.js");
+}
+
+/** The bundled package's `skills/` payload directory (what install/postinstall copy). */
+async function packagedSkillsRoot(): Promise<string> {
+  const entry = (await loadModule()).resolveContextTreeCli()?.args[0];
+  if (entry === undefined) throw new Error("context-tree CLI not resolvable");
+  // …/dist/cli/index.mjs -> …/skills
+  return join(dirname(dirname(dirname(entry))), "skills");
 }
 
 /**
@@ -204,9 +221,10 @@ describe("ensureContextTreeSkills", () => {
 });
 
 describe("ensureContextTreeSkills switched back off", () => {
-  it("removes every context-tree-* Skill and preserves foreign Skills", async () => {
+  it("removes only unmodified packaged Skills and preserves hand-installed ones", async () => {
     const home = scratchHome("acme/context");
     const binDir = scratchBinDir("first-tree-test");
+    const realHome = realpathSync(home);
     const skillsRoot = join(home, ".claude", "skills");
     mkdirSync(join(home, ".claude"), { recursive: true });
 
@@ -214,8 +232,13 @@ describe("ensureContextTreeSkills switched back off", () => {
     expect((await ensureContextTreeSkills()).status).toBe("installed");
     expect(existsSync(join(skillsRoot, "context-tree-read"))).toBe(true);
 
-    const ownedByPrefix = join(skillsRoot, "context-tree-mine");
-    mkdirSync(ownedByPrefix, { recursive: true });
+    // A hand-authored Skill sharing the prefix and a customized copy of a
+    // packaged Skill must both survive the revert: prefix alone is not ownership.
+    const handAuthored = join(skillsRoot, "context-tree-personal");
+    mkdirSync(handAuthored, { recursive: true });
+    writeFileSync(join(handAuthored, "SKILL.md"), "# personal\n", "utf8");
+    const customized = join(skillsRoot, "context-tree-read");
+    writeFileSync(join(customized, "EXTRA.md"), "# extra\n", "utf8");
     const foreign = join(skillsRoot, "mine");
     mkdirSync(foreign, { recursive: true });
     writeFileSync(join(foreign, "SKILL.md"), "# mine\n", "utf8");
@@ -228,25 +251,56 @@ describe("ensureContextTreeSkills switched back off", () => {
     const report = await ensureContextTreeSkills();
 
     expect(report.status).toBe("removed");
-    expect(existsSync(join(skillsRoot, "context-tree-read"))).toBe(false);
-    expect(existsSync(ownedByPrefix)).toBe(false);
+    // The pristine packaged install was removed…
+    expect(existsSync(join(skillsRoot, "context-tree-publish"))).toBe(false);
+    // …while hand-installed and edited copies were reported and preserved.
+    expect(existsSync(handAuthored)).toBe(true);
+    expect(existsSync(customized)).toBe(true);
     expect(existsSync(foreign)).toBe(true);
+    expect(report.preservedSkillPaths).toEqual(
+      expect.arrayContaining([
+        join(realHome, ".claude", "skills", "context-tree-personal"),
+        join(realHome, ".claude", "skills", "context-tree-read"),
+      ]),
+    );
+    // The shim and the legacy ledger are cleared as before.
     expect(existsSync(join(binDir, "context-tree"))).toBe(false);
     expect(existsSync(legacyLedger)).toBe(false);
   });
 
-  it("removes Skills left by a dependency postinstall with no ledger", async () => {
+  it("removes packaged Skills the dependency postinstall left with no ledger", async () => {
     const home = scratchHome();
+    const packaged = await packagedSkillsRoot();
+    // Simulate what the dependency's own postinstall writes for a global install:
+    // an unmodified packaged copy, with no First Tree ledger and no config.
     const orphan = join(home, ".claude", "skills", "context-tree-read");
     mkdirSync(orphan, { recursive: true });
-    const reportedOrphan = join(realpathSync(home), ".claude", "skills", "context-tree-read");
+    cpSync(join(packaged, "context-tree-read"), orphan, { recursive: true });
 
     const { ensureContextTreeSkills } = await loadModule();
     const report = await ensureContextTreeSkills();
 
     expect(report.status).toBe("removed");
-    expect(report.removedSkillPaths).toContain(reportedOrphan);
+    expect(report.removedSkillPaths).toContain(join(realpathSync(home), ".claude", "skills", "context-tree-read"));
+    expect(report.preservedSkillPaths ?? []).toEqual([]);
     expect(existsSync(orphan)).toBe(false);
+  });
+
+  it("preserves a packaged-named Skill the user edited, with no ledger", async () => {
+    const home = scratchHome();
+    const packaged = await packagedSkillsRoot();
+    const customized = join(home, ".codex", "skills", "context-tree-read");
+    mkdirSync(customized, { recursive: true });
+    cpSync(join(packaged, "context-tree-read"), customized, { recursive: true });
+    // The user edited the copy, so it is no longer a verifiable packaged artifact.
+    writeFileSync(join(customized, "SKILL.md"), "# edited\n", "utf8");
+
+    const { ensureContextTreeSkills } = await loadModule();
+    const report = await ensureContextTreeSkills();
+
+    expect(report.status).toBe("removed");
+    expect(existsSync(customized)).toBe(true);
+    expect(report.preservedSkillPaths).toContain(join(realpathSync(home), ".codex", "skills", "context-tree-read"));
   });
 
   it("leaves connections and managed trees alone", async () => {
@@ -277,8 +331,8 @@ describe("ensureContextTreeSkills switched back off", () => {
 
   it("reports a set-but-unusable repository while keeping external mode off", async () => {
     const home = scratchHome("owner/.hidden");
-    const orphan = join(home, ".claude", "skills", "context-tree-read");
-    mkdirSync(orphan, { recursive: true });
+    const museum = join(home, ".claude", "skills", "context-tree-read");
+    mkdirSync(museum, { recursive: true });
 
     const { ensureContextTreeSkills } = await loadModule();
     const report = await ensureContextTreeSkills();
@@ -286,6 +340,9 @@ describe("ensureContextTreeSkills switched back off", () => {
     expect(report.status).toBe("failed");
     expect(report.reason).toContain("owner/.hidden");
     expect(report.reason).toContain("external mode is off");
-    expect(existsSync(orphan)).toBe(false);
+    // The unusable setting stands the new family down, but never deletes a user
+    // Skill whose contents do not match the packaged payload.
+    expect(existsSync(museum)).toBe(true);
+    expect(report.preservedSkillPaths).toContain(join(realpathSync(home), ".claude", "skills", "context-tree-read"));
   });
 });
