@@ -114,6 +114,7 @@ function context(
     log: vi.fn(),
     chatId,
     recordProviderActivity: vi.fn(),
+    noteTurnStart: vi.fn(),
     emitEvent: (event) => events.push(event),
     forwardResult: async (text) => {
       forwarded.push(text);
