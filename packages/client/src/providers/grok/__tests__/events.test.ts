@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  GROK_UNKNOWN_TOOL_NAME,
+  mergeGrokToolInfo,
   normalizeGrokSessionUpdate,
   normalizeGrokXaiNotification,
   parseGrokModelChangedEcho,
@@ -115,6 +117,19 @@ describe("normalizeGrokSessionUpdate", () => {
     if (event?.kind !== "tool_completed") throw new Error("expected tool_completed");
     expect(event.ok).toBe(false);
     expect(event.resultPreview).toBe("boom");
+    expect(event.tool.name).toBe(GROK_UNKNOWN_TOOL_NAME);
+  });
+
+  it("reads ACP top-level kind when x.ai/tool metadata is absent", () => {
+    const normalized = normalizeGrokSessionUpdate({
+      sessionId: "sess-1",
+      update: { sessionUpdate: "tool_call", toolCallId: "tc-k", kind: "execute", rawInput: { command: "cat NODE.md" } },
+    });
+    const event = normalized?.event;
+    if (event?.kind !== "tool_started") throw new Error("expected tool_started");
+    expect(event.tool.kind).toBe("execute");
+    expect(event.tool.isShell).toBe(true);
+    expect(event.tool.name).toBe(GROK_UNKNOWN_TOOL_NAME);
   });
 
   it("ignores in-progress tool_call_update statuses", () => {
@@ -161,6 +176,57 @@ describe("normalizeGrokSessionUpdate", () => {
     ).toBe("ignored");
     expect(normalizeGrokSessionUpdate("not an object")).toBeNull();
     expect(normalizeGrokSessionUpdate({ sessionId: "s" })).toBeNull();
+  });
+});
+
+describe("mergeGrokToolInfo — ACP tool_call_update patch semantics", () => {
+  function started(over: Record<string, unknown> = {}) {
+    const normalized = normalizeGrokSessionUpdate({
+      sessionId: "s",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-1",
+        title: "read_file",
+        rawInput: { path: "NODE.md" },
+        _meta: { "x.ai/tool": { name: "read_file", kind: "read", read_only: true, input: { path: "NODE.md" } } },
+        ...over,
+      },
+    });
+    if (normalized?.event.kind !== "tool_started") throw new Error("expected tool_started");
+    return normalized.event.tool;
+  }
+
+  it("keeps the start name when a completed update omits title and x.ai/tool meta", () => {
+    const completed = normalizeGrokSessionUpdate({
+      sessionId: "s",
+      update: { sessionUpdate: "tool_call_update", toolCallId: "tc-1", status: "completed", rawOutput: "ok" },
+    });
+    if (completed?.event.kind !== "tool_completed") throw new Error("expected tool_completed");
+    expect(completed.event.tool.name).toBe(GROK_UNKNOWN_TOOL_NAME);
+    const merged = mergeGrokToolInfo(started(), completed.event.tool);
+    expect(merged.name).toBe("read_file");
+    expect(merged.kind).toBe("read");
+    expect(merged.readOnly).toBe(true);
+    expect(merged.paths).toEqual(["NODE.md"]);
+    expect(merged.argsSummary).toEqual({ path: "NODE.md" });
+  });
+
+  it("lets a concrete incoming name replace the previous one", () => {
+    const incoming = normalizeGrokSessionUpdate({
+      sessionId: "s",
+      update: { sessionUpdate: "tool_call_update", toolCallId: "tc-1", title: "read_file_v2", status: "completed" },
+    });
+    if (incoming?.event.kind !== "tool_completed") throw new Error("expected tool_completed");
+    expect(mergeGrokToolInfo(started(), incoming.event.tool).name).toBe("read_file_v2");
+  });
+
+  it("leaves grok:unknown when this toolCallId has never had a name", () => {
+    const completed = normalizeGrokSessionUpdate({
+      sessionId: "s",
+      update: { sessionUpdate: "tool_call_update", toolCallId: "tc-orphan", status: "failed", rawOutput: "boom" },
+    });
+    if (completed?.event.kind !== "tool_completed") throw new Error("expected tool_completed");
+    expect(mergeGrokToolInfo(undefined, completed.event.tool).name).toBe(GROK_UNKNOWN_TOOL_NAME);
   });
 });
 

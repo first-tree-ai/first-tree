@@ -56,10 +56,15 @@ function logRequest(req) {
 }
 function emitToolUpdates(sid) {
   if (!toolName) return;
+  const patchComplete = process.env.GROK_FAKE_TOOL_PATCH_COMPLETE === "1";
   const meta = { version: 1, name: toolName, kind: toolName === "read_file" ? "read" : toolName === "run_terminal_cmd" ? "execute" : "edit", namespace: "grok_build", label: toolName, read_only: toolName !== "search_replace" };
   const rawInput = toolName === "run_terminal_cmd" ? { command: "cat " + toolPath } : { path: toolPath };
   meta.input = rawInput;
   notify("session/update", { sessionId: sid, update: { sessionUpdate: "tool_call", toolCallId: "tc-1", title: toolName, rawInput: rawInput, _meta: { "x.ai/tool": meta } } });
+  if (patchComplete) {
+    notify("session/update", { sessionId: sid, update: { sessionUpdate: "tool_call_update", toolCallId: "tc-1", status: "completed", rawOutput: toolName + " done" } });
+    return;
+  }
   notify("session/update", { sessionId: sid, update: { sessionUpdate: "tool_call_update", toolCallId: "tc-1", title: toolName, status: "completed", content: toolName === "search_replace" ? [{ type: "diff", path: toolPath, oldText: "a", newText: "b" }] : [], locations: [{ path: toolPath }], rawInput: rawInput, rawOutput: toolName + " done", _meta: { "x.ai/tool": meta } } });
 }
 function emitPromptNotifications(sid, pid) {
@@ -1655,6 +1660,43 @@ describe("grok handler — per-turn ACP transport", () => {
     const completed = events.find((e) => e.kind === "tool_call" && e.payload.status === "ok");
     if (completed?.kind !== "tool_call") throw new Error("expected an ok tool_call event");
     expect(completed.payload.name).toBe("run_terminal_cmd");
+    expect(completed.payload.toolFileRefs).toMatchObject([
+      { origin: "tool_arg", repoUrl: "https://github.com/acme/tree.git", repoRelativePath: "NODE.md" },
+    ]);
+  });
+
+  it("a title-less completed tool_call_update keeps the start name and args", async () => {
+    const events: SessionEvent[] = [];
+    const specs: ProviderProcessSpec[] = [];
+    const contextTreePath = join(workspaceRoot, "context-tree");
+    const fakeEnv = fakeEnvFor("tool-patch-complete", {
+      GROK_FAKE_TOOL: "run_terminal_cmd",
+      GROK_FAKE_TOOL_PATH: join(contextTreePath, "NODE.md"),
+      GROK_FAKE_TOOL_PATCH_COMPLETE: "1",
+    });
+    const handler = makeHandler(createFakeAcpSupervisor(specs, fakeEnv), {
+      contextTreePath,
+      contextTreeRepoUrl: "https://github.com/acme/tree.git",
+      contextTreeBranch: "main",
+    });
+
+    await handler.start(
+      makeMessage("m1", "read the node"),
+      makeContext({ events, contextTreeRepoUrl: "https://github.com/acme/tree.git" }),
+      makeToken(),
+    );
+
+    const pending = events.find((e) => e.kind === "tool_call" && e.payload.status === "pending");
+    expect(pending).toMatchObject({
+      kind: "tool_call",
+      payload: { toolUseId: "tc-1", name: "run_terminal_cmd", status: "pending" },
+    });
+    const completed = events.find((e) => e.kind === "tool_call" && e.payload.status === "ok");
+    if (completed?.kind !== "tool_call") throw new Error("expected an ok tool_call event");
+    expect(completed.payload.name).toBe("run_terminal_cmd");
+    expect(completed.payload.name).not.toBe("grok:unknown");
+    expect(completed.payload.args).toEqual({ command: `cat ${join(contextTreePath, "NODE.md")}` });
+    expect(completed.payload.resultPreview).toBe("run_terminal_cmd done");
     expect(completed.payload.toolFileRefs).toMatchObject([
       { origin: "tool_arg", repoUrl: "https://github.com/acme/tree.git", repoRelativePath: "NODE.md" },
     ]);
