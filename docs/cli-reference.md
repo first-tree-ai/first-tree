@@ -2183,6 +2183,32 @@ When `AUTH_MODE=oidc-required`, Google and GitHub sign-in are disabled. See `doc
 | `FIRST_TREE_GITHUB_APP_WEBHOOK_SECRET` | Webhook HMAC secret. |
 | `FIRST_TREE_GITHUB_APP_SLUG` | Optional explicit slug override. |
 
+**Agent Template publishing:**
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `FIRST_TREE_AGENT_TEMPLATE_PUBLISHER_ORG_ID` | Team whose current active admins act as the official Agent Template publisher. | — (publisher API disabled) |
+
+This is deployment authority, not a Team setting. Membership is re-read from
+the members table on every request rather than trusted from the caller's JWT,
+so granting or revoking publisher access takes effect immediately without
+reissuing tokens. Official Skill bundles must be attachments owned by the same
+Team.
+
+Leaving it unset fails closed in two places:
+
+- every `/api/v1/internal/agent-templates` request answers `403 "Agent Template
+  publishing is not configured on this deployment."`, for all callers
+- adopted-Template summaries cannot be proven public-safe, so all of them
+  degrade to `missing`, which Agent Detail renders as an `Unavailable` badge —
+  a deployment that merely forgot the variable shows broken-looking state on
+  otherwise healthy agents
+
+The public read-only catalog (`/api/v1/agent-templates`, `/templates`) stays
+available either way; this variable gates publishing, not discovery. Setting it
+publishes nothing on its own — the catalog stays empty until a publisher admin
+creates and publishes a Template.
+
 **GitLab Context Tree snapshot egress:**
 
 | Variable | Purpose | Default |
