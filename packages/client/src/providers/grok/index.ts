@@ -57,6 +57,7 @@ import {
   type GrokNormalizedEvent,
   type GrokToolInfo,
   type GrokTurnCompleted,
+  mergeGrokToolInfo,
   normalizeGrokSessionUpdate,
   normalizeGrokXaiNotification,
 } from "./events.js";
@@ -166,6 +167,8 @@ type TurnAcpState = {
   assistantText: string;
   turnCompleted: GrokTurnCompleted | null;
   ignoredCount: number;
+  /** Last known tool info per ACP `toolCallId` — `tool_call_update` is a patch. */
+  tools: Map<string, GrokToolInfo>;
 };
 
 export const createGrokHandler: HandlerFactory = (config) => {
@@ -418,36 +421,40 @@ export const createGrokHandler: HandlerFactory = (config) => {
       case "user_echo":
         break;
       case "tool_started": {
-        if (!grokToolIsReadOnly(event.tool)) state.toolEffectStarted = true;
+        const tool = mergeGrokToolInfo(state.tools.get(event.tool.toolCallId), event.tool);
+        state.tools.set(tool.toolCallId, tool);
+        if (!grokToolIsReadOnly(tool)) state.toolEffectStarted = true;
         sessionCtx.emitEvent({
           kind: "tool_call",
           payload: {
-            toolUseId: event.tool.toolCallId,
-            name: event.tool.name,
-            args: event.tool.argsSummary,
+            toolUseId: tool.toolCallId,
+            name: tool.name,
+            args: tool.argsSummary,
             status: "pending",
           },
         });
         break;
       }
       case "tool_completed": {
+        const tool = mergeGrokToolInfo(state.tools.get(event.tool.toolCallId), event.tool);
+        state.tools.set(tool.toolCallId, tool);
         const ok = event.ok;
-        const readOnly = grokToolIsReadOnly(event.tool);
+        const readOnly = grokToolIsReadOnly(tool);
         if (!readOnly) state.toolEffectStarted = true;
-        const providerRefs = ok ? providerRefsForTool(event.tool) : [];
+        const providerRefs = ok ? providerRefsForTool(tool) : [];
         const toolFileRefs = refsForCompletedTool({
           ok,
           readOnly,
           providerRefs,
-          toolName: event.tool.name,
-          toolUseId: event.tool.toolCallId,
+          toolName: tool.name,
+          toolUseId: tool.toolCallId,
         });
         sessionCtx.emitEvent({
           kind: "tool_call",
           payload: {
-            toolUseId: event.tool.toolCallId,
-            name: event.tool.name,
-            args: event.tool.argsSummary,
+            toolUseId: tool.toolCallId,
+            name: tool.name,
+            args: tool.argsSummary,
             status: ok ? "ok" : "error",
             ...(event.resultPreview ? { resultPreview: event.resultPreview } : {}),
             ...(toolFileRefs ? { toolFileRefs } : {}),
@@ -617,6 +624,7 @@ export const createGrokHandler: HandlerFactory = (config) => {
           assistantText: "",
           turnCompleted: null,
           ignoredCount: 0,
+          tools: new Map(),
         };
         consumedErrorReason = null;
         retryReason = null;

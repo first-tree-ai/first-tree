@@ -42,6 +42,9 @@ export type GrokTurnCompleted = {
  * absent, malformed) is unproven and must count as a side effect on the
  * replay-safety ladder.
  */
+/** Display fallback when one ACP payload has no `_meta["x.ai/tool"].name` and no `title`. */
+export const GROK_UNKNOWN_TOOL_NAME = "grok:unknown";
+
 export type GrokToolInfo = {
   toolCallId: string;
   /** `_meta["x.ai/tool"].name` when present, else the raw `title`, else a tagged unknown. */
@@ -60,6 +63,41 @@ export type GrokToolInfo = {
   paths: string[];
   argsSummary: Record<string, unknown>;
 };
+
+/** Shell detection keys on name/kind — NOT on the presence of a command. */
+export function grokToolIsShell(name: string, kind: string | null): boolean {
+  return name === "run_terminal_cmd" || kind === "execute";
+}
+
+/**
+ * ACP `tool_call_update` is a patch: omitted fields leave the previous tool
+ * call unchanged. Merge one extracted payload onto the last known info for
+ * the same `toolCallId` so a completed/failed update that only carries
+ * `status` + `rawOutput` cannot replace a real name with `grok:unknown`.
+ *
+ * Concrete incoming values replace; `null`/empty extracted fields are treated
+ * as omitted (the extractor cannot see JSON `null` vs absent). Keep
+ * `grok:unknown` only when this id has never had a name or title.
+ */
+export function mergeGrokToolInfo(previous: GrokToolInfo | undefined, incoming: GrokToolInfo): GrokToolInfo {
+  if (!previous) return incoming;
+  const name = incoming.name !== GROK_UNKNOWN_TOOL_NAME ? incoming.name : previous.name;
+  const kind = incoming.kind ?? previous.kind;
+  const command = incoming.command ?? previous.command;
+  const paths = incoming.paths.length > 0 ? incoming.paths : previous.paths;
+  const readOnly = incoming.readOnly ?? previous.readOnly;
+  const argsSummary = Object.keys(incoming.argsSummary).length > 0 ? incoming.argsSummary : previous.argsSummary;
+  return {
+    toolCallId: incoming.toolCallId,
+    name,
+    kind,
+    isShell: grokToolIsShell(name, kind),
+    readOnly,
+    command,
+    paths,
+    argsSummary,
+  };
+}
 
 export type GrokNormalizedEvent =
   | { kind: "assistant_chunk"; text: string }
@@ -138,15 +176,15 @@ function extractTool(update: Record<string, unknown>): GrokToolInfo | null {
   const command = asString(rawInput?.command) ?? asString(metaInput?.command);
   const title = asString(update.title);
   const metaName = meta ? asString(meta.name) : null;
-  const kind = meta ? asString(meta.kind) : null;
-  const name = metaName ?? title ?? "grok:unknown";
+  const kind = (meta ? asString(meta.kind) : null) ?? asString(update.kind);
+  const name = metaName ?? title ?? GROK_UNKNOWN_TOOL_NAME;
   const readOnly = meta && typeof meta.read_only === "boolean" ? meta.read_only : null;
   const paths = extractToolPaths(update, meta);
   return {
     toolCallId,
     name,
     kind,
-    isShell: name === "run_terminal_cmd" || kind === "execute",
+    isShell: grokToolIsShell(name, kind),
     readOnly,
     command,
     paths,
