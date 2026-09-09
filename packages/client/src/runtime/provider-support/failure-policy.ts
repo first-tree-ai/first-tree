@@ -32,6 +32,7 @@ export { redactErrorPreview } from "../redact-error-preview.js";
 export { formatProviderFailureRuntimeNotice, isEgressForbiddenText } from "../runtime-notice.js";
 export type { ProviderBinaryFailureReasonCode, ProviderBinaryFailureSignal } from "./binary-failure.js";
 export {
+  isAntigravityBinaryMissingError,
   isCodexBinaryMissingError,
   isCursorBinaryMissingError,
   isGrokBinaryMissingError,

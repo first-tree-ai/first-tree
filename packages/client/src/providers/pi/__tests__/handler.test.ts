@@ -507,6 +507,7 @@ function makeContext(
     chatId: "chat-pi",
     log: (line) => void logs.push(line),
     recordProviderActivity: () => {},
+    noteTurnStart: () => {},
     emitEvent: (value) => void events.push(value),
     ...mockCtxPlumbing({ sendMessage }, "chat-pi"),
   };

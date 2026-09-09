@@ -8,6 +8,7 @@ import {
   isReservedAgentName,
   listAgentsQuerySchema,
   RESERVED_AGENT_NAMES,
+  switchAgentRuntimeSchema,
   updateAgentSchema,
   userAgentMetadataSchema,
 } from "../schemas/agent.js";
@@ -129,6 +130,18 @@ describe("createAgentSchema", () => {
     const tooLong = "a".repeat(AGENT_NAME_MAX_LENGTH + 1);
     const res = createAgentSchema.safeParse({ name: tooLong, type: "human" });
     expect(res.success).toBe(false);
+  });
+
+  it("rejects disabled providers at public create and switch edges", () => {
+    expect(createAgentSchema.safeParse({ type: "agent", runtimeProvider: "antigravity" }).success).toBe(false);
+    expect(createAgentSchema.safeParse({ type: "agent", runtimeProvider: "claude-code-tui" }).success).toBe(false);
+    expect(
+      switchAgentRuntimeSchema.safeParse({
+        clientId: "client-1",
+        runtimeProvider: "antigravity",
+        confirmLocalDataLoss: true,
+      }).success,
+    ).toBe(false);
   });
 });
 

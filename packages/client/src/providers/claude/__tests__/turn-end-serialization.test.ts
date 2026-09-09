@@ -134,6 +134,7 @@ describe("claude-code handler — turn_end serialization (race guard)", () => {
       chatId: "chat-1",
       log: () => {},
       recordProviderActivity: () => {},
+      noteTurnStart: () => {},
       emitEvent: (e: SessionEvent) => {
         emitted.push({ kind: e.kind, at: Date.now() - start });
       },

@@ -12,6 +12,7 @@ import {
 export const AMP_INSTALL_COMMAND = "curl -fsSL https://ampcode.com/install.sh | bash";
 export const CURSOR_INSTALL_COMMAND = "curl https://cursor.com/install -fsS | bash";
 export const GROK_INSTALL_COMMAND = "curl -fsSL https://x.ai/cli/install.sh | bash";
+export const ANTIGRAVITY_INSTALL_COMMAND = "curl -fsSL https://antigravity.google/cli/install.sh | bash";
 
 /**
  * OpenCode CLI minimum supported version. Catalog npm package and client
@@ -191,6 +192,16 @@ export const RUNTIME_PROVIDER_CATALOG = {
     loginSteps: ["grok login"],
     authRecovery: { kind: "in-product", target: "grok" },
     authOwnerLabel: "Grok Build",
+  },
+  antigravity: {
+    id: "antigravity",
+    label: "Antigravity",
+    displayOrder: 55,
+    selectionPriority: null,
+    install: { kind: "script", command: ANTIGRAVITY_INSTALL_COMMAND },
+    loginSteps: ["agy"],
+    authRecovery: { kind: "host" },
+    authOwnerLabel: "Google Antigravity",
   },
   "kimi-code": {
     id: "kimi-code",

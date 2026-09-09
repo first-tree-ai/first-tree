@@ -16,6 +16,7 @@ import {
   defaultRuntimeConfigPayload,
   findReservedAgentMetadataKey,
   isReservedAgentName,
+  isRuntimeProviderEnabled,
   RESERVED_AGENT_METADATA_KEYS,
   runtimeProviderSchema,
 } from "@first-tree/shared";
@@ -403,6 +404,15 @@ export async function createAgent(
     managerId,
     type: data.type,
   });
+
+  // The release gate is independent of capability-report shape. `force`
+  // permits a stale/offline capability probe, never selection of a provider
+  // that is disabled platform-wide.
+  if (!isRuntimeProviderEnabled(runtimeProvider)) {
+    throw new BadRequestError(
+      `Runtime provider "${runtimeProvider}" is disabled for new selection until release acceptance.`,
+    );
+  }
 
   await ensureClientSupportsRuntimeProvider(db, clientId, runtimeProvider, { force: options.force });
 

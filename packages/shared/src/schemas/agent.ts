@@ -4,7 +4,7 @@ import { agentTemplateIdsSchema } from "./agent-template.js";
 import { paginationQuerySchema } from "./common.js";
 import { contextTreeActiveBindingSchema, contextTreeBranchSchema, contextTreeProviderSchema } from "./org-settings.js";
 import { presenceStatusSchema, runtimeStateSchema } from "./presence.js";
-import { runtimeProviderSchema } from "./runtime-provider.js";
+import { isRuntimeProviderEnabled, runtimeProviderSchema } from "./runtime-provider.js";
 
 export const AGENT_TYPES = {
   HUMAN: "human",
@@ -106,6 +106,15 @@ export function isReservedAgentName(name: string): boolean {
   return RESERVED_AGENT_NAMES_SET.has(name);
 }
 
+/**
+ * New public selection is narrower than the persisted provider union: a
+ * temporarily disabled provider can remain on an already-bound agent, but it
+ * must not enter through create or runtime switch.
+ */
+const selectableRuntimeProviderSchema = runtimeProviderSchema.refine(isRuntimeProviderEnabled, {
+  message: "Runtime provider is disabled for new selection until release acceptance.",
+});
+
 export const createAgentSchema = z.object({
   name: z
     .string()
@@ -147,7 +156,7 @@ export const createAgentSchema = z.object({
    * the service layer when omitted. Must match a provider available in the
    * pinned client's reported capabilities (or be force-overridden).
    */
-  runtimeProvider: runtimeProviderSchema.optional(),
+  runtimeProvider: selectableRuntimeProviderSchema.optional(),
   /**
    * Official Agent Templates to adopt atomically with creation. The server
    * imports their components into Team Resources and creates explicit
@@ -195,7 +204,7 @@ export const switchAgentRuntimeSchema = z.object({
    * choice: runtime switches may move local workspace state between machines.
    */
   clientId: z.string().min(1).max(100),
-  runtimeProvider: runtimeProviderSchema,
+  runtimeProvider: selectableRuntimeProviderSchema,
   /**
    * Product-level confirmation that the user accepts interruption of active
    * sessions and possible local-runtime state loss. This is not a safety-check

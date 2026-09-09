@@ -55,12 +55,14 @@ import type {
   HandlerConfig,
   HandlerFactory,
   HandlerRouteReceipt,
+  ProviderContinuation,
   ResumeResult,
   SessionContext,
   SessionMessage,
   StartResult,
   TurnOutcome,
 } from "./handler.js";
+import { continuationResumeOptions } from "./handler.js";
 import { findImagePath, writeImage } from "./image-store.js";
 import { type DeliveryRouteOwnership, InboxDeliveryCoordinator } from "./inbox-delivery-coordinator.js";
 import { ManagedSkillsUnsafeDiscoveryError } from "./managed-skills.js";
@@ -69,7 +71,9 @@ import {
   buildProviderRetryEvent,
   classifyProviderFailure,
   decideProviderRetry,
+  PROVIDER_UNSAFE_REPLAY_NOTICE_UNSETTLED,
   type ProviderFailureClassification,
+  requiresUnsafeReplayNoticeCustody,
 } from "./provider-retry-policy.js";
 import { isAttachmentGoneError } from "./provider-support/attachment-availability.js";
 import { isContextSourceTransitionError } from "./provider-support/preparation.js";
@@ -103,6 +107,8 @@ import {
 type SessionEntry = {
   chatId: string;
   claudeSessionId: string;
+  /** Provider-owned continuation for a delivery already entered in-session. */
+  providerContinuation: ProviderContinuation | null;
   handler: AgentHandler;
   /** Context source captured by the handler factory that owns this entry. */
   handlerSourceKey: string;
@@ -447,17 +453,11 @@ function asTerminateError(kind: "suspend" | "teardown", error: unknown): Error {
   return error instanceof Error ? error : new Error(`session ${kind} failed: ${String(error)}`);
 }
 
-function normalizeStartReceipt(result: StartResult): {
-  sessionId: string;
-  route: Extract<HandlerRouteReceipt, { kind: "owned" }>;
-} {
+function normalizeStartReceipt(result: StartResult): StartResult {
   return result;
 }
 
-function normalizeResumeReceipt(result: ResumeResult): {
-  sessionId: string;
-  route: Extract<HandlerRouteReceipt, { kind: "owned" }> | null;
-} {
+function normalizeResumeReceipt(result: ResumeResult): ResumeResult {
   return result;
 }
 
@@ -531,6 +531,16 @@ export class SessionRuntime {
    * recovery before any retry actually happened.
    */
   private readonly pendingFenceFormatFailures = new Map<string, Set<string>>();
+
+  /**
+   * Forced recovery/retirement requests waiting for a provider's
+   * non-interruptible turn to settle. The action is released only for the
+   * exact live entry/handler that accepted the turn.
+   */
+  private readonly deferredProviderRetirements = new Map<
+    string,
+    { entry: SessionEntry; handler: AgentHandler; action: () => void }
+  >();
 
   private recordPendingFenceFormatFailure(chatId: string, message: SessionMessage): void {
     if (message.inboxEntryId === undefined) return;
@@ -668,6 +678,9 @@ export class SessionRuntime {
           this.clearFenceRecoveryAttempt(chatId, messageId);
           this.clearPendingFenceFormatFailure(chatId, messageId);
         }
+        if (this.projection.clearProviderContinuationForAck(chatId, this.runtimeProvider(), messageIds)) {
+          this.projection.persistRegistry();
+        }
       },
       log: config.log,
     });
@@ -721,7 +734,8 @@ export class SessionRuntime {
       drainDeferredMessages: (entry) => this.drainDeferredMessages(entry as SessionEntry),
       persistRegistry: () => this.projection.persistRegistry(),
       ensureImagesLocal: (message) => this.ensureImagesLocal(message),
-      failSessionForRecovery: (chatId, reason, sessionId) => this.failSessionForRecovery(chatId, reason, sessionId),
+      failSessionForRecovery: (chatId, reason, sessionId, continuation) =>
+        this.failSessionForRecovery(chatId, reason, sessionId, continuation),
       runtimeProvider: () => this.runtimeProvider(),
       normalizeResumeReceipt,
       normalizeStartReceipt,
@@ -1290,6 +1304,7 @@ export class SessionRuntime {
   /** Shut down all sessions gracefully. */
   async shutdown(reason?: string, opts: SessionRuntimeShutdownOptions = {}): Promise<void> {
     this.shuttingDown = true;
+    this.deferredProviderRetirements.clear();
     this.config.subprocessProbe?.stop();
     this.slotScheduler.stopIdleEviction();
     this.projection.stopRuntimeReaffirm();
@@ -1577,6 +1592,39 @@ export class SessionRuntime {
     return parsed.data;
   }
 
+  /**
+   * Turn liveness for the D-axis, derived from the session events a provider
+   * emits *inside* a turn.
+   *
+   * Raw provider activity is deliberately NOT the signal. `recordProviderActivity`
+   * is broader than turn liveness by design — the Codex app-server samples it
+   * above its own thread/turn filter, so a late `thread/tokenUsage/updated` for
+   * an already-closed turn reaches it and is then recorded as historical usage
+   * or buffered, without ever producing a `turn_end`. Treating that sample as a
+   * turn start would strand `working` on an idle chat, kept fresh by the
+   * re-affirm loop until an unrelated turn ends or the session is suspended.
+   *
+   * Assistant text, thinking, and tool calls are only emitted from a provider's
+   * in-turn path, so they are self-proving evidence that a turn is open; the
+   * out-of-turn traffic that caused the problem (`token_usage`,
+   * `context_tree_usage`, runtime `error`) is excluded.
+   *
+   * This is the floor, not the primary signal: a provider that reports its own
+   * turn boundary through `noteTurnStart` lights up at the boundary instead,
+   * which matters because the head of a turn is model latency with nothing
+   * displayable in it yet. A provider that reports neither stays idle, which
+   * is the correct failure direction.
+   */
+  private noteTurnLivenessFromEvent(chatId: string, event: SessionEvent): void {
+    if (event.kind === "turn_end") {
+      this.projection.noteProviderTurnEnd(chatId);
+      return;
+    }
+    if (event.kind === "assistant_text" || event.kind === "thinking" || event.kind === "tool_call") {
+      this.projection.noteProviderTurnStart(chatId);
+    }
+  }
+
   private captureRuntimeFailureNotice(
     chatId: string,
     event: SessionEvent,
@@ -1697,6 +1745,17 @@ export class SessionRuntime {
   private fenceSessionForRuntimeSessionProofRecovery(chatId: string, reasonCode: string): void {
     const entry = this.projection.getSession(chatId);
     if (!entry) return;
+    if (
+      this.deferProviderRetirement(entry, () => this.fenceSessionForRuntimeSessionProofRecoveryNow(chatId, reasonCode))
+    ) {
+      return;
+    }
+    this.fenceSessionForRuntimeSessionProofRecoveryNow(chatId, reasonCode);
+  }
+
+  private fenceSessionForRuntimeSessionProofRecoveryNow(chatId: string, reasonCode: string): void {
+    const entry = this.projection.getSession(chatId);
+    if (!entry) return;
     const reason = `runtime_session_proof:${reasonCode}`;
     this.routeTeardown.invalidateRouteTransition(entry, reason);
     this.slotScheduler.clearRetryState(entry);
@@ -1708,6 +1767,7 @@ export class SessionRuntime {
       this.projection.recordEvictionResume(chatId, {
         claudeSessionId: resumeSessionId,
         lastActivity: entry.lastActivity,
+        ...(entry.providerContinuation ? { continuation: entry.providerContinuation } : {}),
       });
     }
     this.slotScheduler.releaseActiveSlot(entry);
@@ -1783,7 +1843,83 @@ export class SessionRuntime {
     return true;
   }
 
-  private failSessionForRecovery(chatId: string, reason: string, sessionId?: string): void {
+  private deferProviderRetirement(entry: SessionEntry, action: () => void): boolean {
+    let active = false;
+    try {
+      active = entry.handler.isProviderTurnActive?.() === true;
+    } catch (error) {
+      this.config.log.warn(
+        { chatId: entry.chatId, error },
+        "provider turn liveness probe failed; deferring forced retirement",
+      );
+      active = true;
+    }
+    if (!active) return false;
+
+    const existing = this.deferredProviderRetirements.get(entry.chatId);
+    if (existing) return true;
+    const waitForSettled = entry.handler.waitForProviderTurnSettled;
+    if (!waitForSettled) {
+      this.config.log.error(
+        { chatId: entry.chatId },
+        "provider exposed an active turn without a settlement waiter; retaining live route",
+      );
+      return true;
+    }
+    const pending = { entry, handler: entry.handler, action };
+    this.deferredProviderRetirements.set(entry.chatId, pending);
+    void Promise.resolve()
+      .then(() => waitForSettled.call(entry.handler))
+      .catch((error) => {
+        this.config.log.warn({ chatId: entry.chatId, error }, "provider turn settlement waiter failed");
+      })
+      .then(() => {
+        if (this.deferredProviderRetirements.get(entry.chatId) !== pending) return;
+        this.deferredProviderRetirements.delete(entry.chatId);
+        if (this.shuttingDown) return;
+        if (!this.projection.isSameSession(entry.chatId, entry) || entry.handler !== pending.handler) return;
+        let stillActive = false;
+        try {
+          stillActive = pending.handler.isProviderTurnActive?.() === true;
+        } catch {
+          stillActive = true;
+        }
+        if (stillActive) {
+          this.deferProviderRetirement(entry, action);
+          return;
+        }
+        action();
+      });
+    this.config.log.info(
+      { chatId: entry.chatId },
+      "deferring forced provider route retirement until the active turn settles",
+    );
+    return true;
+  }
+
+  private failSessionForRecovery(
+    chatId: string,
+    reason: string,
+    sessionId?: string,
+    continuation?: ProviderContinuation,
+  ): void {
+    const entry = this.projection.getSession(chatId);
+    if (!entry) return;
+
+    if (
+      this.deferProviderRetirement(entry, () => this.failSessionForRecoveryNow(chatId, reason, sessionId, continuation))
+    ) {
+      return;
+    }
+    this.failSessionForRecoveryNow(chatId, reason, sessionId, continuation);
+  }
+
+  private failSessionForRecoveryNow(
+    chatId: string,
+    reason: string,
+    sessionId?: string,
+    continuation?: ProviderContinuation,
+  ): void {
     const entry = this.projection.getSession(chatId);
     if (!entry) return;
 
@@ -1791,13 +1927,24 @@ export class SessionRuntime {
     this.slotScheduler.clearRetryState(entry);
     const resumeSessionId = resumableProviderSessionId(
       sessionId,
+      continuation?.sessionId,
       entry.claudeSessionId,
       this.slotScheduler.resumeFallbackSessionId(entry),
     );
     if (resumeSessionId) {
+      const entryContinuation = entry.providerContinuation ?? undefined;
+      const recoveryContinuation =
+        continuation && continuation.provider === this.runtimeProvider() && continuation.sessionId === resumeSessionId
+          ? continuation
+          : entryContinuation &&
+              entryContinuation.provider === this.runtimeProvider() &&
+              entryContinuation.sessionId === resumeSessionId
+            ? entryContinuation
+            : undefined;
       this.projection.recordEvictionResume(chatId, {
         claudeSessionId: resumeSessionId,
         lastActivity: entry.lastActivity,
+        ...(recoveryContinuation ? { continuation: recoveryContinuation } : {}),
       });
     }
     this.slotScheduler.releaseActiveSlot(entry);
@@ -1889,6 +2036,20 @@ export class SessionRuntime {
         return "retry";
       }
       if (noticeResult.kind === "failed") {
+        // An unsafe provider turn has no safe retry content. Leave its ledger
+        // row in notice-only custody; fail-for-recovery then evicts the route
+        // and server redelivery can retry only this terminal disposition.
+        if (
+          outcome.completion === "consumed" &&
+          outcome.reason === "unsafe_replay" &&
+          requiresUnsafeReplayNoticeCustody(this.runtimeProvider())
+        ) {
+          const pending = this.projection.getSession(chatId)?.pendingRuntimeFailureNotice;
+          if (pending && shouldPostProviderFailureRuntimeNotice(pending)) {
+            this.inboxDelivery.markNoticeRequired(chatId, messages, pending);
+          }
+          return "retry";
+        }
         this.retryDeliveryTurn(chatId, messages, "runtime_failure_notice_delivery_failed");
         this.projection.projectSessionRuntime(chatId);
         return "retry";
@@ -2043,7 +2204,76 @@ export class SessionRuntime {
       }
     }
     entry.claudeSessionId = receipt.sessionId;
+    const receiptContinuation = continuationResumeOptions(
+      receipt.continuation,
+      message,
+      receipt.sessionId,
+      this.runtimeProvider(),
+    )?.continuation;
+    // A fail-closed resume may intentionally leave the exact delivery in
+    // processing custody while it retries only the terminal notice/ACK. Keep
+    // the validated continuation in that case; a settled route deliberately
+    // retires it.
+    const retainedContinuation =
+      receiptContinuation ??
+      (receipt.route?.mode === "processing"
+        ? continuationResumeOptions(
+            entry.providerContinuation ?? undefined,
+            message,
+            receipt.sessionId,
+            this.runtimeProvider(),
+          )?.continuation
+        : undefined);
+    entry.providerContinuation = retainedContinuation ?? null;
     return true;
+  }
+
+  /**
+   * Preserve an explicit provider continuation before discarding a stale
+   * route transition. The route fence protects handler adoption, but it must
+   * not erase the provider's exact opaque identity or turn the later server
+   * redelivery into a fresh conversation. Generic providers do not opt in and
+   * therefore retain the historical fresh-start recovery path.
+   */
+  private preserveStaleProviderContinuation(
+    entry: SessionEntry,
+    message: SessionMessage | null | undefined,
+    receipt: { sessionId: string; continuation?: ProviderContinuation },
+  ): void {
+    const options = continuationResumeOptions(receipt.continuation, message, receipt.sessionId, this.runtimeProvider());
+    if (!options?.continuation) return;
+    entry.claudeSessionId = receipt.sessionId;
+    entry.providerContinuation = options.continuation;
+    this.projection.recordEvictionResume(entry.chatId, {
+      claudeSessionId: receipt.sessionId,
+      lastActivity: entry.lastActivity,
+      continuation: options.continuation,
+    });
+    this.projection.persistRegistry();
+    this.config.log.info(
+      {
+        chatId: entry.chatId,
+        sessionId: receipt.sessionId,
+        messageId: options.continuation.messageId,
+      },
+      "preserved provider continuation from stale route completion",
+    );
+  }
+
+  /**
+   * A continuation is custody for one exact delivery, not a generic resume
+   * hint. If a different message reaches the mapping, retain the mapping and
+   * recover the delivery instead of silently sending that message as a fresh
+   * provider turn in the old conversation.
+   */
+  private deferMismatchedProviderContinuation(
+    entry: SessionEntry,
+    mapping: { claudeSessionId: string; lastActivity: number; continuation: ProviderContinuation },
+    reason: string,
+  ): void {
+    this.failSessionForRecovery(entry.chatId, reason, mapping.claudeSessionId);
+    this.projection.recordEvictionResume(entry.chatId, mapping);
+    this.projection.persistRegistry();
   }
 
   private async routeMessage(
@@ -2265,6 +2495,7 @@ export class SessionRuntime {
     const entry: SessionEntry = {
       chatId,
       claudeSessionId: "",
+      providerContinuation: null,
       handler,
       handlerSourceKey: admission.sourceKey,
       status: "active",
@@ -2277,7 +2508,10 @@ export class SessionRuntime {
     };
 
     const evicted = this.projection.activateLiveSession(entry);
-    if (evicted) entry.claudeSessionId = evicted.claudeSessionId;
+    if (evicted) {
+      entry.claudeSessionId = evicted.claudeSessionId;
+      entry.providerContinuation = evicted.continuation ?? null;
+    }
     this.slotScheduler.attachLiveSession(entry, { resumeFromEvicted: evicted });
     this.routeTeardown.attachLiveSession(entry);
     this.slotScheduler.claimActiveSlot(entry);
@@ -2305,8 +2539,30 @@ export class SessionRuntime {
       this.projection.setCurrentTrigger(chatId, message);
       const token = this.createDeliveryToken(chatId, routeLeases);
       if (evicted) {
-        const receipt = normalizeResumeReceipt(await handler.resume(message, evicted.claudeSessionId, ctx, token));
+        const continuationOptions = continuationResumeOptions(
+          evicted.continuation,
+          message,
+          evicted.claudeSessionId,
+          this.runtimeProvider(),
+        );
+        if (evicted.continuation && !continuationOptions) {
+          this.deferMismatchedProviderContinuation(
+            entry,
+            {
+              claudeSessionId: evicted.claudeSessionId,
+              lastActivity: evicted.lastActivity,
+              continuation: evicted.continuation,
+            },
+            "session_eviction_provider_continuation_mismatch",
+          );
+          return;
+        }
+        const resumeResult = continuationOptions
+          ? await handler.resume(message, evicted.claudeSessionId, ctx, token, continuationOptions)
+          : await handler.resume(message, evicted.claudeSessionId, ctx, token);
+        const receipt = normalizeResumeReceipt(resumeResult);
         if (!this.routeTeardown.isCurrentRouteTransition(entry, transition)) {
+          this.preserveStaleProviderContinuation(entry, message, receipt);
           this.routeTeardown.discardStaleRouteTransition(
             entry.chatId,
             transition,
@@ -2319,10 +2575,12 @@ export class SessionRuntime {
       } else {
         const receipt = normalizeStartReceipt(await handler.start(message, ctx, token));
         if (!this.routeTeardown.isCurrentRouteTransition(entry, transition)) {
+          this.preserveStaleProviderContinuation(entry, message, receipt);
           this.routeTeardown.discardStaleRouteTransition(entry.chatId, transition, "session_start_stale_completion");
           return;
         }
         entry.claudeSessionId = receipt.sessionId;
+        entry.providerContinuation = null;
         if (this.markRouteOwned(chatId, message, receipt.route) === "lost") {
           this.abortUnownedRoute(entry, "session_start_unowned_delivery");
           return;
@@ -2547,14 +2805,37 @@ export class SessionRuntime {
       // and the next suspend→resume cycle would re-trigger the same
       // missing-transcript fallback ad infinitum.
       const token = message ? this.createDeliveryToken(entry.chatId, routeLeases) : undefined;
+      const continuationOptions = continuationResumeOptions(
+        entry.providerContinuation ?? undefined,
+        message,
+        entry.claudeSessionId,
+        this.runtimeProvider(),
+      );
+      if (entry.providerContinuation && !continuationOptions) {
+        this.deferMismatchedProviderContinuation(
+          entry,
+          {
+            claudeSessionId: entry.claudeSessionId,
+            lastActivity: entry.lastActivity,
+            continuation: entry.providerContinuation,
+          },
+          "session_resume_provider_continuation_mismatch",
+        );
+        return;
+      }
       const resumeResult = token
-        ? await routeHandler.resume(message ?? undefined, entry.claudeSessionId, ctx, token)
-        : await routeHandler.resume(message ?? undefined, entry.claudeSessionId, ctx);
+        ? continuationOptions
+          ? await routeHandler.resume(message ?? undefined, entry.claudeSessionId, ctx, token, continuationOptions)
+          : await routeHandler.resume(message ?? undefined, entry.claudeSessionId, ctx, token)
+        : continuationOptions
+          ? await routeHandler.resume(message ?? undefined, entry.claudeSessionId, ctx, undefined, continuationOptions)
+          : await routeHandler.resume(message ?? undefined, entry.claudeSessionId, ctx);
+      const receipt = normalizeResumeReceipt(resumeResult);
       if (!this.routeTeardown.isCurrentRouteTransition(entry, transition)) {
+        this.preserveStaleProviderContinuation(entry, message, receipt);
         this.routeTeardown.discardStaleRouteTransition(entry.chatId, transition, "session_resume_stale_completion");
         return;
       }
-      const receipt = normalizeResumeReceipt(resumeResult);
       if (!this.adoptResumeReceipt(entry, message, receipt, "session_resume_unowned_delivery")) return;
       if (!this.routeTeardown.completeRouteTransition(entry, transition)) {
         this.routeTeardown.discardStaleRouteTransition(entry.chatId, transition, "session_resume_stale_adoption");
@@ -2844,6 +3125,25 @@ export class SessionRuntime {
     const routeLease = this.routeTeardown.currentRouteLease(entry);
     const mutationValid = () => this.routeTeardown.isRouteAdoptionValid(entry, routeLease);
     const settlementValid = () => this.routeTeardown.isDeliverySettlementLeaseValid(entry, routeLease);
+    const continuation = entry.providerContinuation;
+    if (
+      continuation &&
+      continuation.provider === this.runtimeProvider() &&
+      continuation.sessionId === entry.claudeSessionId &&
+      continuation.messageId === message.id &&
+      this.inboxDelivery.hasNoticeRequiredDelivery(chatId)
+    ) {
+      // A provider-entered unsafe row marked for durable notice custody can
+      // never become a second provider turn. Retire the ambiguous live route
+      // and let the durable custody path retry only the terminal disposition.
+      this.failSessionForRecovery(
+        chatId,
+        PROVIDER_UNSAFE_REPLAY_NOTICE_UNSETTLED,
+        continuation.sessionId,
+        continuation,
+      );
+      return;
+    }
     if (!mutationValid()) {
       this.retryDeliveryTurn(chatId, message, "active_inject_route_invalidated");
       return;
@@ -3255,6 +3555,14 @@ export class SessionRuntime {
           entry.lastActivity = Date.now();
         }
       },
+      noteTurnStart: () => {
+        if (mutationValid && !mutationValid()) return;
+        this.projection.noteProviderTurnStart(chatId);
+      },
+      noteTurnEnd: () => {
+        if (mutationValid && !mutationValid()) return;
+        this.projection.noteProviderTurnEnd(chatId);
+      },
       emitEvent: (event) => {
         // During graceful drain, only structured terminal provider-failure events
         // may cross the settlement lease (durable notice capture). All other
@@ -3267,6 +3575,7 @@ export class SessionRuntime {
           return;
         }
         if (mutationValid && !mutationValid()) return;
+        this.noteTurnLivenessFromEvent(chatId, event);
         this.config.onSessionEvent?.(chatId, event);
         if (mutationValid && !mutationValid()) return;
         this.captureRuntimeFailureNotice(chatId, event, mutationValid);
@@ -3275,6 +3584,11 @@ export class SessionRuntime {
         if (mutationValid && !mutationValid()) {
           return Promise.reject(new Error("route transition invalidated"));
         }
+        // `turn_end` also reaches the server through this confirmed channel
+        // (the Codex landing trial awaits it), so turn liveness must clear
+        // here too or that turn would stay `working` until the session is
+        // suspended.
+        this.noteTurnLivenessFromEvent(chatId, event);
         return this.confirmSessionEventOrThrow(chatId, event, mutationValid);
       },
       forwardResult: (text) => {
@@ -3310,9 +3624,9 @@ export class SessionRuntime {
             }),
         );
       },
-      failSessionForRecovery: (reason, sessionId) => {
+      failSessionForRecovery: (reason, sessionId, continuation) => {
         if (mutationValid && !mutationValid()) return;
-        this.failSessionForRecovery(chatId, reason, sessionId);
+        this.failSessionForRecovery(chatId, reason, sessionId, continuation);
       },
       replaceSessionId: (sessionId, reason) => {
         if (mutationValid && !mutationValid()) return;

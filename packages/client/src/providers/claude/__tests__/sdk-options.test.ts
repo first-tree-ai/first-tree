@@ -102,6 +102,7 @@ function buildSessionCtx(chatId: string, buildAgentEnv?: SessionContext["buildAg
     chatId,
     log: () => {},
     recordProviderActivity: () => {},
+    noteTurnStart: () => {},
     emitEvent: () => {},
     ...plumbing,
     ...(buildAgentEnv ? { buildAgentEnv } : {}),

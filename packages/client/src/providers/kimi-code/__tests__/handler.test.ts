@@ -229,6 +229,7 @@ function makeContext(
     chatId: "chat-kimi",
     log: () => {},
     recordProviderActivity: () => {},
+    noteTurnStart: () => {},
     emitEvent: (value) => void events.push(value),
     ...mockCtxPlumbing({ sendMessage }, "chat-kimi"),
   };

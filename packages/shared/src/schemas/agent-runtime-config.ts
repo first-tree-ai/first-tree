@@ -363,6 +363,14 @@ const grokRuntimeConfigPayloadShape = agentRuntimeConfigPayloadShape.extend({
   reasoningEffort: z.enum(["", "low", "medium", "high"]).default(""),
 });
 
+const antigravityRuntimeConfigPayloadShape = agentRuntimeConfigPayloadShape.extend({
+  kind: z.literal("antigravity"),
+  // Antigravity accepts provider-native model slugs and a separate low /
+  // medium / high effort flag. Empty values delegate to the operator's local
+  // Antigravity defaults; non-empty values are passed through verbatim.
+  reasoningEffort: z.enum(["", "low", "medium", "high"]).default(""),
+});
+
 const taggedPayloadUnion = z.discriminatedUnion("kind", [
   ampRuntimeConfigPayloadShape,
   deepseekRuntimeConfigPayloadShape,
@@ -370,6 +378,7 @@ const taggedPayloadUnion = z.discriminatedUnion("kind", [
   claudeCodeTuiRuntimeConfigPayloadShape,
   codexRuntimeConfigPayloadShape,
   cursorRuntimeConfigPayloadShape,
+  antigravityRuntimeConfigPayloadShape,
   grokRuntimeConfigPayloadShape,
   kimiCodeRuntimeConfigPayloadShape,
   opencodeRuntimeConfigPayloadShape,
@@ -463,6 +472,7 @@ export type KimiCodeRuntimeConfigPayload = Extract<AgentRuntimeConfigPayload, { 
 export type OpenCodeRuntimeConfigPayload = Extract<AgentRuntimeConfigPayload, { kind: "opencode" }>;
 export type PiRuntimeConfigPayload = Extract<AgentRuntimeConfigPayload, { kind: "pi" }>;
 export type GrokRuntimeConfigPayload = Extract<AgentRuntimeConfigPayload, { kind: "grok" }>;
+export type AntigravityRuntimeConfigPayload = Extract<AgentRuntimeConfigPayload, { kind: "antigravity" }>;
 
 /** Default payload used when creating a fresh claude-code agent. */
 export const DEFAULT_AGENT_RUNTIME_CONFIG_PAYLOAD: ClaudeCodeRuntimeConfigPayload = {
@@ -601,6 +611,18 @@ export const DEFAULT_GROK_RUNTIME_CONFIG_PAYLOAD: GrokRuntimeConfigPayload = {
   reasoningEffort: "",
 };
 
+/** Default payload for a fresh Antigravity agent. */
+export const DEFAULT_ANTIGRAVITY_RUNTIME_CONFIG_PAYLOAD: AntigravityRuntimeConfigPayload = {
+  kind: "antigravity",
+  prompt: { append: "" },
+  model: "",
+  mcpServers: [],
+  env: [],
+  gitRepos: [],
+  resourceSkills: [],
+  reasoningEffort: "",
+};
+
 /**
  * Default payload selector by runtime provider.
  */
@@ -618,6 +640,8 @@ export function defaultRuntimeConfigPayload(
       return { ...DEFAULT_CURSOR_RUNTIME_CONFIG_PAYLOAD };
     case "grok":
       return { ...DEFAULT_GROK_RUNTIME_CONFIG_PAYLOAD };
+    case "antigravity":
+      return { ...DEFAULT_ANTIGRAVITY_RUNTIME_CONFIG_PAYLOAD };
     case "kimi-code":
       return { ...DEFAULT_KIMI_CODE_RUNTIME_CONFIG_PAYLOAD };
     case "opencode":

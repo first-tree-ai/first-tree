@@ -924,7 +924,12 @@ export const createCodexSdkHandler: HandlerFactory = (config) => {
               if (event.type === "thread.started") {
                 threadId = event.thread_id;
               } else if (event.type === "turn.started") {
-                // No-op — runtime state already "working".
+                // The turn boundary itself. For an inbox-owned turn the
+                // delivery already projects working, but a provider-owned
+                // turn has no such custody: without this the chat would read
+                // Idle through the model latency that precedes the first
+                // displayable item.
+                sessionCtx.noteTurnStart();
               } else if (event.type === "item.completed") {
                 if (event.item.type === "error" && isUnsupportedCodexServiceTierWarning(event.item.message)) {
                   providerAttempt.recordSignal({

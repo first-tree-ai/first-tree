@@ -173,6 +173,7 @@ function makeContext(opts: {
     chatId: "chat-cursor",
     log: () => {},
     recordProviderActivity: () => {},
+    noteTurnStart: () => {},
     emitEvent: (event) => {
       opts.events.push(event);
     },

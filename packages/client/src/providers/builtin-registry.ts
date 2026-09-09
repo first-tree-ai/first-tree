@@ -1,6 +1,7 @@
 import type { RuntimeProvider } from "@first-tree/shared";
 import type { HandlerFactory } from "../runtime/contracts.js";
 import { createAmpHandler } from "./amp/index.js";
+import { createAntigravityHandler } from "./antigravity/index.js";
 import { type ClaudeExecutableResolution, resolveClaudeCodeExecutable } from "./claude/executable.js";
 import { createClaudeCodeHandler } from "./claude/index.js";
 import { createClaudeCodeTuiHandler } from "./claude/tui/index.js";
@@ -49,6 +50,7 @@ export function createBuiltinHandlerRegistry(deps: BuiltinHandlerRegistryDeps = 
     codex: (config) => createCodexHandler(config),
     cursor: (config) => createCursorHandler(config),
     grok: (config) => createGrokHandler(config),
+    antigravity: (config) => createAntigravityHandler(config),
     "kimi-code": (config) => createKimiCodeHandler(config),
     opencode: (config) => createOpenCodeHandler(config),
     pi: (config) => createPiHandler(config),

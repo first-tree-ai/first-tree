@@ -214,6 +214,7 @@ function makeContext(opts: {
     chatId: "chat-amp",
     log: () => {},
     recordProviderActivity: () => {},
+    noteTurnStart: () => {},
     emitEvent: (event) => {
       opts.events.push(event);
     },

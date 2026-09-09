@@ -6,11 +6,13 @@ import type {
   AgentHandler,
   DeliveryToken,
   HandlerRouteReceipt,
+  ProviderContinuation,
   ResumeResult,
   SessionContext,
   SessionMessage,
   StartResult,
 } from "./handler.js";
+import { continuationResumeOptions } from "./handler.js";
 import type { DeliveryRouteOwnership } from "./inbox-delivery-coordinator.js";
 import {
   buildProviderRetryEvent,
@@ -32,6 +34,7 @@ export type PendingMessage = {
 export type EvictedResumeMapping = {
   readonly claudeSessionId: string;
   readonly lastActivity: number;
+  readonly continuation?: ProviderContinuation;
 };
 
 /**
@@ -60,7 +63,7 @@ type SlotState = {
   lastRetryRawError: string | null;
   retryHeadMessage: SessionMessage | null;
   deferredMessages: SessionMessage[];
-  retryFromEvicted: { claudeSessionId: string; lastActivity: number } | null;
+  retryFromEvicted: EvictedResumeMapping | null;
 };
 
 function emptySlotState(resumeFromEvicted: EvictedResumeMapping | null): SlotState {
@@ -76,7 +79,11 @@ function emptySlotState(resumeFromEvicted: EvictedResumeMapping | null): SlotSta
     retryHeadMessage: null,
     deferredMessages: [],
     retryFromEvicted: resumeFromEvicted
-      ? { claudeSessionId: resumeFromEvicted.claudeSessionId, lastActivity: resumeFromEvicted.lastActivity }
+      ? {
+          claudeSessionId: resumeFromEvicted.claudeSessionId,
+          lastActivity: resumeFromEvicted.lastActivity,
+          ...(resumeFromEvicted.continuation ? { continuation: { ...resumeFromEvicted.continuation } } : {}),
+        }
       : null,
   };
 }
@@ -167,15 +174,22 @@ export type SlotSchedulerAuthorityDeps = {
   drainDeferredMessages: (entry: SlotSchedulerSessionEntry) => void;
   persistRegistry: () => void;
   ensureImagesLocal: (message: SessionMessage) => Promise<void>;
-  failSessionForRecovery: (chatId: string, reason: string, sessionId?: string) => void;
+  failSessionForRecovery: (
+    chatId: string,
+    reason: string,
+    sessionId?: string,
+    continuation?: ProviderContinuation,
+  ) => void;
   runtimeProvider: () => RuntimeProvider;
   normalizeResumeReceipt: (result: ResumeResult) => {
     sessionId: string;
     route: Extract<HandlerRouteReceipt, { kind: "owned" }> | null;
+    continuation?: ProviderContinuation;
   };
   normalizeStartReceipt: (result: StartResult) => {
     sessionId: string;
     route: Extract<HandlerRouteReceipt, { kind: "owned" }>;
+    continuation?: ProviderContinuation;
   };
   recordEvictionResume: (chatId: string, mapping: EvictedResumeMapping | null) => void;
   getSessionRuntimeState: (chatId: string) => RuntimeState | undefined;
@@ -212,6 +226,47 @@ export class SlotSchedulerAuthority {
   private readonly slotBySession = new WeakMap<SlotSchedulerSessionEntry, SlotState>();
 
   constructor(private readonly deps: SlotSchedulerAuthorityDeps) {}
+
+  /**
+   * A provider may expose a non-interruptible window after its input crossed
+   * the provider boundary. Treat an observation failure as protected: force
+   * retirement is a safety fallback, never a reason to risk duplicate effects.
+   */
+  private isProviderTurnActive(entry: SlotSchedulerSessionEntry): boolean {
+    try {
+      return entry.handler.isProviderTurnActive?.() === true;
+    } catch (error) {
+      this.deps.log.warn({ chatId: entry.chatId, error }, "provider turn liveness probe failed; protecting session");
+      return true;
+    }
+  }
+
+  /**
+   * A canceled provider start/resume can materialize after its route fence.
+   * Preserve an explicitly provider-safe continuation before the stale
+   * handler is retired; generic receipts intentionally do not create a
+   * resume mapping and retain the historical fresh-start behaviour.
+   */
+  private preserveStaleProviderContinuation(
+    entry: SlotSchedulerSessionEntry,
+    message: SessionMessage | null | undefined,
+    receipt: { sessionId: string; continuation?: ProviderContinuation },
+  ): void {
+    const options = continuationResumeOptions(
+      receipt.continuation,
+      message,
+      receipt.sessionId,
+      this.deps.runtimeProvider(),
+    );
+    if (!options?.continuation) return;
+    entry.claudeSessionId = receipt.sessionId;
+    this.deps.recordEvictionResume(entry.chatId, {
+      claudeSessionId: receipt.sessionId,
+      lastActivity: entry.lastActivity,
+      continuation: options.continuation,
+    });
+    this.deps.persistRegistry();
+  }
 
   /**
    * Create (or replace) private slot/retry state for a live session. The host
@@ -683,10 +738,41 @@ export class SlotSchedulerAuthority {
       if (retryHeadMessage) this.deps.setCurrentTrigger(chatId, retryHeadMessage);
       const token = retryHeadMessage ? this.deps.createDeliveryToken(chatId, routeLeases) : undefined;
       if (retryRoute.kind === "resume") {
+        const continuationOptions = continuationResumeOptions(
+          slot.retryFromEvicted?.continuation,
+          retryHeadMessage,
+          retryRoute.previousSessionId,
+          this.deps.runtimeProvider(),
+        );
+        if (slot.retryFromEvicted?.continuation && !continuationOptions) {
+          const mapping = {
+            claudeSessionId: slot.retryFromEvicted.claudeSessionId,
+            lastActivity: slot.retryFromEvicted.lastActivity,
+            continuation: slot.retryFromEvicted.continuation,
+          };
+          this.deps.failSessionForRecovery(
+            chatId,
+            "session_retry_provider_continuation_mismatch",
+            mapping.claudeSessionId,
+          );
+          this.deps.recordEvictionResume(chatId, mapping);
+          this.deps.persistRegistry();
+          return;
+        }
         const resumeResult = token
-          ? await newHandler.resume(retryHeadMessage ?? undefined, retryRoute.previousSessionId, ctx, token)
+          ? continuationOptions
+            ? await newHandler.resume(
+                retryHeadMessage ?? undefined,
+                retryRoute.previousSessionId,
+                ctx,
+                token,
+                continuationOptions,
+              )
+            : await newHandler.resume(retryHeadMessage ?? undefined, retryRoute.previousSessionId, ctx, token)
           : await newHandler.resume(undefined, retryRoute.previousSessionId, ctx);
+        const receipt = this.deps.normalizeResumeReceipt(resumeResult);
         if (!this.deps.routeTeardown.isCurrentRouteTransition(entry, transition)) {
+          this.preserveStaleProviderContinuation(entry, retryHeadMessage, receipt);
           this.deps.routeTeardown.discardStaleRouteTransition(
             entry.chatId,
             transition,
@@ -694,7 +780,6 @@ export class SlotSchedulerAuthority {
           );
           return;
         }
-        const receipt = this.deps.normalizeResumeReceipt(resumeResult);
         if (!this.deps.adoptResumeReceipt(entry, retryHeadMessage, receipt, "session_retry_resume_unowned_delivery")) {
           return;
         }
@@ -703,6 +788,7 @@ export class SlotSchedulerAuthority {
           await newHandler.start(retryRoute.message, ctx, this.deps.createDeliveryToken(chatId, routeLeases)),
         );
         if (!this.deps.routeTeardown.isCurrentRouteTransition(entry, transition)) {
+          this.preserveStaleProviderContinuation(entry, retryRoute.message, receipt);
           this.deps.routeTeardown.discardStaleRouteTransition(
             entry.chatId,
             transition,
@@ -831,13 +917,17 @@ export class SlotSchedulerAuthority {
       const idle = this.findOldestActiveSession(
         (session) =>
           session.chatId !== chatId &&
+          !this.isProviderTurnActive(session) &&
           !this.deps.inbox.hasProcessingOwnedWork(session.chatId) &&
           (!protectSubprocess || !this.hasLiveSubprocess(session.chatId)),
       );
       if (idle) return { victim: idle, kind: "idle" };
       if (deliveryKind === "fresh") {
         const working = this.findOldestActiveSession(
-          (session) => session.chatId !== chatId && (!protectSubprocess || !this.hasLiveSubprocess(session.chatId)),
+          (session) =>
+            session.chatId !== chatId &&
+            !this.isProviderTurnActive(session) &&
+            (!protectSubprocess || !this.hasLiveSubprocess(session.chatId)),
         );
         if (working) return { victim: working, kind: "working" };
       }
@@ -1005,6 +1095,10 @@ export class SlotSchedulerAuthority {
       // its detached handlers are still being confirmed stopped, so keep it
       // out of the candidate set (force-keep).
       if (this.deps.routeTeardown.hasPendingTeardown(key)) continue;
+      // A lifecycle transition can mark an entry non-active before its
+      // provider turn has crossed the terminal boundary. Keep that handler
+      // protected regardless of the host session status.
+      if (this.isProviderTurnActive(session)) continue;
       if (session.status !== "active") {
         if (!nonActiveCandidate || session.lastActivity < nonActiveCandidate.session.lastActivity) {
           nonActiveCandidate = { key, session };
@@ -1092,16 +1186,26 @@ export class SlotSchedulerAuthority {
 
       const currentState = this.deps.getSessionRuntimeState(session.chatId);
       const hasProcessingWork = this.deps.inbox.hasProcessingOwnedWork(session.chatId);
+      const providerTurnActive = this.isProviderTurnActive(session);
       // A live background subprocess (e.g. a `run_in_background` watcher) is
       // real in-flight work even though no turn is processing: suspending would
       // close the provider stream and lose its completion wake-up.
       const hasLiveSubprocess = this.hasLiveSubprocess(session.chatId);
 
-      // Hard cap: regardless of unsettled work, once we are past
-      // `idle_timeout + working_grace_seconds` the slot MUST be reclaimed.
-      // Anything else means a stuck handler — or a forgotten background
-      // subprocess — can hold a slot forever just by never closing the work.
+      // Hard cap: for sessions without an active provider turn, regardless of
+      // other unsettled work, once we are past `idle_timeout +
+      // working_grace_seconds` the slot MUST be reclaimed. A provider-entered
+      // turn is the explicit exception: it stays alive until its terminal
+      // provider boundary so a replacement cannot duplicate external effects.
       const pastHardCap = inactiveMs >= timeoutMs + workingGraceMs;
+
+      if (providerTurnActive) {
+        this.deps.log.info(
+          { chatId: session.chatId, runtimeState: currentState, reason: "provider_turn_active" },
+          "session idle threshold reached but provider turn is non-interruptible — skipping suspend",
+        );
+        continue;
+      }
 
       if ((hasProcessingWork || hasLiveSubprocess) && !pastHardCap) {
         this.deps.log.info(

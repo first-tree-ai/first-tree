@@ -15,6 +15,7 @@ export const PROVIDER_SKILL_ROOTS: Readonly<Record<RuntimeProvider, string>> = O
   codex: ".agents/skills",
   cursor: ".cursor/skills",
   grok: ".grok/skills",
+  antigravity: ".agents/skills",
   "kimi-code": ".kimi-code/skills",
   opencode: ".opencode/skills",
   pi: ".agents/skills",

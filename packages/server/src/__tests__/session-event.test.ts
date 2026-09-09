@@ -701,3 +701,309 @@ async function humanAgentIdFor(app: FastifyInstance, memberId: string): Promise<
   if (!row) throw new Error("member row missing");
   return row.agentId;
 }
+
+describe("listChatSpeakerEvents — bounded per-speaker windows and current-turn metadata", () => {
+  const getApp = useTestApp();
+  const chatId = () => `chat-${crypto.randomUUID()}`;
+
+  async function seedChatWithSpeakers(agentUuids: string[], organizationId: string): Promise<string> {
+    const c = chatId();
+    await getApp().db.insert(chats).values({ id: c, organizationId, type: "group" });
+    await getApp()
+      .db.insert(chatMembership)
+      .values(agentUuids.map((agentId) => ({ chatId: c, agentId, accessMode: "speaker" })));
+    return c;
+  }
+
+  async function insertEventAt(
+    agentId: string,
+    c: string,
+    seq: number,
+    kind: string,
+    payload: unknown,
+    createdAt: Date,
+  ): Promise<void> {
+    await getApp().db.insert(sessionEvents).values({ id: uuidv7(), agentId, chatId: c, seq, kind, payload, createdAt });
+  }
+
+  it("keeps per-speaker windows capped while turn metadata spans the whole history (>200 rows, start outside window)", async () => {
+    const app = getApp();
+    const speaker = await createTestAgent(app, { name: `q1-a-${crypto.randomUUID().slice(0, 6)}` });
+    const sibling = await createTestAgent(app, { name: `q1-b-${crypto.randomUUID().slice(0, 6)}` });
+    const c = await seedChatWithSpeakers([speaker.agent.uuid, sibling.agent.uuid], speaker.organizationId);
+
+    const base = new Date("2026-09-03T08:00:00.000Z");
+    // Speaker history: 205 tool_calls, then a turn_end, then a fresh turn of
+    // three activity events whose first row falls OUTSIDE a limit=2 window.
+    for (let i = 1; i <= 205; i++) {
+      await insertEventAt(
+        speaker.agent.uuid,
+        c,
+        i,
+        "tool_call",
+        { toolUseId: `t${i}`, name: "Bash", args: null, status: "ok" },
+        new Date(base.getTime() + i),
+      );
+    }
+    const turnEndAt = new Date(base.getTime() + 100_000);
+    const currentTurnStartAt = new Date(base.getTime() + 200_000);
+    await insertEventAt(speaker.agent.uuid, c, 206, "turn_end", { status: "success" }, turnEndAt);
+    await insertEventAt(
+      speaker.agent.uuid,
+      c,
+      207,
+      "tool_call",
+      { toolUseId: "t207", name: "Read", args: null, status: "pending" },
+      currentTurnStartAt,
+    );
+    await insertEventAt(speaker.agent.uuid, c, 208, "thinking", {}, new Date(base.getTime() + 201_000));
+    await insertEventAt(
+      speaker.agent.uuid,
+      c,
+      209,
+      "assistant_text",
+      { text: "almost done" },
+      new Date(base.getTime() + 202_000),
+    );
+    // Sibling: three events, no turn_end.
+    for (let i = 1; i <= 3; i++) {
+      await insertEventAt(
+        sibling.agent.uuid,
+        c,
+        i,
+        "assistant_text",
+        { text: `s${i}` },
+        new Date(base.getTime() + 10_000 + i),
+      );
+    }
+
+    const desc = await sessionEventService.listChatSpeakerEvents(app.db, c, { limit: 2, direction: "desc" });
+    const speakerFeed = desc.feeds.find((f) => f.agentId === speaker.agent.uuid);
+    const siblingFeed = desc.feeds.find((f) => f.agentId === sibling.agent.uuid);
+    expect(desc.feeds.map((f) => f.agentId).sort()).toEqual([sibling.agent.uuid, speaker.agent.uuid].sort());
+    expect(speakerFeed?.items.map((e) => e.seq)).toEqual([209, 208]);
+    expect(speakerFeed?.nextCursor).toBe(208);
+    // The turn started at seq 207 — outside the returned window — and the
+    // metadata must still report it.
+    expect(speakerFeed?.turnStartedAt).toBe(currentTurnStartAt.toISOString());
+    expect(siblingFeed?.items.map((e) => e.seq)).toEqual([3, 2]);
+    expect(siblingFeed?.nextCursor).toBe(2);
+
+    // Direction-independent metadata: asc window walks the oldest events but
+    // reports the same current-turn start.
+    const asc = await sessionEventService.listChatSpeakerEvents(app.db, c, { limit: 2 });
+    expect(asc.feeds.find((f) => f.agentId === speaker.agent.uuid)?.items.map((e) => e.seq)).toEqual([1, 2]);
+    expect(asc.feeds.find((f) => f.agentId === speaker.agent.uuid)?.nextCursor).toBe(2);
+    expect(asc.feeds.find((f) => f.agentId === speaker.agent.uuid)?.turnStartedAt).toBe(
+      currentTurnStartAt.toISOString(),
+    );
+
+    // Default limit (200) with >200 history: capped window + cursor, same turn start.
+    const page = await sessionEventService.listChatSpeakerEvents(app.db, c, { direction: "desc" });
+    const pageFeed = page.feeds.find((f) => f.agentId === speaker.agent.uuid);
+    expect(pageFeed?.items).toHaveLength(200);
+    expect(pageFeed?.items[0]?.seq).toBe(209);
+    expect(pageFeed?.items[199]?.seq).toBe(10);
+    expect(pageFeed?.nextCursor).toBe(10);
+    expect(pageFeed?.turnStartedAt).toBe(currentTurnStartAt.toISOString());
+  });
+
+  it("computes the turn start as MIN(created_at) over the current turn — not seq order, window head, or error rows", async () => {
+    const app = getApp();
+    const speaker = await createTestAgent(app, { name: `q1-min-${crypto.randomUUID().slice(0, 6)}` });
+    const c = await seedChatWithSpeakers([speaker.agent.uuid], speaker.organizationId);
+
+    // Timestamps are deliberately non-monotonic with seq: seq 4 (created
+    // 11:59:59) is OLDER than the turn_end at seq 2 (12:00:01) yet still part
+    // of the current turn, and seq 3 is an error created even earlier — it
+    // must never become the turn start.
+    await insertEventAt(
+      speaker.agent.uuid,
+      c,
+      1,
+      "assistant_text",
+      { text: "one" },
+      new Date("2026-09-03T12:00:00.000Z"),
+    );
+    await insertEventAt(
+      speaker.agent.uuid,
+      c,
+      2,
+      "turn_end",
+      { status: "success" },
+      new Date("2026-09-03T12:00:01.000Z"),
+    );
+    await insertEventAt(
+      speaker.agent.uuid,
+      c,
+      3,
+      "error",
+      { source: "sdk", message: "boom" },
+      new Date("2026-09-03T11:59:30.000Z"),
+    );
+    await insertEventAt(
+      speaker.agent.uuid,
+      c,
+      4,
+      "assistant_text",
+      { text: "two" },
+      new Date("2026-09-03T11:59:59.000Z"),
+    );
+    await insertEventAt(speaker.agent.uuid, c, 5, "thinking", {}, new Date("2026-09-03T12:00:02.000Z"));
+
+    const desc = await sessionEventService.listChatSpeakerEvents(app.db, c, { limit: 1, direction: "desc" });
+    const feed = desc.feeds.find((f) => f.agentId === speaker.agent.uuid);
+    if (!feed) throw new Error("feed missing");
+    expect(feed.items.map((e) => e.seq)).toEqual([5]);
+    expect(feed.nextCursor).toBe(5);
+    // MIN(created_at) over the current turn (seq > 2, activity kinds) = seq 4,
+    // even though seq 4 is outside the window and its timestamp predates the
+    // turn_end.
+    expect(feed.turnStartedAt).toBe("2026-09-03T11:59:59.000Z");
+  });
+
+  it("reports the earliest activity-kind event as the turn start when no turn_end exists yet", async () => {
+    const app = getApp();
+    const speaker = await createTestAgent(app, { name: `q1-open-${crypto.randomUUID().slice(0, 6)}` });
+    const c = await seedChatWithSpeakers([speaker.agent.uuid], speaker.organizationId);
+
+    await insertEventAt(
+      speaker.agent.uuid,
+      c,
+      1,
+      "error",
+      { source: "sdk", message: "x" },
+      new Date("2026-09-03T11:58:00.000Z"),
+    );
+    await insertEventAt(
+      speaker.agent.uuid,
+      c,
+      2,
+      "assistant_text",
+      { text: "first" },
+      new Date("2026-09-03T11:59:00.000Z"),
+    );
+    await insertEventAt(
+      speaker.agent.uuid,
+      c,
+      3,
+      "tool_call",
+      { toolUseId: "t1", name: "Bash", args: null, status: "pending" },
+      new Date("2026-09-03T12:00:00.000Z"),
+    );
+
+    const desc = await sessionEventService.listChatSpeakerEvents(app.db, c, { limit: 2, direction: "desc" });
+    const feed = desc.feeds.find((f) => f.agentId === speaker.agent.uuid);
+    if (!feed) throw new Error("feed missing");
+    expect(feed.items.map((e) => e.seq)).toEqual([3, 2]);
+    expect(feed.nextCursor).toBe(2);
+    // Whole history is the current turn; the pre-history error is not an
+    // activity kind, so the earliest eligible event (seq 2, 11:59) starts it.
+    expect(feed.turnStartedAt).toBe("2026-09-03T11:59:00.000Z");
+  });
+
+  it("emits a feed only for speakers with events and never mixes a second chat's events into the window", async () => {
+    const app = getApp();
+    const withEvents = await createTestAgent(app, { name: `q1-feed-${crypto.randomUUID().slice(0, 6)}` });
+    const silent = await createTestAgent(app, { name: `q1-silent-${crypto.randomUUID().slice(0, 6)}` });
+    const c = await seedChatWithSpeakers([withEvents.agent.uuid, silent.agent.uuid], withEvents.organizationId);
+    const otherChat = await seedChatWithSpeakers([withEvents.agent.uuid], withEvents.organizationId);
+
+    await insertEventAt(
+      withEvents.agent.uuid,
+      c,
+      1,
+      "tool_call",
+      { toolUseId: "t1", name: "Bash", args: null, status: "ok" },
+      new Date("2026-09-03T10:00:00.000Z"),
+    );
+    await insertEventAt(
+      withEvents.agent.uuid,
+      otherChat,
+      1,
+      "assistant_text",
+      { text: "other chat" },
+      new Date("2026-09-03T10:00:01.000Z"),
+    );
+
+    const feeds = (await sessionEventService.listChatSpeakerEvents(app.db, c, { direction: "desc" })).feeds;
+    expect(feeds).toHaveLength(1);
+    expect(feeds[0]?.agentId).toBe(withEvents.agent.uuid);
+    expect(feeds[0]?.items.map((e) => e.seq)).toEqual([1]);
+    expect(feeds[0]?.items.map((e) => e.payload)).toEqual([
+      { toolUseId: "t1", name: "Bash", args: null, status: "ok" },
+    ]);
+    expect(feeds[0]?.turnStartedAt).toBe("2026-09-03T10:00:00.000Z");
+  });
+
+  it("reports turnStartedAt null when the latest row is a turn_end — even though the window shows earlier activity", async () => {
+    const app = getApp();
+    const speaker = await createTestAgent(app, { name: `q1-end-${crypto.randomUUID().slice(0, 6)}` });
+    const c = await seedChatWithSpeakers([speaker.agent.uuid], speaker.organizationId);
+
+    // A finished turn whose activity rows predate the turn_end: the window
+    // still returns those rows (desc), but no event AFTER the last turn_end
+    // can start a current turn — turnStartedAt must be null, not the earlier
+    // activity's timestamp.
+    await insertEventAt(
+      speaker.agent.uuid,
+      c,
+      1,
+      "assistant_text",
+      { text: "finished work" },
+      new Date("2026-09-03T09:00:00.000Z"),
+    );
+    await insertEventAt(
+      speaker.agent.uuid,
+      c,
+      2,
+      "turn_end",
+      { status: "success" },
+      new Date("2026-09-03T09:00:01.000Z"),
+    );
+    // Only non-activity events (error) follow the turn_end.
+    await insertEventAt(
+      speaker.agent.uuid,
+      c,
+      3,
+      "error",
+      { source: "sdk", message: "late noise" },
+      new Date("2026-09-03T09:00:02.000Z"),
+    );
+
+    const feeds = (await sessionEventService.listChatSpeakerEvents(app.db, c, { limit: 3, direction: "desc" })).feeds;
+    const feed = feeds.find((f) => f.agentId === speaker.agent.uuid);
+    if (!feed) throw new Error("feed missing");
+    // The returned window includes the earlier activity row (seq 1).
+    expect(feed.items.map((e) => e.seq)).toEqual([3, 2, 1]);
+    expect(feed.items.some((e) => e.kind === "assistant_text")).toBe(true);
+    expect(feed.nextCursor).toBeNull();
+    // No current-turn activity exists after the latest turn_end → null.
+    expect(feed.turnStartedAt).toBeNull();
+
+    // Same contract without the trailing error: the window is [2, 1] and the
+    // latest row is the turn_end itself.
+    const c2 = await seedChatWithSpeakers([speaker.agent.uuid], speaker.organizationId);
+    await insertEventAt(
+      speaker.agent.uuid,
+      c2,
+      1,
+      "tool_call",
+      { toolUseId: "t1", name: "Bash", args: null, status: "ok" },
+      new Date("2026-09-03T09:00:00.000Z"),
+    );
+    await insertEventAt(
+      speaker.agent.uuid,
+      c2,
+      2,
+      "turn_end",
+      { status: "success" },
+      new Date("2026-09-03T09:00:01.000Z"),
+    );
+    const secondFeed = (
+      await sessionEventService.listChatSpeakerEvents(app.db, c2, { limit: 2, direction: "desc" })
+    ).feeds.find((f) => f.agentId === speaker.agent.uuid);
+    expect(secondFeed?.items.map((e) => e.seq)).toEqual([2, 1]);
+    expect(secondFeed?.turnStartedAt).toBeNull();
+  });
+});

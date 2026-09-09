@@ -15,7 +15,7 @@ import {
 } from "../../observability/index.js";
 import { registerAdminBroadcaster } from "../../services/admin-broadcast.js";
 import { getCachedAudience } from "../../services/chat/membership/audience-cache.js";
-import { getChatAgentStatuses } from "../../services/chat/sessions/status.js";
+import { getChatAgentStatus } from "../../services/chat/sessions/status.js";
 import type { Notifier } from "../../services/notifier.js";
 
 const log = createLogger("OrgWs");
@@ -78,6 +78,26 @@ export function orgWsRoutes(notifier: Notifier, jwtSecret: string): (app: Fastif
       }
     }
     ws.close(4403, "Membership changed");
+  }
+
+  /**
+   * Local, in-memory pre-gate for session-frame enrichment: is there any
+   * currently open + admitted socket in `organizationId` whose human agent
+   * is in `audience`? No DB revalidation here (cheap by design) — the
+   * delivery loop's `liveSocketEntries` stays the DB-backed authority.
+   */
+  function hasAudienceSocket(organizationId: string, audience: ReadonlySet<string>): boolean {
+    for (const [ws, meta] of adminSockets) {
+      if (
+        ws.readyState === 1 &&
+        meta.admitted &&
+        meta.organizationId === organizationId &&
+        audience.has(meta.humanAgentId)
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 
   function closeAuthorizationUnavailable(ws: WebSocket): void {
@@ -217,6 +237,13 @@ export function orgWsRoutes(notifier: Notifier, jwtSecret: string): (app: Fastif
    * composite axis flipped", just on different axes (lifecycle vs D-axis
    * runtime). Sharing the path keeps the web cache reconciliation
    * deterministic (one in-place patch, no invalidate races).
+   *
+   * The enrichment is resolved for the frame's OWN agent only
+   * (`getChatAgentStatus`), never for the whole chat — and only when at
+   * least one currently connected + admitted socket in this org belongs to
+   * the chat audience. The latter is a performance gate, not authorization:
+   * the DB-backed liveSocketEntries revalidation and the per-socket
+   * audience filter below remain the delivery authority.
    */
   async function dispatchSessionFrame(
     type: "session:state" | "session:event" | "session:runtime",
@@ -228,8 +255,12 @@ export function orgWsRoutes(notifier: Notifier, jwtSecret: string): (app: Fastif
     try {
       const db = getDbForChatLookup();
       audience = await getCachedAudience(db, payload.chatId);
-      if (audience && audience.size > 0) {
-        status = (await getChatAgentStatuses(db, payload.chatId)).find((s) => s.agentId === payload.agentId);
+      // Performance gate (not authorization): when no currently ready +
+      // admitted socket in the event's org has a human agent in the cached
+      // audience, no enriched frame can be delivered — skip the whole status
+      // computation (bare frames below still reach every live org socket).
+      if (audience && audience.size > 0 && hasAudienceSocket(payload.organizationId, audience)) {
+        status = await getChatAgentStatus(db, payload.chatId, payload.agentId);
       }
     } catch (err) {
       // Best-effort enrichment: on any failure fall back to the bare frame

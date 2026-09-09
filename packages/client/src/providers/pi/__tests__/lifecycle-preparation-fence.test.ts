@@ -82,6 +82,7 @@ describe("Pi lifecycle fence during managed-session preparation", () => {
       chatId: "chat-pi",
       log: (m: string) => logs.push(m),
       recordProviderActivity: () => {},
+      noteTurnStart: () => {},
       emitEvent: () => {},
       ...mockCtxPlumbing({ sendMessage }, "chat-pi"),
     } as SessionContext;

@@ -331,6 +331,7 @@ function makeContext(
     chatId: "chat-app-server-extra",
     log: opts.log ?? (() => {}),
     recordProviderActivity: () => {},
+    noteTurnStart: () => {},
     emitEvent: opts.emitEvent ?? (() => {}),
     ...mockCtxPlumbing({ sendMessage }, "chat-app-server-extra"),
     ...(opts.failSessionForRecovery ? { failSessionForRecovery: opts.failSessionForRecovery } : {}),

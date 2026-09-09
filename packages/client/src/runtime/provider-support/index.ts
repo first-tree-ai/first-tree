@@ -41,6 +41,7 @@ export {
   classifyProviderFailure,
   decideProviderRetry,
   formatProviderFailureRuntimeNotice,
+  isAntigravityBinaryMissingError,
   isCodexBinaryMissingError,
   isCursorBinaryMissingError,
   isEgressForbiddenText,

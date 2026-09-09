@@ -21,6 +21,7 @@ const TEST_PROVIDER_SKILL_ROOTS = Object.freeze({
   codex: ".agents/skills",
   cursor: ".cursor/skills",
   grok: ".grok/skills",
+  antigravity: ".agents/skills",
   "kimi-code": ".kimi-code/skills",
   opencode: ".opencode/skills",
   pi: ".agents/skills",
@@ -234,6 +235,7 @@ describe("prepareManagedSession", () => {
         logs.push(message);
       },
       recordProviderActivity: () => {},
+      noteTurnStart: () => {},
       emitEvent: () => {},
       ...mockCtxPlumbing({ sendMessage }, "chat-1"),
     } as SessionContext;
@@ -1424,6 +1426,7 @@ describe("projectManagedWorkspace", () => {
       chatId: "chat-1",
       log: () => {},
       recordProviderActivity: () => {},
+      noteTurnStart: () => {},
       emitEvent: () => {},
       ...mockCtxPlumbing({ sendMessage }, "chat-1"),
     } as SessionContext;

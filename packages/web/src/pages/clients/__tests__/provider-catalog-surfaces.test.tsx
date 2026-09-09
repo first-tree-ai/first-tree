@@ -33,6 +33,7 @@ const IN_PRODUCT_SETUP_CASES = [
 
 const HOST_SETUP_CASES = [
   ["amp", "amp login"],
+  ["antigravity", "agy"],
   ["deepseek-harness", "export DEEPSEEK_API_KEY=<your DeepSeek API key>"],
   ["kimi-code", "kimi # then run /login"],
   ["opencode", "opencode auth login"],

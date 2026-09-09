@@ -198,56 +198,120 @@ export function withTurnNarration(base: LiveActivity | null, narrationText: unkn
 // ---------------------------------------------------------------------------
 
 /**
- * Per-(agent,chat) live activity for `chatIds`: the latest `session_events`
- * row per pair, mapped through `toLiveActivity` (terminal kinds → absent) and
- * dropped when older than the stale threshold. Per-pair LATERAL seek on the
- * unique `(agent_id, chat_id, seq)` index — a single B-tree descent per pair,
- * independent of `session_events` table size.
+ * The exact (chatId, agentId) workset whose statuses the caller assembles.
+ * Every query below is restricted to these pairs (row-value conditions on
+ * the driving `agent_chat_sessions` rows), never to the chats alone — a
+ * single-agent WS dispatch therefore runs the Q2/Q3 LATERAL loops for that
+ * pair only, instead of every session holder in the chat.
+ */
+type StatusWorkset = ReadonlyMap<string, ReadonlySet<string>>;
+
+/**
+ * `(agent_id, chat_id) IN (…pair rows…)` clause over a workset. Values are
+ * inlined individually (the postgres-js string[] binding caveat below); the
+ * row-value IN keeps the correspondence pair-exact for multi-chat batches so
+ * a chat set × agent set cross product can never widen the drive rows.
+ */
+function statusWorksetInClause(workset: StatusWorkset): ReturnType<typeof sql.join> {
+  const pairs: ReturnType<typeof sql>[] = [];
+  for (const [chatId, agents] of workset) {
+    for (const agentId of agents) {
+      pairs.push(sql`(${agentId}, ${chatId})`);
+    }
+  }
+  return sql.join(pairs, sql`, `);
+}
+
+/**
+ * The subset of a target workset whose chats are in `chatIds`, dropping
+ * empty agent sets. An empty result means "no exact pairs to read" — never
+ * an implicit widening to all agents / chats.
+ */
+function restrictWorksetToChatIds(workset: StatusWorkset, chatIds: string[]): StatusWorkset {
+  const chatIdSet = new Set(chatIds);
+  const restricted = new Map<string, ReadonlySet<string>>();
+  for (const [chatId, agents] of workset) {
+    if (chatIdSet.has(chatId) && agents.size > 0) {
+      restricted.set(chatId, agents);
+    }
+  }
+  return restricted;
+}
+
+/**
+ * Per-(agent,chat) live activity for the exact (chatId, agentId) workset:
+ * the latest `session_events` row per pair, mapped through `toLiveActivity`
+ * (terminal kinds → absent) and dropped when older than the stale threshold.
+ * Per-pair LATERAL seek on the unique `(agent_id, chat_id, seq)` index — a
+ * single B-tree descent per pair, independent of `session_events` table size.
  *
  * When `withTurnText`, a second `LEFT JOIN LATERAL` seeks the current turn's
  * latest `assistant_text` (`seq` past the last `turn_end`); `withTurnNarration`
  * rides it along as `turnText` so the compose status bar can show the running
  * narration even while a tool runs. Only the per-agent `/agent-status` path
  * pays for the extra seek; the chat-list passes `withTurnText: false`.
+ *
+ * The narration seek runs ONLY when the (unfiltered) latest event row is an
+ * activity kind fresh enough to survive the JS stale check — a terminal /
+ * unknown / stale latest event would drop the whole activity in JS, so the
+ * text subquery would be pure waste. The guard is a `CASE` around a scalar
+ * subquery: SQL evaluates only the taken branch, so the narration scan does
+ * not execute at all for guarded-out pairs. The cutoff is the application
+ * clock (`Date.now()` minus LIVE_ACTIVITY_STALE_MS), not the DB clock, and
+ * the final JS stale check below stays authoritative — the guard can only
+ * skip work JS would discard anyway, never resurrect or lose activity at the
+ * 60-second boundary.
  */
 async function deriveActivities(
   db: Database,
-  chatIds: string[],
+  workset: StatusWorkset,
   opts?: { withTurnText?: boolean },
 ): Promise<Map<string, Map<string, LiveActivity>>> {
   const out = new Map<string, Map<string, LiveActivity>>();
-  if (chatIds.length === 0) return out;
+  if (workset.size === 0) return out;
 
   const withTurn = opts?.withTurnText === true;
   // `IN (${...})` rather than `= ANY($1::text[])`: postgres-js binds string[]
   // as a flat string when the driver type hint resolves to text[], which PG
   // rejects. Inlining each value sidesteps the binding mismatch.
-  const chatIdInClause = sql.join(
-    chatIds.map((id) => sql`${id}`),
-    sql`, `,
-  );
+  const worksetInClause = statusWorksetInClause(workset);
   const turnTextSelect = withTurn ? sql`, t.text AS turn_text` : sql`, NULL::text AS turn_text`;
+  // App-clock cutoff for the SQL-side narration guard (see the docblock).
+  // Serialized explicitly to ISO text: the installed postgres-js driver binds
+  // a raw JS Date through identity serializers, which fails the query — see
+  // the driver probe in query-investigation/date-binding-probe.json. The
+  // explicit `::timestamptz` cast keeps the comparison against the
+  // timestamptz column unambiguous.
+  const narrationCutoff = withTurn ? new Date(Date.now() - LIVE_ACTIVITY_STALE_MS).toISOString() : null;
   const turnTextJoin = withTurn
     ? sql`
       LEFT JOIN LATERAL (
-        -- Raw prefix cap: bounds the bytes pulled from PG while leaving margin
-        -- above ASSISTANT_TEXT_FULL_MAX (2000) — the newline-preserving
-        -- previewAssistantTextFull is the widest consumer, and margin keeps
-        -- pathological leading whitespace from starving the final value.
-        SELECT LEFT(se.payload->>'text', ${sql.raw(String(ASSISTANT_TEXT_FULL_MAX + 200))}) AS text
-          FROM session_events se
-         WHERE se.agent_id = acs.agent_id
-           AND se.chat_id  = acs.chat_id
-           AND se.kind     = 'assistant_text'
-           AND se.seq > COALESCE((
-             SELECT MAX(se2.seq)
-               FROM session_events se2
-              WHERE se2.agent_id = acs.agent_id
-                AND se2.chat_id  = acs.chat_id
-                AND se2.kind     = 'turn_end'
-           ), 0)
-         ORDER BY se.seq DESC
-         LIMIT 1
+        SELECT CASE
+          WHEN e.kind IN ('tool_call', 'thinking', 'assistant_text')
+           AND e.created_at >= ${narrationCutoff}::timestamptz THEN (
+            -- Raw prefix cap: LEFT(text, n) caps CHARACTERS, not bytes; the
+            -- bound stays above ASSISTANT_TEXT_FULL_MAX (2000) — the
+            -- newline-preserving previewAssistantTextFull is the widest
+            -- consumer, and margin keeps pathological leading whitespace from
+            -- starving the final value. Scalar subquery inside CASE: it only
+            -- executes when the guard above passes.
+            SELECT LEFT(se.payload->>'text', ${sql.raw(String(ASSISTANT_TEXT_FULL_MAX + 200))})
+              FROM session_events se
+             WHERE se.agent_id = acs.agent_id
+               AND se.chat_id  = acs.chat_id
+               AND se.kind     = 'assistant_text'
+               AND se.seq > COALESCE((
+                 SELECT MAX(se2.seq)
+                   FROM session_events se2
+                  WHERE se2.agent_id = acs.agent_id
+                    AND se2.chat_id  = acs.chat_id
+                    AND se2.kind     = 'turn_end'
+               ), 0)
+             ORDER BY se.seq DESC
+             LIMIT 1
+          )
+          ELSE NULL::text
+        END AS text
       ) t ON TRUE`
     : sql``;
 
@@ -270,7 +334,7 @@ async function deriveActivities(
          LIMIT 1
       ) e
       ${turnTextJoin}
-     WHERE acs.chat_id IN (${chatIdInClause})
+     WHERE (acs.agent_id, acs.chat_id) IN (${worksetInClause})
        AND acs.state <> 'evicted'
   `)) as unknown as Array<{
     agent_id: string;
@@ -307,15 +371,15 @@ async function deriveActivities(
 
 async function deriveStatusReasons(
   db: Database,
-  chatIds: string[],
+  workset: StatusWorkset,
 ): Promise<Map<string, Map<string, AgentStatusReason>>> {
   const out = new Map<string, Map<string, AgentStatusReason>>();
-  if (chatIds.length === 0) return out;
+  if (workset.size === 0) return out;
 
-  const chatIdInClause = sql.join(
-    chatIds.map((id) => sql`${id}`),
-    sql`, `,
-  );
+  // Same pair-exact drive restriction as deriveActivities: only the workset
+  // pairs' recent error/turn_end windows are sought, so a single-agent WS
+  // dispatch does not scan sibling sessions.
+  const worksetInClause = statusWorksetInClause(workset);
   const rawRows = (await db.execute(sql`
     SELECT acs.agent_id AS agent_id,
            acs.chat_id  AS chat_id,
@@ -331,7 +395,7 @@ async function deriveStatusReasons(
          ORDER BY se.seq DESC
          LIMIT 10
       ) e
-     WHERE acs.chat_id IN (${chatIdInClause})
+     WHERE (acs.agent_id, acs.chat_id) IN (${worksetInClause})
      ORDER BY acs.chat_id, acs.agent_id, e.seq DESC
   `)) as unknown as Array<{
     agent_id: string;
@@ -397,6 +461,16 @@ export async function resolveAgentChatStatuses(
     withTurnText?: boolean;
     includeStatusReason?: boolean;
     nonHumanSpeakersByChat?: ReadonlyMap<string, ReadonlySet<string>>;
+    /**
+     * Internal target workset: only the given per-chat agent targets are
+     * resolved, intersected with the actual non-human speaker membership so a
+     * non-speaker target yields nothing. A chat absent from the map — or an
+     * empty set — resolves to NO statuses (never the full speaker set), and
+     * pair correspondence stays exact per chat for multi-chat batches. Used
+     * by the admin-WS single-agent dispatch; every other caller omits it and
+     * keeps the full speaker-set contract.
+     */
+    targets?: ReadonlyMap<string, ReadonlySet<string>>;
   },
 ): Promise<Map<string, AgentChatStatus[]>> {
   const out = new Map<string, AgentChatStatus[]>();
@@ -417,25 +491,52 @@ export async function resolveAgentChatStatuses(
   // its participant chips. Let that caller provide the same canonical set so a
   // list request does not immediately repeat the membership query. Detail
   // surfaces omit the map and retain the self-contained resolver path.
+  //
+  // When a target workset is present, the membership read itself is bounded
+  // by the EXACT (chatId, agentId) target pairs (speaker + non-human filters
+  // still apply) — never a chat set × agent set cross product; the JS
+  // intersection below then closes the correspondence defensively.
+  const targetWorkset = opts?.targets ? restrictWorksetToChatIds(opts.targets, chatIds) : null;
   if (opts?.nonHumanSpeakersByChat) {
     for (const chatId of chatIds) {
       for (const agentId of opts.nonHumanSpeakersByChat.get(chatId) ?? []) {
         addUnion(chatId, agentId);
       }
     }
-  } else {
+  } else if (targetWorkset === null || targetWorkset.size > 0) {
     const speakerRows = await db
       .select({ chatId: chatMembership.chatId, agentId: chatMembership.agentId })
       .from(chatMembership)
       .innerJoin(agents, eq(chatMembership.agentId, agents.uuid))
       .where(
         and(
-          inArray(chatMembership.chatId, chatIds),
           eq(chatMembership.accessMode, "speaker"),
           ne(agents.type, "human"),
+          ...(targetWorkset !== null
+            ? [sql`(${chatMembership.agentId}, ${chatMembership.chatId}) IN (${statusWorksetInClause(targetWorkset)})`]
+            : [inArray(chatMembership.chatId, chatIds)]),
         ),
       );
     for (const r of speakerRows) addUnion(r.chatId, r.agentId);
+  }
+
+  // Intersect the resolved speaker union with the explicit target workset.
+  // Absent or empty targets for a chat drop it entirely — an empty target set
+  // must never mean "all agents".
+  if (opts?.targets) {
+    for (const chatId of chatIds) {
+      const targetsForChat = opts.targets.get(chatId);
+      if (!targetsForChat || targetsForChat.size === 0) {
+        unionByChat.delete(chatId);
+        continue;
+      }
+      const union = unionByChat.get(chatId);
+      if (!union) continue;
+      for (const agentId of [...union]) {
+        if (!targetsForChat.has(agentId)) union.delete(agentId);
+      }
+      if (union.size === 0) unionByChat.delete(chatId);
+    }
   }
   if (unionByChat.size === 0) return out;
 
@@ -445,6 +546,10 @@ export async function resolveAgentChatStatuses(
   // `runtime_state` / `runtime_state_at` feed `computeWorking` / `computeErrored`
   // — the per-chat authoritative source replacing the legacy event-proxy
   // (which only knew "fresh event = working" and missed codex no-events).
+  //
+  // The read is bounded by the exact workset pairs — never a chat set × agent
+  // set cross product — so a session an agent holds in a chat it was NOT
+  // targeted for is not fetched.
   const sessionRows = await db
     .select({
       agentId: agentChatSessions.agentId,
@@ -454,7 +559,7 @@ export async function resolveAgentChatStatuses(
       runtimeStateAt: agentChatSessions.runtimeStateAt,
     })
     .from(agentChatSessions)
-    .where(and(inArray(agentChatSessions.chatId, chatIds), inArray(agentChatSessions.agentId, allAgentIds)));
+    .where(sql`(${agentChatSessions.agentId}, ${agentChatSessions.chatId}) IN (${statusWorksetInClause(unionByChat)})`);
   const sessionByPair = new Map(sessionRows.map((s) => [pairKey(s.chatId, s.agentId), s]));
 
   // -- Reachability (A) + legacy presence runtime (for the old-client
@@ -525,8 +630,10 @@ export async function resolveAgentChatStatuses(
   // -- Activity (D): per-(agent,chat) live activity (+ turnText when asked).
   //    Pure description: 60s drop here means "5-min-old tool_call is not the
   //    current activity description", not "agent is not working" (which is
-  //    decided by `computeWorking` above).
-  const activityByChat = await deriveActivities(db, chatIds, { withTurnText: opts?.withTurnText });
+  //    decided by `computeWorking` above). Both derives are driven by the
+  //    exact union workset — the Q2/Q3 LATERAL loops never scan session
+  //    holders outside the pairs being assembled.
+  const activityByChat = await deriveActivities(db, unionByChat, { withTurnText: opts?.withTurnText });
   // The list DTO consumes working / errored / activity only. Provider retry
   // reasons belong to the chat-detail agent-status surface, so list hydration
   // explicitly skips this LATERAL session-event seek while the default detail
@@ -534,7 +641,7 @@ export async function resolveAgentChatStatuses(
   const statusReasonByChat =
     opts?.includeStatusReason === false
       ? new Map<string, Map<string, AgentStatusReason>>()
-      : await deriveStatusReasons(db, chatIds);
+      : await deriveStatusReasons(db, unionByChat);
 
   const now = Date.now();
   for (const [chatId, agentSet] of unionByChat) {
@@ -719,4 +826,27 @@ export function computeErrored(session: RuntimeSessionRow, presenceRuntimeState:
 export async function getChatAgentStatuses(db: Database, chatId: string): Promise<AgentChatStatus[]> {
   const byChat = await resolveAgentChatStatuses(db, [chatId], { withTurnText: true });
   return byChat.get(chatId) ?? [];
+}
+
+/**
+ * Composite status for ONE (agent, chat) pair — the single-target path used
+ * by the admin-WS session-frame dispatch, where only the event's own agent
+ * needs enrichment. Thin projection over `resolveAgentChatStatuses` with the
+ * internal `targets` workset: the pair is intersected with actual non-human
+ * speaker membership, so a target that is not a current non-human speaker of
+ * the chat — a human, a non-speaker, or an agent with no membership row —
+ * resolves to `undefined` and no sibling speaker is ever computed. Session
+ * lifecycle state (including `evicted`) is a status axis, not a membership
+ * gate: an evicted session whose agent is still a speaker resolves normally.
+ */
+export async function getChatAgentStatus(
+  db: Database,
+  chatId: string,
+  agentId: string,
+): Promise<AgentChatStatus | undefined> {
+  const byChat = await resolveAgentChatStatuses(db, [chatId], {
+    withTurnText: true,
+    targets: new Map([[chatId, new Set([agentId])]]),
+  });
+  return byChat.get(chatId)?.find((s) => s.agentId === agentId);
 }

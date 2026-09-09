@@ -110,6 +110,7 @@ describe("claude-code handler — session-limit success result", () => {
       chatId: "chat-claude-session-limit",
       log: (m) => logs.push(m),
       recordProviderActivity: () => {},
+      noteTurnStart: () => {},
       emitEvent: (e) => emitted.push(e),
       ...mockCtxPlumbing({ sendMessage }, "chat-claude-session-limit"),
       forwardResult,

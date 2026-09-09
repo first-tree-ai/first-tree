@@ -563,3 +563,303 @@ describe("useAdminWs", () => {
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
 });
+
+describe("useAdminWs session:event timeline throttling", () => {
+  function countInvalidations(
+    spy: { mock: { calls: Array<readonly unknown[]> } },
+    queryKey: readonly string[],
+  ): number {
+    return spy.mock.calls.filter(([options]) => {
+      const filters = options as { queryKey?: readonly unknown[] } | undefined;
+      return JSON.stringify(filters?.queryKey) === JSON.stringify(queryKey);
+    }).length;
+  }
+
+  const eventPairKey = ["session-events", "agent-1", "chat-1"];
+  const eventChatKey = ["chat-session-events", "chat-1"];
+
+  function emitEvent(socket: FakeWebSocket, agentId: string, chatId: string, main: "working" | "ready" = "working") {
+    socket.emit({ type: "session:event", agentId, chatId, status: makeStatus({ agentId, main }) });
+  }
+
+  it("folds a session:event burst on one chat into one leading + one trailing refresh, patching status every frame", async () => {
+    const invalidateSpy = vi.spyOn(QueryClient.prototype, "invalidateQueries");
+    await renderHook();
+    const socket = FakeWebSocket.instances[0];
+    if (!socket) throw new Error("socket missing");
+    vi.useFakeTimers();
+    invalidateSpy.mockClear();
+
+    queryClient.setQueryData(
+      ["chat-agent-status", "chat-1"],
+      [makeStatus({ agentId: "agent-1", main: "ready", working: false })],
+    );
+
+    // 10 frames of one tool-call burst, all inside the same throttle window.
+    await act(async () => {
+      for (let i = 0; i < 10; i++) {
+        emitEvent(socket, "agent-1", "chat-1", i % 2 === 0 ? "ready" : "working");
+      }
+    });
+
+    // Leading edge fired exactly once per key for the whole burst (10 frames
+    // → 1 refetch per key instead of 10).
+    expect(countInvalidations(invalidateSpy, eventPairKey)).toBe(1);
+    expect(countInvalidations(invalidateSpy, eventChatKey)).toBe(1);
+    // The per-frame status patch is immediate even while invalidations are
+    // folded — the last frame's status must already be cached.
+    const cached = queryClient.getQueryData<AgentChatStatus[]>(["chat-agent-status", "chat-1"]);
+    expect(cached?.[0]?.main).toBe("working");
+
+    // Nothing refetches mid-window…
+    await act(async () => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(countInvalidations(invalidateSpy, eventPairKey)).toBe(1);
+    expect(countInvalidations(invalidateSpy, eventChatKey)).toBe(1);
+
+    // …then the burst collapses into exactly one trailing refresh.
+    await act(async () => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(countInvalidations(invalidateSpy, eventPairKey)).toBe(2);
+    expect(countInvalidations(invalidateSpy, eventChatKey)).toBe(2);
+
+    // And nothing more fires afterwards.
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(countInvalidations(invalidateSpy, eventPairKey)).toBe(2);
+    expect(countInvalidations(invalidateSpy, eventChatKey)).toBe(2);
+  });
+
+  it("keeps per-chat and per-(agent, chat) windows independent", async () => {
+    const invalidateSpy = vi.spyOn(QueryClient.prototype, "invalidateQueries");
+    await renderHook();
+    const socket = FakeWebSocket.instances[0];
+    if (!socket) throw new Error("socket missing");
+    vi.useFakeTimers();
+    invalidateSpy.mockClear();
+
+    // A burst on chat-1 opens chat-1's window…
+    await act(async () => {
+      for (let i = 0; i < 5; i++) {
+        emitEvent(socket, "agent-1", "chat-1");
+      }
+    });
+    expect(countInvalidations(invalidateSpy, eventPairKey)).toBe(1);
+    expect(countInvalidations(invalidateSpy, eventChatKey)).toBe(1);
+
+    // …but a frame for another chat still refreshes that chat immediately,
+    // and a second agent streaming into chat-1 still gets its own pair
+    // refresh instead of being starved by agent-1's window.
+    await act(async () => {
+      emitEvent(socket, "agent-2", "chat-2");
+      emitEvent(socket, "agent-3", "chat-1");
+    });
+    expect(countInvalidations(invalidateSpy, ["session-events", "agent-2", "chat-2"])).toBe(1);
+    expect(countInvalidations(invalidateSpy, ["chat-session-events", "chat-2"])).toBe(1);
+    expect(countInvalidations(invalidateSpy, ["session-events", "agent-3", "chat-1"])).toBe(1);
+    expect(countInvalidations(invalidateSpy, eventChatKey)).toBe(1);
+
+    // Each window that saw a burst trails exactly once; single-frame bursts
+    // need no trailing refresh.
+    await act(async () => {
+      vi.advanceTimersByTime(2_000);
+    });
+    expect(countInvalidations(invalidateSpy, eventPairKey)).toBe(2);
+    expect(countInvalidations(invalidateSpy, eventChatKey)).toBe(2);
+    expect(countInvalidations(invalidateSpy, ["session-events", "agent-2", "chat-2"])).toBe(1);
+    expect(countInvalidations(invalidateSpy, ["chat-session-events", "chat-2"])).toBe(1);
+    expect(countInvalidations(invalidateSpy, ["session-events", "agent-3", "chat-1"])).toBe(1);
+
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(countInvalidations(invalidateSpy, eventChatKey)).toBe(2);
+  });
+
+  it("guarantees a trailing refresh after a long burst and refreshes the next burst immediately", async () => {
+    const invalidateSpy = vi.spyOn(QueryClient.prototype, "invalidateQueries");
+    await renderHook();
+    const socket = FakeWebSocket.instances[0];
+    if (!socket) throw new Error("socket missing");
+    vi.useFakeTimers();
+    invalidateSpy.mockClear();
+
+    // A 20-frame burst at ~10 fps spans two cooldown windows (t=0…1900ms).
+    // The fires land at t=0 (leading), t=1000 (trailing) and t=2000 (trailing)
+    // — the frame at t=1000 must fold into the next trailing refresh instead
+    // of re-firing a leading one at the boundary.
+    await act(async () => {
+      for (let i = 0; i < 20; i++) {
+        emitEvent(socket, "agent-1", "chat-1");
+        if (i < 19) vi.advanceTimersByTime(100);
+      }
+    });
+    // Loop ended at t=1900 with t=0 + t=1000 fired; the burst's last refresh
+    // (t=2000) is still pending.
+    expect(countInvalidations(invalidateSpy, eventPairKey)).toBe(2);
+    expect(countInvalidations(invalidateSpy, eventChatKey)).toBe(2);
+
+    // The burst ended at t=1900; the guaranteed last refresh fires after it.
+    await act(async () => {
+      vi.advanceTimersByTime(100);
+    });
+    expect(countInvalidations(invalidateSpy, eventPairKey)).toBe(3);
+    expect(countInvalidations(invalidateSpy, eventChatKey)).toBe(3);
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(countInvalidations(invalidateSpy, eventPairKey)).toBe(3);
+
+    // A later isolated frame is a fresh burst: it refetches immediately
+    // (the idle sweep dropped the entry once the cooldown elapsed).
+    await act(async () => {
+      emitEvent(socket, "agent-1", "chat-1");
+    });
+    expect(countInvalidations(invalidateSpy, eventPairKey)).toBe(4);
+    expect(countInvalidations(invalidateSpy, eventChatKey)).toBe(4);
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(countInvalidations(invalidateSpy, eventPairKey)).toBe(4);
+  });
+
+  it("does not re-fire a leading invalidation when a frame lands on a fire boundary", async () => {
+    const invalidateSpy = vi.spyOn(QueryClient.prototype, "invalidateQueries");
+    await renderHook();
+    const socket = FakeWebSocket.instances[0];
+    if (!socket) throw new Error("socket missing");
+    vi.useFakeTimers();
+    invalidateSpy.mockClear();
+
+    await act(async () => {
+      for (let i = 0; i < 10; i++) {
+        emitEvent(socket, "agent-1", "chat-1");
+        if (i < 9) vi.advanceTimersByTime(100);
+      }
+    });
+    // Frames t=0…900: leading fired at t=0; the trailing (due t=1000) is
+    // still pending.
+    expect(countInvalidations(invalidateSpy, eventPairKey)).toBe(1);
+
+    // Advance onto the boundary: the trailing fires at t=1000…
+    await act(async () => {
+      vi.advanceTimersByTime(100);
+    });
+    expect(countInvalidations(invalidateSpy, eventPairKey)).toBe(2);
+
+    // …and a frame landing at exactly that moment must fold into the next
+    // trailing refresh (t=2000), not re-fire a leading one at t=1000.
+    await act(async () => {
+      emitEvent(socket, "agent-1", "chat-1");
+    });
+    expect(countInvalidations(invalidateSpy, eventPairKey)).toBe(2);
+    await act(async () => {
+      vi.advanceTimersByTime(2_000);
+    });
+    expect(countInvalidations(invalidateSpy, eventPairKey)).toBe(3);
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(countInvalidations(invalidateSpy, eventPairKey)).toBe(3);
+  });
+
+  it("drops pending session:event throttle timers when the workspace unmounts", async () => {
+    const invalidateSpy = vi.spyOn(QueryClient.prototype, "invalidateQueries");
+    await renderHook();
+    const socket = FakeWebSocket.instances[0];
+    if (!socket) throw new Error("socket missing");
+    vi.useFakeTimers();
+    invalidateSpy.mockClear();
+
+    await act(async () => {
+      for (let i = 0; i < 3; i++) {
+        emitEvent(socket, "agent-1", "chat-1");
+      }
+    });
+    expect(countInvalidations(invalidateSpy, eventPairKey)).toBe(1);
+    expect(countInvalidations(invalidateSpy, eventChatKey)).toBe(1);
+
+    // Release (last subscriber unmounts): the pending trailing timers must
+    // not survive to fire against a later scope.
+    await act(async () => root?.unmount());
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(countInvalidations(invalidateSpy, eventPairKey)).toBe(1);
+    expect(countInvalidations(invalidateSpy, eventChatKey)).toBe(1);
+  });
+
+  it("resets session:event throttle state on org switch so old-scope timers cannot fire", async () => {
+    const invalidateSpy = vi.spyOn(QueryClient.prototype, "invalidateQueries");
+    await renderHook();
+    const first = FakeWebSocket.instances[0];
+    if (!first) throw new Error("socket missing");
+    vi.useFakeTimers();
+    invalidateSpy.mockClear();
+
+    await act(async () => {
+      for (let i = 0; i < 3; i++) {
+        emitEvent(first, "agent-1", "chat-1");
+      }
+    });
+    expect(countInvalidations(invalidateSpy, eventPairKey)).toBe(1);
+    expect(countInvalidations(invalidateSpy, eventChatKey)).toBe(1);
+
+    // Org switch drops the old socket's pending throttle timers.
+    clientMocks.getApiSelectedOrganizationId.mockReturnValue("org-2");
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("admin-ws:org-changed"));
+    });
+    const second = FakeWebSocket.instances[1];
+    if (!second) throw new Error("replacement socket missing");
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(countInvalidations(invalidateSpy, eventPairKey)).toBe(1);
+    expect(countInvalidations(invalidateSpy, eventChatKey)).toBe(1);
+
+    // The new org starts with a clean throttle: the same chat id refreshes
+    // immediately instead of inheriting the old scope's open window.
+    await act(async () => {
+      emitEvent(second, "agent-1", "chat-1");
+    });
+    expect(countInvalidations(invalidateSpy, eventPairKey)).toBe(2);
+    expect(countInvalidations(invalidateSpy, eventChatKey)).toBe(2);
+  });
+
+  it("keeps session:state eviction invalidations immediate during an event burst", async () => {
+    const invalidateSpy = vi.spyOn(QueryClient.prototype, "invalidateQueries");
+    await renderHook();
+    const socket = FakeWebSocket.instances[0];
+    if (!socket) throw new Error("socket missing");
+    vi.useFakeTimers();
+    invalidateSpy.mockClear();
+
+    await act(async () => {
+      for (let i = 0; i < 5; i++) {
+        emitEvent(socket, "agent-1", "chat-1");
+      }
+      // Terminal eviction lands mid-burst: its timeline invalidations are
+      // NOT folded into the session:event throttle — every viewer must learn
+      // about the server-side trace deletion immediately.
+      socket.emit({ type: "session:state", agentId: "agent-1", chatId: "chat-1", state: "evicted" });
+    });
+    expect(countInvalidations(invalidateSpy, eventPairKey)).toBe(2);
+    expect(countInvalidations(invalidateSpy, eventChatKey)).toBe(2);
+
+    // The pre-eviction burst's pending trailing still settles exactly once…
+    await act(async () => {
+      vi.advanceTimersByTime(2_000);
+    });
+    expect(countInvalidations(invalidateSpy, eventPairKey)).toBe(3);
+    expect(countInvalidations(invalidateSpy, eventChatKey)).toBe(3);
+    // …then nothing else fires.
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(countInvalidations(invalidateSpy, eventPairKey)).toBe(3);
+  });
+});

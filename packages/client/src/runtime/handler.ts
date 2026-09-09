@@ -90,9 +90,31 @@ export type HandlerRouteReceipt =
   | { kind: "owned"; mode: "queued" | "processing" }
   | { kind: "rejected"; reason: string; retryable: true };
 
+/**
+ * Provider-owned continuation of a delivery that already entered an exact
+ * provider conversation. The message id is custody identity only: a handler
+ * receiving this marker MUST NOT serialize the original message content again.
+ *
+ * Keeping this opt-in on the receipt preserves the generic runtime contract:
+ * providers without a safe continuation path retain the historical fresh-start
+ * recovery behaviour.
+ */
+export type ProviderContinuation = {
+  readonly kind: "provider_continuation";
+  readonly provider: RuntimeProvider;
+  readonly sessionId: string;
+  readonly messageId: string;
+};
+
+export type HandlerResumeOptions = {
+  /** Reclaim an already-provider-entered delivery without replaying its text. */
+  readonly continuation?: ProviderContinuation;
+};
+
 export type StartReceipt = {
   sessionId: string;
   route: Extract<HandlerRouteReceipt, { kind: "owned" }>;
+  continuation?: ProviderContinuation;
 };
 
 export type StartResult = StartReceipt;
@@ -100,6 +122,7 @@ export type StartResult = StartReceipt;
 export type ResumeReceipt = {
   sessionId: string;
   route: Extract<HandlerRouteReceipt, { kind: "owned" }> | null;
+  continuation?: ProviderContinuation;
 };
 
 export type ResumeResult = ResumeReceipt;
@@ -166,6 +189,29 @@ export type SessionContext = HandlerContext & {
   /** Refresh `lastActivity` timestamp when the provider produces activity. */
   recordProviderActivity: () => void;
   /**
+   * The provider is opening a turn for this chat. Marks the chat `working`
+   * from the turn boundary itself rather than from its first displayable
+   * output, so the model/tool latency at the head of a turn does not read as
+   * Idle. Cleared by the turn's `turn_end` event.
+   *
+   * Distinct from `recordProviderActivity`, which is deliberately broader:
+   * some providers sample activity above their own thread/turn filter, where
+   * late traffic for an already-closed turn arrives. Call this only where the
+   * provider genuinely opens a turn. A provider that does not call it still
+   * reads as working from its first in-turn session event (assistant text,
+   * thinking, or a tool call) — later, but never wrong.
+   */
+  noteTurnStart: () => void;
+  /**
+   * The provider closed a turn for this chat. Optional: closure normally rides
+   * the `turn_end` session event, which every provider emits. Call this only
+   * where a provider has an authoritative turn-over frame *after* that event —
+   * the Claude SDK's `session_state_changed: idle`, which fires once the
+   * background-agent loop settles — so a post-result frame cannot leave a turn
+   * open behind it.
+   */
+  noteTurnEnd?: () => void;
+  /**
    * Persist a structured session event (tool_call / error / assistant_text /
    * thinking / turn_end / usage) to the server. Assistant text DOES go through
    * here: handlers emit it as `assistant_text` events (chunked when long — see
@@ -226,9 +272,11 @@ export type SessionContext = HandlerContext & {
    * Drop the current live handler after it has fenced an unknown-custody
    * provider failure and marked the affected inbox work for recovery. The
    * optional session id lets recovery resume provider context from a fresh
-   * handler instead of routing redelivery back into the dead one.
+   * handler instead of routing redelivery back into the dead one. A provider
+   * continuation carries the exact message custody when a provider-entered
+   * turn must be recovered without serializing the original prompt again.
    */
-  failSessionForRecovery?: (reason: string, sessionId?: string) => void;
+  failSessionForRecovery?: (reason: string, sessionId?: string, continuation?: ProviderContinuation) => void;
 
   /**
    * Rebind the active runtime session to a provider-minted replacement id
@@ -386,6 +434,30 @@ export type PrecedingMessage = {
 };
 
 /**
+ * Validate a provider continuation before handing it to a replacement route.
+ * The exact provider and session identity are part of the receipt so a stale
+ * continuation cannot cross a runtime switch or silently fall back to a
+ * different conversation.
+ */
+export function continuationResumeOptions(
+  continuation: ProviderContinuation | undefined,
+  message: SessionMessage | null | undefined,
+  sessionId: string,
+  provider: RuntimeProvider,
+): HandlerResumeOptions | undefined {
+  if (
+    !continuation ||
+    !message ||
+    continuation.provider !== provider ||
+    continuation.sessionId !== sessionId ||
+    continuation.messageId !== message.id
+  ) {
+    return undefined;
+  }
+  return { continuation };
+}
+
+/**
  * Session-oriented agent handler.
  *
  * Each handler instance owns the full lifecycle of a Claude session
@@ -403,7 +475,22 @@ export type AgentHandler = {
     sessionId: string,
     ctx: SessionContext,
     token?: DeliveryToken,
+    opts?: HandlerResumeOptions,
   ): Promise<ResumeResult>;
+
+  /**
+   * True while the provider has accepted a turn whose external effects cannot
+   * be made exactly-once by starting a replacement process. Runtime eviction
+   * and forced route retirement must leave such a turn in place until it
+   * settles. Providers that do not expose this boundary retain legacy policy.
+   */
+  isProviderTurnActive?(): boolean;
+
+  /**
+   * Wait until an active provider turn has reached its terminal provider
+   * boundary. Used when a forced route retirement arrives during that window.
+   */
+  waitForProviderTurnSettled?(): Promise<void>;
 
   /** Message arrives while session is active. Push into provider-owned queue or reject. */
   inject(message: SessionMessage, token: DeliveryToken): HandlerRouteReceipt | undefined;

@@ -355,6 +355,36 @@ describe("classifyProviderFailure", () => {
     ).toMatchObject({ action: "stop", terminalKind: "needs_operator" });
   });
 
+  it("classifies Antigravity missing/auth/protocol failures deterministically", () => {
+    const missing = classifyProviderFailure(new Error("Antigravity CLI is missing on this machine"), {
+      provider: "antigravity",
+      scope: "session_start",
+      source: "session",
+    });
+    expect(missing).toMatchObject({ category: "capability", reasonCode: "antigravity_binary_missing" });
+
+    const auth = classifyProviderFailure(new Error("Antigravity returned an authentication required error"), {
+      provider: "antigravity",
+      scope: "provider_turn",
+      source: "stream",
+    });
+    expect(auth).toMatchObject({ category: "credential" });
+
+    const protocol = classifyProviderFailure(new Error("expected one conversation ID, observed none"), {
+      provider: "antigravity",
+      scope: "provider_turn",
+      source: "stream",
+    });
+    expect(protocol).toMatchObject({ category: "configuration", reasonCode: "antigravity_protocol_error" });
+
+    const platform = classifyProviderFailure(new Error("Antigravity is not supported on Windows in v1"), {
+      provider: "antigravity",
+      scope: "session_start",
+      source: "session",
+    });
+    expect(platform).toMatchObject({ category: "capability", reasonCode: "antigravity_platform_unsupported" });
+  });
+
   it("classifies Pi credential phrasings as needs_operator and does not unknown-retry them", () => {
     for (const message of ["missing credentials", "No API key configured", "run /login to continue"]) {
       const c = classifyProviderFailure(new Error(message), {

@@ -57,6 +57,12 @@ export async function discoverProviderModels(
       return discoverCursorModels(deps);
     case "grok":
       return discoverGrokModels(deps);
+    case "antigravity":
+      return unavailableCatalog(
+        provider,
+        "Antigravity model discovery is not enabled in V1; enter the provider-native model slug",
+        deps,
+      );
     case "kimi-code":
       return discoverKimiModels(deps);
     case "amp":

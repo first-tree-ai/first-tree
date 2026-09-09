@@ -149,7 +149,6 @@ export class InboxDeliveryCoordinator {
     const chatId = entry.chatId ?? entry.message.chatId;
     const messageId = entry.message.id;
     const ledger = this.ledger(chatId);
-
     if (ledger.recoveryDebt !== "none") {
       return { kind: "recovering" };
     }
@@ -676,6 +675,11 @@ export class InboxDeliveryCoordinator {
   hasRecoveryDebt(chatId: string): boolean {
     const ledger = this.ledgers.get(chatId);
     return ledger?.recoveryDebt !== undefined && ledger.recoveryDebt !== "none";
+  }
+
+  hasNoticeRequiredDelivery(chatId: string): boolean {
+    const ledger = this.ledgers.get(chatId);
+    return Boolean(ledger?.entries.some((entry) => entry.requiresDurableNotice === true));
   }
 
   snapshot(chatId: string): WorkSnapshot {

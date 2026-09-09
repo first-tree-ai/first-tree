@@ -69,12 +69,13 @@ describe("hasNonOkProvider", () => {
   });
 
   it("a partial snapshot missing an enabled provider is degraded", () => {
-    // codex is absent → still degraded (claude-code-tui is disabled, so ignored).
+    // codex is absent → still degraded (disabled providers are ignored).
     expect(hasNonOkProvider({ "claude-code": okEntry() })).toBe(true);
   });
 
   it("all enabled built-in providers ok → not degraded (stops the poll)", () => {
-    // claude-code-tui is disabled, so every other built-in must be ok.
+    // claude-code-tui and gated Antigravity are disabled, so every other
+    // enabled built-in must be ok.
     expect(
       hasNonOkProvider({
         amp: okEntry(),
@@ -161,6 +162,7 @@ describe("revalidateCapabilities / reprobeOnReconnect (probe modules mocked)", (
     vi.doUnmock("../providers/codex/capability.js");
     vi.doUnmock("../providers/cursor/capability.js");
     vi.doUnmock("../providers/grok/capability.js");
+    vi.doUnmock("../providers/antigravity/capability.js");
     vi.doUnmock("../providers/kimi-code/capability.js");
     vi.doUnmock("../providers/opencode/capability.js");
     vi.doUnmock("../providers/pi/capability.js");
@@ -192,6 +194,7 @@ describe("revalidateCapabilities / reprobeOnReconnect (probe modules mocked)", (
     vi.doMock("../providers/codex/capability.js", () => ({ probeCodexCapability: mk("codex") }));
     vi.doMock("../providers/cursor/capability.js", () => ({ probeCursorCapability: mk("cursor") }));
     vi.doMock("../providers/grok/capability.js", () => ({ probeGrokCapability: mk("grok") }));
+    vi.doMock("../providers/antigravity/capability.js", () => ({ probeAntigravityCapability: mk("antigravity") }));
     vi.doMock("../providers/kimi-code/capability.js", () => ({ probeKimiCodeCapability: mk("kimi-code") }));
     vi.doMock("../providers/opencode/capability.js", () => ({ probeOpenCodeCapability: mk("opencode") }));
     vi.doMock("../providers/pi/capability.js", () => ({ probePiCapability: mk("pi") }));
@@ -213,11 +216,13 @@ describe("revalidateCapabilities / reprobeOnReconnect (probe modules mocked)", (
     expect(calls.codex).toBe(1);
     expect(calls.amp).toBe(1);
     expect(calls["deepseek-harness"]).toBe(1);
+    expect(calls.antigravity).toBeUndefined();
     expect(out["claude-code"]?.state).toBe("ok");
     expect(out.codex?.state).toBe("ok");
-    // claude-code-tui is disabled → never probed, no entry.
+    // claude-code-tui and gated Antigravity are disabled → never probed, no entry.
     expect(calls["claude-code-tui"]).toBeUndefined();
     expect(out["claude-code-tui"]).toBeUndefined();
+    expect(out.antigravity).toBeUndefined();
   });
 
   it("revalidateCapabilities returns the fresh entry even when a provider regresses", async () => {
@@ -237,6 +242,7 @@ describe("revalidateCapabilities / reprobeOnReconnect (probe modules mocked)", (
     const allOkFresh: ClientCapabilities = {
       "claude-code": okEntry({ detectedAt: fresh }),
       codex: okEntry({ detectedAt: fresh }),
+      antigravity: okEntry({ detectedAt: fresh }),
     };
 
     const reval = await loadWithMocks();

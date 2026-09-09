@@ -99,6 +99,7 @@ describe("claude-code handler — turn_end emission", () => {
       chatId: "chat-1",
       log: () => {},
       recordProviderActivity: () => {},
+      noteTurnStart: () => {},
       ...mockCtxPlumbing({ sendMessage }, "chat-1"),
       emitEvent: (e) => emitted.push(e),
     };
@@ -143,6 +144,7 @@ describe("claude-code handler — turn_end emission", () => {
       chatId: "chat-1",
       log: () => {},
       recordProviderActivity: () => {},
+      noteTurnStart: () => {},
       ...mockCtxPlumbing({ sendMessage }, "chat-1"),
       // Production-faithful: forwardResult delivers nothing; record the call so
       // we can assert turn_end is emitted only after it resolves.

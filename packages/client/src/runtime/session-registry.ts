@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { createLogger } from "../cloud/observability/logger.js";
+import type { ProviderContinuation } from "./handler.js";
 
 const REGISTRY_VERSION = 1;
 
@@ -9,6 +10,7 @@ type PersistedEntry = {
   claudeSessionId: string;
   lastActivity: string; // ISO 8601
   status: "active" | "suspended" | "evicted";
+  continuation?: ProviderContinuation;
 };
 
 type RegistryData = {
@@ -24,12 +26,39 @@ type RegistryData = {
   freshStartNonces?: Record<string, string>;
 };
 
-export type RegistryEntry = { claudeSessionId: string; lastActivity: number; status: string };
+export type RegistryEntry = {
+  claudeSessionId: string;
+  lastActivity: number;
+  status: string;
+  continuation?: ProviderContinuation;
+};
 
 export type RegistrySnapshot = {
   entries: Map<string, RegistryEntry>;
   freshStartNonces: Map<string, string>;
 };
+
+function parseProviderContinuation(value: unknown): ProviderContinuation | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const candidate = value as Record<string, unknown>;
+  if (
+    candidate.kind !== "provider_continuation" ||
+    typeof candidate.provider !== "string" ||
+    typeof candidate.sessionId !== "string" ||
+    typeof candidate.messageId !== "string" ||
+    candidate.provider.length === 0 ||
+    candidate.sessionId.length === 0 ||
+    candidate.messageId.length === 0
+  ) {
+    return undefined;
+  }
+  return {
+    kind: "provider_continuation",
+    provider: candidate.provider as ProviderContinuation["provider"],
+    sessionId: candidate.sessionId,
+    messageId: candidate.messageId,
+  };
+}
 
 /**
  * SessionRegistry — persists `chatId → claudeSessionId` mappings to disk,
@@ -90,10 +119,12 @@ export class SessionRegistry {
       }
 
       for (const [chatId, entry] of Object.entries(data.entries ?? {})) {
+        const continuation = parseProviderContinuation(entry.continuation);
         entries.set(chatId, {
           claudeSessionId: entry.claudeSessionId,
           lastActivity: new Date(entry.lastActivity).getTime(),
           status: entry.status,
+          ...(continuation ? { continuation } : {}),
         });
       }
       if (data.freshStartNonces && typeof data.freshStartNonces === "object") {
@@ -201,6 +232,7 @@ export class SessionRegistry {
         claudeSessionId: entry.claudeSessionId,
         lastActivity: new Date(entry.lastActivity).toISOString(),
         status: entry.status as PersistedEntry["status"],
+        ...(entry.continuation ? { continuation: entry.continuation } : {}),
       };
     }
 

@@ -131,6 +131,7 @@ function makeContext(opts: {
       opts.events.push(event);
     },
     recordProviderActivity: () => {},
+    noteTurnStart: () => {},
     ...(opts.replaceSessionId ? { replaceSessionId: opts.replaceSessionId } : {}),
   };
 }

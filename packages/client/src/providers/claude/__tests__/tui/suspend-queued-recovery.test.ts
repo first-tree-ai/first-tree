@@ -179,6 +179,7 @@ function makeContext(
     chatId: CHAT_ID,
     log: () => {},
     recordProviderActivity: () => {},
+    noteTurnStart: () => {},
     emitEvent: () => {},
     ...plumbing,
     ...(opts.formatInboundContent ? { formatInboundContent: opts.formatInboundContent } : {}),
