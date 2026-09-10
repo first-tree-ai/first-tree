@@ -5,8 +5,10 @@ import {
   type FeishuResource,
   type FeishuResourceUnavailableReason,
   MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENT_FILENAME_BYTES,
   MAX_MESSAGE_ATTACHMENT_REFS,
   SUPPORTED_IMAGE_MIMES,
+  truncateUtf8ByBytes,
 } from "@first-tree/shared";
 import type { Database } from "../../../db/connection.js";
 import { type AttachmentObjectQuota, createAttachment } from "../../attachment.js";
@@ -228,14 +230,16 @@ function chooseFilename(
     fromHeader = plain;
   }
   const raw = descriptor.fileName || fromHeader || `${resourceLabel(descriptor.type)}${extensionForMime(mimeType)}`;
-  const sanitized = Array.from(raw)
-    .map((character) => {
-      const code = character.charCodeAt(0);
-      return character === "/" || character === "\\" || code < 32 || code === 127 ? "_" : character;
-    })
-    .join("")
-    .trim()
-    .slice(0, 255);
+  const sanitized = truncateUtf8ByBytes(
+    Array.from(raw)
+      .map((character) => {
+        const code = character.charCodeAt(0);
+        return character === "/" || character === "\\" || code < 32 || code === 127 ? "_" : character;
+      })
+      .join("")
+      .trim(),
+    MAX_ATTACHMENT_FILENAME_BYTES,
+  );
   return sanitized || `feishu-resource${extensionForMime(mimeType)}`;
 }
 
