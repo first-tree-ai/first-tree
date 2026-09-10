@@ -26,9 +26,21 @@ requires reading assembled screens rather than the component in isolation.
 
 ## Trigger
 
-Select this case when a change removes, moves, or narrows a copy slot, lead line, empty-state
-sentence, helper text, or its reserved layout row inside a component that has more than one
-importer, and the stated rationale is duplication, redundancy, density, or spacing.
+Select this case when a change touches copy on either side of the shared/caller boundary, in a
+component that has more than one importer:
+
+- **Removal side** — it removes, moves, or narrows a copy slot, lead line, empty-state sentence,
+  helper text, or its reserved layout row inside the shared component, and the stated rationale is
+  duplication, redundancy, density, or spacing. That rationale is the signal: it was assessed
+  against one caller's assembled screen, and this case exists to test it against the rest.
+- **Addition side** — it adds copy at one caller, whether to say something the shared component no
+  longer says or to say it in that caller's own words. The added line is scoped to one caller while
+  the component's copy is not, so it can duplicate what the component already renders for another
+  caller, or for another state of the same caller.
+
+Both shapes reach the same validation question: which callers does this copy actually reach, and
+what does each of them read like once assembled. A fix for a finding on the removal side usually
+arrives as an addition, so the follow-up commit re-selects the case on the other branch.
 
 ## Preconditions
 
@@ -58,10 +70,11 @@ importer, and the stated rationale is duplication, redundancy, density, or spaci
   instructs the reader to "complete the action above" becomes false when the only remaining content
   above it is an escape hatch such as a reinstall or support link. Judge the assembled step, not the
   removed line.
-- When the change instead adds caller-local copy, revisit the other states of that same caller: two
-  sentences that previously shared one slot can now appear together. Decide whether the resulting
-  pair reads as complementary or as a duplicate, and record the judgement so a later reader does not
-  file it as a regression.
+- When the change instead adds caller-local copy, check it against everything the shared component
+  already says: the other states of that same caller, where two sentences that previously shared one
+  slot can now appear together, and the other callers, where the component may already contribute
+  the same line. Decide for each pair whether it reads as complementary or as a duplicate, and
+  record the judgement so a later reader does not file it as a regression.
 - If the fix is accompanied by a regression test that asserts the restored copy, judge whether that
   guard is specific to the **sentence** or only to its container. Read the assertion: it should
   match the exact restored string, or an accessible name that only that copy can satisfy, on the
@@ -90,7 +103,8 @@ importer, and the stated rationale is duplication, redundancy, density, or spaci
 ## Expected result
 
 `PASS`: every caller was reached live, each one either still states its own remedy or was shown to be
-unable to enter the affected state, the surrounding frame remains truthful, and any accompanying
+unable to enter the affected state, any added copy reads as complementary rather than duplicated
+wherever the component already speaks, the surrounding frame remains truthful, and any accompanying
 regression guard asserts the sentence itself rather than its container.
 
 `FAIL`: a caller renders the affected state with no statement of the remedy, a frame instructs the
