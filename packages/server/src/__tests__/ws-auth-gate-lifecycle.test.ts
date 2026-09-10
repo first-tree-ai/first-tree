@@ -26,6 +26,8 @@ const TEST_USER_ID = "01960000-0000-7000-8000-0000000000aa";
 // loop (WebCrypto JWT verification resolves off-thread; microtask-only
 // flushing never delivers it while timer APIs are faked).
 const realSetImmediate = global.setImmediate;
+const realSetTimeout = global.setTimeout;
+const realClearTimeout = global.clearTimeout;
 
 async function flushRealEventLoop(turns = 30): Promise<void> {
   for (let i = 0; i < turns; i++) {
@@ -74,6 +76,10 @@ type FakeSocket = ReturnType<typeof createFakeSocket>;
 
 type DeferredLookup = {
   queries: number;
+  /** Settles once the fake query's limit() runs — i.e. a lookup is in flight. */
+  started: Promise<void>;
+  /** Harness hook invoked by the fake DB query's limit() when a lookup starts. */
+  markStarted(): void;
   promise: Promise<Array<{ id: string; status: string }>>;
   resolve(rows: Array<{ id: string; status: string }>): void;
   reject(err: unknown): void;
@@ -129,6 +135,7 @@ function createFakeApp(lookup: DeferredLookup) {
           where: () => query,
           limit: () => {
             lookup.queries++;
+            lookup.markStarted();
             return lookup.promise;
           },
         };
@@ -151,12 +158,20 @@ type FakeApp = ReturnType<typeof createFakeApp>;
 function createDeferredLookup(): DeferredLookup {
   let resolvePromise: (rows: Array<{ id: string; status: string }>) => void = () => {};
   let rejectPromise: (err: unknown) => void = () => {};
+  let resolveStarted: () => void = () => {};
   const promise = new Promise<Array<{ id: string; status: string }>>((resolve, reject) => {
     resolvePromise = resolve;
     rejectPromise = reject;
   });
+  const started = new Promise<void>((resolve) => {
+    resolveStarted = resolve;
+  });
   return {
     queries: 0,
+    started,
+    markStarted() {
+      resolveStarted();
+    },
     promise,
     resolve(rows) {
       resolvePromise(rows);
@@ -165,6 +180,28 @@ function createDeferredLookup(): DeferredLookup {
       rejectPromise(err);
     },
   };
+}
+
+/**
+ * Deterministically wait until the deferred user lookup is actually in
+ * flight (the fake query's limit() ran). WebCrypto JWT verification resolves
+ * off the faked timer APIs, so a fixed number of event-loop turns cannot
+ * guarantee the lookup started on a loaded CI runner. Bounded by a
+ * real-timer deadline — captured before fake timers install — so a
+ * regression that never reaches the lookup fails instead of hanging.
+ */
+async function waitForLookupStarted(lookup: DeferredLookup): Promise<void> {
+  let deadline: ReturnType<typeof realSetTimeout> | undefined;
+  try {
+    await Promise.race([
+      lookup.started,
+      new Promise<never>((_resolve, reject) => {
+        deadline = realSetTimeout(() => reject(new Error("timed out waiting for the user lookup to start")), 10_000);
+      }),
+    ]);
+  } finally {
+    if (deadline !== undefined) realClearTimeout(deadline);
+  }
 }
 
 async function signAccessToken(expSecondsFromNow = 3600): Promise<string> {
@@ -206,7 +243,7 @@ describe("client WS auth gate — single attempt and terminal state", () => {
 
     const token = await signAccessToken();
     const first = gate.handle({ type: "auth", token }, "auth");
-    await flushRealEventLoop();
+    await waitForLookupStarted(lookup);
     expect(lookup.queries).toBe(1);
 
     // A flood of duplicates while the first attempt's lookup is in flight:
@@ -245,7 +282,7 @@ describe("client WS auth gate — single attempt and terminal state", () => {
 
     const token = await signAccessToken();
     const pending = gate.handle({ type: "auth", token }, "auth");
-    await flushRealEventLoop();
+    await waitForLookupStarted(lookup);
     expect(lookup.queries).toBe(1);
 
     socket.peerClose();
@@ -270,7 +307,7 @@ describe("client WS auth gate — single attempt and terminal state", () => {
 
     const token = await signAccessToken();
     const pending = gate.handle({ type: "auth", token }, "auth");
-    await flushRealEventLoop();
+    await waitForLookupStarted(lookup);
     expect(lookup.queries).toBe(1);
 
     // The existing 5s deadline still applies while validation is stuck.
@@ -300,7 +337,7 @@ describe("client WS auth gate — single attempt and terminal state", () => {
 
     const token = await signAccessToken();
     const pending = gate.handle({ type: "auth", token }, "auth");
-    await flushRealEventLoop();
+    await waitForLookupStarted(lookup);
     expect(lookup.queries).toBe(1);
 
     socket.peerClose();
@@ -323,7 +360,7 @@ describe("client WS auth gate — single attempt and terminal state", () => {
 
     const token = await signAccessToken();
     const pending = gate.handle({ type: "auth", token }, "auth");
-    await flushRealEventLoop();
+    await waitForLookupStarted(lookup);
     await vi.advanceTimersByTimeAsync(5_100);
     expect(socket.closeCalls).toHaveLength(1);
 
@@ -406,7 +443,7 @@ describe("client WS auth gate — single attempt and terminal state", () => {
 
     const token = await signAccessToken(30);
     const pending = gate.handle({ type: "auth", token }, "auth");
-    await flushRealEventLoop();
+    await waitForLookupStarted(lookup);
     lookup.resolve([{ id: TEST_USER_ID, status: "active" }]);
     await pending;
 
@@ -432,7 +469,7 @@ describe("client WS auth gate — single attempt and terminal state", () => {
 
     const token = await signAccessToken(30);
     const pending = gate.handle({ type: "auth", token }, "auth");
-    await flushRealEventLoop();
+    await waitForLookupStarted(lookup);
     lookup.resolve([{ id: TEST_USER_ID, status: "active" }]);
     await pending;
     expect(fakeContext.state.authentications).toBe(1);
@@ -454,7 +491,7 @@ describe("client WS auth gate — single attempt and terminal state", () => {
 
     const token = await signAccessToken();
     const pending = gate.handle({ type: "auth", token }, "auth");
-    await flushRealEventLoop();
+    await waitForLookupStarted(lookup);
     lookup.resolve([{ id: TEST_USER_ID, status: "active" }]);
     socket.setFailSends(true);
     await pending;
@@ -485,7 +522,7 @@ describe("client WS auth gate — single attempt and terminal state", () => {
 
     const token = await signAccessToken(30);
     const pending = gate.handle({ type: "auth", token }, "auth");
-    await flushRealEventLoop();
+    await waitForLookupStarted(lookup);
     lookup.resolve([{ id: TEST_USER_ID, status: "active" }]);
     await pending;
     expect(fakeContext.expiryTimerActive()).toBe(true);
@@ -512,7 +549,7 @@ describe("client WS auth gate — single attempt and terminal state", () => {
 
     const token = await signAccessToken(30);
     const pending = gate.handle({ type: "auth", token }, "auth");
-    await flushRealEventLoop();
+    await waitForLookupStarted(lookup);
     lookup.resolve([{ id: TEST_USER_ID, status: "active" }]);
     socket.setFailSends(true);
     await pending;
@@ -574,7 +611,7 @@ describe("client WS auth gate — single attempt and terminal state", () => {
 
     const token = await signAccessToken();
     const pending = gate.handle({ type: "auth", token }, "auth");
-    await flushRealEventLoop();
+    await waitForLookupStarted(lookup);
     lookup.resolve([{ id: TEST_USER_ID, status: "active" }]);
     await pending;
 
