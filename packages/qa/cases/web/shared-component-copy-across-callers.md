@@ -38,8 +38,8 @@ importer, and the stated rationale is duplication, redundancy, density, or spaci
 - Seeded state that actually reaches the affected component state on **each** caller. Callers often
   differ in how the state is entered, and a state that is trivial to seed on one screen may require
   a different fixture on another.
-- Every supported locale the copy exists in, and at least one narrow viewport, when the slot also
-  carried layout.
+- When the copy is localized, every locale it exists in; when the slot also carried layout, at
+  least one narrow viewport.
 
 ## Operate and observe
 
@@ -62,10 +62,14 @@ importer, and the stated rationale is duplication, redundancy, density, or spaci
   sentences that previously shared one slot can now appear together. Decide whether the resulting
   pair reads as complementary or as a duplicate, and record the judgement so a later reader does not
   file it as a regression.
-- If the fix is accompanied by a regression test that asserts the restored copy, confirm the guard
-  is not vacuous: remove the restored element, re-run the suite, and check that the failure names
-  the missing sentence. Restore the source and confirm the tree is clean at the exact target before
-  reporting.
+- If the fix is accompanied by a regression test that asserts the restored copy, judge whether that
+  guard is specific to the **sentence** or only to its container. Read the assertion: it should
+  match the exact restored string, or an accessible name that only that copy can satisfy, on the
+  caller that lost it and in the state that lost it. A guard that asserts a wrapper rendered, a test
+  id exists, or some non-empty text appeared would still pass with the sentence gone — say so
+  instead of treating the test's presence as coverage. Do not modify product source to find out;
+  that is forbidden while testing at every tier. Where the author already ran a mutation check, cite
+  their result rather than reproducing it.
 
 ## Evidence
 
@@ -74,21 +78,25 @@ importer, and the stated rationale is duplication, redundancy, density, or spaci
 - Base-versus-target screenshots of the **same** seeded state on each affected caller, plus the
   narrow-viewport and non-default-locale captures when the slot carried layout or localized copy.
 - The base control must be a real build of the merge base driven through the product, never a diff
-  reading. Verify the base build actually rendered base copy before trusting it: a cached SPA shell,
-  a stale bundle, or a compiled message catalog that was not regenerated from its source strings will
-  silently serve target copy from a base checkout, which reads as "no change" and hides the finding.
-- The mutation-check output when a guard was verified, and the clean-tree confirmation afterwards.
+  reading. Verify the base build actually rendered base copy before trusting it: any generated-copy
+  step that was not re-run for the base build will silently serve target copy from a base checkout,
+  which reads as "no change" and hides the finding. A cached shell, a stale prebuilt bundle, a
+  compiled message catalog left unregenerated, and code-generated string constants are all
+  instances of it.
+- When a regression guard accompanies the change, the quoted assertion and the caller and state it
+  runs against, plus the author's own mutation-check result if they reported one.
 - Browser console and page errors for each observed state.
 
 ## Expected result
 
 `PASS`: every caller was reached live, each one either still states its own remedy or was shown to be
 unable to enter the affected state, the surrounding frame remains truthful, and any accompanying
-guard was shown to bite.
+regression guard asserts the sentence itself rather than its container.
 
 `FAIL`: a caller renders the affected state with no statement of the remedy, a frame instructs the
 reader toward content that no longer exists, an added line duplicates existing copy on another
-caller, or a guard passes with its subject removed.
+caller, or an accompanying guard asserts only a container and would still pass with the sentence
+gone.
 
 `BLOCKED`: the base build, a caller's entry path, or the seeded state required to reach the affected
 state on some caller is unavailable, so the comparison cannot be made.
