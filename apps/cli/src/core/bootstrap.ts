@@ -195,7 +195,7 @@ function sameAuthority(a: CredentialAuthority, b: CredentialAuthority): boolean 
  * Terminal 401 latch. A 401 from `/auth/refresh` means the refresh token is
  * expired or revoked — retrying the same credential authority can never
  * succeed, yet every caller (WS reconnect loop, SDK requests, proactive
- * refresh) used to fire its own doomed HTTP round-trip (staging incident:
+ * refresh) used to fire its own doomed HTTP round-trip (synthetic reproduction:
  * 20 sequential callers -> 20 refreshes). After the first 401 we latch the
  * failure and rethrow it without touching the network.
  *

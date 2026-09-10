@@ -587,4 +587,61 @@ describe("ClientConnection — auth paused mode (Bug 2, D1)", () => {
     expect(connection.isPaused()).toBe(false);
     expect(connection.isConnected).toBe(false);
   }, 10_000);
+
+  it("anchors a terminal refresh failure to the pre-provider credentials snapshot", async () => {
+    const counters = { sockets: 0, registrations: 0 };
+    serveGoodToken("good-token", counters);
+
+    let snapshot = "cred-v1";
+    let allowToken = false;
+    const connection = new ClientConnection({
+      serverUrl,
+      clientId: "client_attempt_identity_refresh",
+      getAccessToken: async () => {
+        if (!allowToken) throw new AuthRefreshFailedError();
+        return "good-token";
+      },
+      getCredentialsSnapshot: () => snapshot,
+    });
+    connection.on("error", () => {});
+
+    const tracked = track(connection.connect());
+    await waitFor(() => connection.isPaused());
+    // No token was ever sent — the failed attempt's identity is the
+    // credential-store snapshot taken before the provider ran.
+    expect(connection.getAuthAttemptCredential()).toBe("cred-v1");
+
+    // Operator re-login rotates the snapshot; the next attempt's identity
+    // becomes the token actually sent in the handshake.
+    snapshot = "cred-v2";
+    allowToken = true;
+    connection.clearPaused();
+    await tracked.promise;
+    expect(connection.getAuthAttemptCredential()).toBe("good-token");
+    expect(counters.registrations).toBe(1);
+
+    await connection.disconnect();
+  }, 10_000);
+
+  it("tolerates a throwing credentials snapshot hook", async () => {
+    wss.on("connection", () => {});
+    const connection = new ClientConnection({
+      serverUrl,
+      clientId: "client_snapshot_hook_throw",
+      getAccessToken: async () => {
+        throw new AuthRefreshFailedError();
+      },
+      getCredentialsSnapshot: () => {
+        throw new Error("disk gone");
+      },
+    });
+    connection.on("error", () => {});
+
+    const tracked = track(connection.connect());
+    await waitFor(() => connection.isPaused());
+    expect(connection.getAuthAttemptCredential()).toBeNull();
+
+    await connection.disconnect();
+    await tracked.promise;
+  }, 10_000);
 });

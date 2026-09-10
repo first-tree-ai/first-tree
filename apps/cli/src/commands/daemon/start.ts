@@ -552,15 +552,13 @@ export function registerDaemonStartCommand(daemon: Command): void {
 
         await runtime.start();
 
-        // The initial registration completed — open the capability gate
-        // BEFORE start(): while paused, start() is a no-op by design.
-        capabilityRefresher.resume();
-        // Post-register capabilities upload + arm the background poll — the
-        // `clients` row only exists after the `client:register` WS handshake,
-        // so the first PATCH runs here rather than pre-flight. Best-effort: a
-        // transient failure logs and moves on; agents still bind, and the poll
-        // (or a later restart) retries.
-        void capabilityRefresher.start();
+        // Registration precedes agent startup. If authentication failed
+        // while agents were starting, keep probes and uploads paused until
+        // a later successful registration resumes them.
+        if (!runtime.isPaused()) {
+          capabilityRefresher.resume();
+          void capabilityRefresher.start();
+        }
         codexCapabilityPublicationStarted = true;
         if (codexCapabilityPublicationPending) {
           codexCapabilityPublicationPending = false;

@@ -133,6 +133,16 @@ export type ClientConnectionConfig = {
    */
   getAccessToken: AccessTokenProvider;
   /**
+   * Optional synchronous snapshot of the consumer's credential store (e.g.
+   * raw credentials.json content), treated as an opaque identity string.
+   * Read once before each token-provider invocation; when the provider
+   * fails terminally (no token is ever sent), the snapshot becomes the
+   * attempt identity exposed via {@link getAuthAttemptCredential} so a
+   * paused consumer can tell "credentials changed since the failed
+   * attempt" apart from "unchanged".
+   */
+  getCredentialsSnapshot?: () => string | null;
+  /**
    * Optional `User-Agent` string forwarded to every per-agent SDK created by
    * `agent:bound`. Distinct from `sdkVersion` (which is the value advertised
    * to the server in `client:register`); this one only decorates outbound
@@ -507,6 +517,7 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
   private readonly sdkVersion: string | undefined;
   private readonly userAgent: string | undefined;
   private readonly getAccessToken: AccessTokenProvider;
+  private readonly getCredentialsSnapshot: (() => string | null) | undefined;
   private readonly getLastUpdateAttempt: (() => UpdateAttempt | null) | undefined;
   private readonly heartbeatIntervalMs: number;
   private readonly heartbeatTimeoutMs: number;
@@ -576,6 +587,17 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
    */
   private serverSupportsSessionResetV1 = false;
   /**
+   * Identity of the credential used by the latest live auth attempt: the
+   * access token actually sent in the handshake (post-refresh — a
+   * successful provider refresh may rotate both tokens), or the
+   * pre-provider credential-store snapshot when the provider failed before
+   * any token was sent. Recorded only behind the retired-attempt fences,
+   * so a stale provider completion can never overwrite a newer attempt's
+   * identity. Read together with {@link getPausedReason} to decide whether
+   * current credentials differ from the ones that failed.
+   */
+  private authAttemptCredential: string | null = null;
+  /**
    * Last handshake error, stashed for the `close` handler to surface a typed
    * reason (e.g. {@link ClientOrgMismatchError}) instead of a generic
    * "closed before ready" when `connect()` is pending.
@@ -625,6 +647,7 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
     this.sdkVersion = config.sdkVersion;
     this.userAgent = config.userAgent;
     this.getAccessToken = config.getAccessToken;
+    this.getCredentialsSnapshot = config.getCredentialsSnapshot;
     this.getLastUpdateAttempt = config.getLastUpdateAttempt;
     this.heartbeatIntervalMs = config.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS;
     this.heartbeatTimeoutMs = config.heartbeatTimeoutMs ?? HEARTBEAT_TIMEOUT_MS;
@@ -671,6 +694,26 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
   /** Last paused reason. `null` when not paused. */
   getPausedReason(): ClientPausedReason | null {
     return this.pausedReason;
+  }
+
+  /**
+   * Identity of the credential used by the latest live auth attempt — the
+   * token sent in the handshake, or the consumer-supplied credential
+   * snapshot when the token provider failed terminally. Meaningful while
+   * paused: compare against the current credential store to resume only on
+   * a real change.
+   */
+  getAuthAttemptCredential(): string | null {
+    return this.authAttemptCredential;
+  }
+
+  /** Consumer snapshot hook, tolerated if it throws (disk hiccups). */
+  private readCredentialsSnapshot(): string | null {
+    try {
+      return this.getCredentialsSnapshot?.() ?? null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -1195,8 +1238,8 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
    * (`auth_rejected` / `auth_refresh_failed`) the loop PARKS instead of
    * throwing. Throwing pushed the failure out to the CLI, which exited and
    * let systemd/launchd restart the whole process every ~10s — each boot
-   * re-fired doomed `/auth/refresh` POSTs plus a wasted WS handshake (the
-   * staging auth-failure storm), and no consumer ever re-invoked `connect()`
+   * re-fired doomed `/auth/refresh` POSTs plus a wasted WS handshake (as
+   * reproduced with a revoked token), and no consumer ever re-invoked `connect()`
    * to make the throw recoverable. Parking keeps the promise pending with
    * zero network activity until the consumer's credentials watcher calls
    * {@link clearPaused} (`auth:resumed` wakes the loop) or {@link disconnect}
@@ -1625,6 +1668,10 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
         // success signal — `client:registered` — instead.
         this.wsLogger.debug("socket opened, sending auth");
 
+        // Snapshot the consumer's credential store BEFORE the provider runs:
+        // if the provider fails terminally (refresh rejected) no token is
+        // ever sent, and this snapshot is the failed attempt's only identity.
+        const credentialsSnapshot = this.readCredentialsSnapshot();
         try {
           const token = await this.attemptAccessToken();
           // Retired-attempt fence: the token arrived AFTER this attempt
@@ -1635,6 +1682,10 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
           // proactive refresh timer for a dead attempt.
           if (settled || this.closing || this.ws !== ws || ws.readyState !== WebSocket.OPEN) return;
           ws.send(JSON.stringify({ type: "auth", token }));
+          // Attempt identity = the token actually sent. Deliberately NOT
+          // the pre-provider snapshot: a successful refresh may have
+          // rotated access/refresh tokens inside the provider.
+          this.authAttemptCredential = token;
           // C5: arm the proactive refresh timer as soon as we've sent the
           // auth frame — auth:ok only confirms the token was accepted, the
           // exp itself is already fixed on the token payload.
@@ -1663,7 +1714,9 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
             this.authLogger.error({ err }, "failed to obtain access token");
             if (e.name === "AuthRefreshFailedError") {
               // Bug 2: enter paused mode; the credentials watcher will call
-              // clearPaused() to resume.
+              // clearPaused() to resume. The pre-provider snapshot identifies
+              // the credential authority that failed.
+              this.authAttemptCredential = credentialsSnapshot;
               this.enterPausedMode("auth_refresh_failed", e);
             } else if (e.name === "AuthRefreshRateLimitedError") {
               // Pull the server-suggested wait off the typed error and stash
@@ -2677,7 +2730,11 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
     const delay = exp * 1000 - Date.now() - AUTH_REFRESH_LEAD_MS;
     if (delay <= 0) return;
     this.authLogger.debug({ delayMs: delay }, "scheduled proactive auth refresh");
+    const armedSocket = this.ws;
     this.authRefreshTimer = setTimeout(() => {
+      this.authRefreshTimer = null;
+      // A retired attempt must not refresh or close its successor's socket.
+      if (this.ws !== armedSocket) return;
       void this.runProactiveAuthRefresh();
     }, delay);
   }
@@ -2686,6 +2743,7 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
     this.authRefreshTimer = null;
     if (this.closing) return;
     this.authLogger.info("triggering proactive auth refresh");
+    const credentialsSnapshot = this.readCredentialsSnapshot();
     try {
       // Force a fetch — the cached token is by definition still inside the
       // 60s lead window here, so we ask for >lead validity to make
@@ -2709,6 +2767,7 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
         // dance; reconnecting would just throw the same error from the open
         // handler. clearPaused() (driven by the credentials watcher) will
         // resume.
+        this.authAttemptCredential = credentialsSnapshot;
         this.enterPausedMode("auth_refresh_failed", e);
         return;
       } else {

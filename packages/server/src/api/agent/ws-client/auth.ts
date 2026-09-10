@@ -155,7 +155,7 @@ export function createClientWsAuthGate(
    * - `validationInFlight`: one auth frame is between schema validation and
    *   its terminal resolution. A second auth frame in this window is
    *   rejected deterministically — it must never queue another verify/DB
-   *   pipeline (staging incident: 20 concurrent frames -> 20 user lookups,
+   *   pipeline (synthetic reproduction: 20 concurrent frames -> 20 user lookups,
    *   then 20 authentications + expiry timers after the socket was gone).
    * - `settled`: terminal. Set by every close path (frame timeout, rejected,
    *   expired, retryable, internal handshake failure) and by `handleClose()`.

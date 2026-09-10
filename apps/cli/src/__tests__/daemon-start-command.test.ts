@@ -1217,6 +1217,26 @@ describe("daemon start command", () => {
     );
   });
 
+  it("keeps capability work paused when authentication fails during startup", async () => {
+    runtimeInstance.start.mockImplementationOnce(async () => {
+      runtimeInstance.isPaused.mockReturnValue(true);
+      const onAuthPaused = runtimeInstance.onAuthPaused.mock.calls[0]?.[0] as () => void;
+      onAuthPaused();
+    });
+
+    await expect(runStart(["--foreground"])).rejects.toMatchObject({ exitCode: 1 });
+
+    expect(refresherInstance.pause).toHaveBeenCalledOnce();
+    expect(refresherInstance.resume).not.toHaveBeenCalled();
+    expect(refresherInstance.start).not.toHaveBeenCalled();
+
+    runtimeInstance.isPaused.mockReturnValue(false);
+    const onReconnect = runtimeInstance.onReconnect.mock.calls[0]?.[0] as () => void;
+    onReconnect();
+    expect(refresherInstance.resume).toHaveBeenCalledOnce();
+    expect(refresherInstance.onReconnect).toHaveBeenCalledOnce();
+  });
+
   it("runs graceful shutdown when SIGTERM arrives during the pending auth-paused initial start", async () => {
     const signalHandlers = new Map<string, () => void>();
     const onSpy = vi.spyOn(process, "on").mockImplementation((event, listener) => {

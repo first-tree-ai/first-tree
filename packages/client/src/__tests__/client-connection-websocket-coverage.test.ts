@@ -876,4 +876,48 @@ describe("ClientConnection — WebSocket edge coverage", () => {
         .filter((message) => message.type === "inbox:ack"),
     ).toEqual([]);
   });
+  it("does not let a retired attempt's timer close a successor waiting for its token", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-10T00:00:00Z"));
+    let releaseSecond: (token: string) => void = () => {};
+    const getAccessToken = vi
+      .fn()
+      .mockResolvedValueOnce(makeJwt({ exp: Math.floor(Date.now() / 1000) + 75 }))
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            releaseSecond = resolve;
+          }),
+      )
+      .mockResolvedValue(makeJwt({ exp: Math.floor(Date.now() / 1000) + 3600 }));
+    const connection = await makeConnection({ getAccessToken });
+    connection.on("error", () => {});
+    const internal = priv(connection);
+    const firstAttempt = internal.openWebSocket();
+    const first = FakeWebSocket.instances[0];
+    if (!first) throw new Error("missing first socket");
+    const firstFailure = expect(firstAttempt).rejects.toThrow("WebSocket connect timeout");
+    first.emitOpen();
+    await flushMicrotasks();
+    expect(first.sent).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await firstFailure;
+    const secondAttempt = internal.openWebSocket().catch(() => {});
+    const second = FakeWebSocket.instances[1];
+    if (!second) throw new Error("missing second socket");
+    second.emitOpen();
+    await flushMicrotasks();
+    first.emit("close", 1006);
+    try {
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(getAccessToken).toHaveBeenCalledTimes(2);
+      expect(second.closeCalls).toHaveLength(0);
+    } finally {
+      second.close(1000, "test cleanup");
+      releaseSecond("synthetic-late-token");
+      await secondAttempt;
+      await connection.disconnect();
+      internal.clearTimers();
+    }
+  });
 });

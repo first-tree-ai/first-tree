@@ -69,6 +69,7 @@ const connectionMock = {
   emit: vi.fn(),
   isPaused: vi.fn(() => false),
   getPausedReason: vi.fn<() => ClientPausedReason | null>(() => null),
+  getAuthAttemptCredential: vi.fn<() => string | null>(() => null),
   clearPaused: vi.fn(),
   getMaxListeners: vi.fn(() => connectionMaxListeners),
   setMaxListeners: vi.fn((n: number) => {
@@ -119,6 +120,7 @@ vi.mock("@first-tree/client", () => {
       emit = connectionMock.emit;
       isPaused = connectionMock.isPaused;
       getPausedReason = connectionMock.getPausedReason;
+      getAuthAttemptCredential = connectionMock.getAuthAttemptCredential;
       clearPaused = connectionMock.clearPaused;
       getMaxListeners = connectionMock.getMaxListeners;
       setMaxListeners = connectionMock.setMaxListeners;
@@ -186,6 +188,8 @@ describe("ClientRuntime context-tree wiring", () => {
     connectionMock.isPaused.mockReturnValue(false);
     connectionMock.getPausedReason.mockReset();
     connectionMock.getPausedReason.mockReturnValue(null);
+    connectionMock.getAuthAttemptCredential.mockReset();
+    connectionMock.getAuthAttemptCredential.mockReturnValue(null);
     connectionMock.clearPaused.mockClear();
     connectionMaxListeners = 10;
     connectionMock.getMaxListeners.mockClear();
@@ -1220,9 +1224,13 @@ describe("ClientRuntime context-tree wiring", () => {
     expect(watchMockProbe).toBe(fsWatchMocks.watch);
     const { ClientRuntime } = await import("../core/client-runtime.js");
     mkdirSync(join(home, "config"), { recursive: true });
-    writeFileSync(join(home, "config", "credentials.json"), JSON.stringify({ refreshToken: "old" }));
+    const oldCredentials = JSON.stringify({ refreshToken: "old" });
+    writeFileSync(join(home, "config", "credentials.json"), oldCredentials);
     const rt = new ClientRuntime("https://hub.test", "client-test");
     connectionMock.isPaused.mockReturnValue(true);
+    connectionMock.getPausedReason.mockReturnValue("auth_refresh_failed");
+    // The paused attempt used the credentials currently on disk.
+    connectionMock.getAuthAttemptCredential.mockReturnValue(oldCredentials);
 
     const paused = connectionListeners.get("auth:paused");
     if (!paused) throw new Error("auth:paused listener missing");

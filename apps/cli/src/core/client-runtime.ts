@@ -103,6 +103,10 @@ function authPausedDetail(error: Error): string {
   return `Auth rejection code: ${authCode}${authMessage ? ` — ${authMessage}` : ""}`;
 }
 
+function credentialsFilePath(): string {
+  return join(defaultConfigDir(), "credentials.json");
+}
+
 export type ClientRuntimeOptions = {
   /**
    * Version of the Command package this process was launched from. Passed to
@@ -160,18 +164,13 @@ export class ClientRuntime {
    */
   private agentsDir: string | null = null;
   /**
-   * Watcher on credentials.json (Bug 2 paused-mode recovery). Detects a
-   * fresh login while the runtime is paused and tells
-   * the connection to clear paused mode and reconnect with the new token.
+   * Watcher on credentials.json (Bug 2 paused-mode recovery). Pure trigger:
+   * file events (and the auth:paused handler itself) schedule a debounced
+   * reconciliation, which resumes only when the current credentials differ
+   * from the credential the paused attempt actually used.
    */
   private credentialsWatcher: FSWatcher | null = null;
   private credentialsDebounce: ReturnType<typeof setTimeout> | null = null;
-  /**
-   * Snapshot of the credentials JSON the last time we observed it. Used to
-   * de-dupe the debounced watcher — `fs.watch` fires on every metadata
-   * touch and we only want to act on actual content changes.
-   */
-  private lastCredentialsSnapshot: string | null = null;
 
   /** Callbacks fired after a WS RE-registration (reconnect), not the first
    * register. Used by the daemon to re-probe runtime-provider capabilities. */
@@ -204,6 +203,9 @@ export class ClientRuntime {
       sdkVersion: options.currentVersion,
       userAgent: CLI_USER_AGENT,
       getAccessToken: (opts) => ensureFreshAccessToken(opts),
+      // Lets the connection anchor a failed token-provider attempt to the
+      // exact credentials it used (see getAuthAttemptCredential).
+      getCredentialsSnapshot: () => this.readCredentialsSnapshot(credentialsFilePath()),
       // Forward the last self-update outcome on every `client:register`
       // so the server can persist it into `clients.metadata.lastUpdateAttempt`
       // and the admin dashboard can flag clients that are failing to
@@ -247,6 +249,10 @@ export class ClientRuntime {
       );
       this.output.status("", `Paused reason: ${reason}. Process is staying alive — no restart needed after login.`);
       this.ensureCredentialsWatcher();
+      // A login that landed BEFORE this pause (or before the watcher
+      // existed) produces no future fs event — reconcile now, not only on
+      // file changes.
+      this.scheduleCredentialsReconcile();
     });
 
     this.connection.on("auth:resumed", (previousReason) => {
@@ -522,32 +528,21 @@ export class ClientRuntime {
   }
 
   /**
-   * Bug 2 paused-mode recovery: watch credentials.json for changes. When
-   * the file content changes (operator ran the channel-aware login command), tell the
-   * connection to clear paused state. The connection's reconnect loop then
-   * picks up the new JWT via `ensureFreshAccessToken`.
+   * Bug 2 paused-mode recovery: watch credentials.json for changes. Every
+   * file event schedules a debounced reconciliation against the paused
+   * attempt's credential identity; on a real change the connection is told
+   * to clear paused state and its connect loop picks up the new JWT via
+   * `ensureFreshAccessToken`.
    */
   private ensureCredentialsWatcher(): void {
     if (this.credentialsWatcher) return;
-    const credentialsFile = join(defaultConfigDir(), "credentials.json");
+    const credentialsFile = credentialsFilePath();
     const watchDir = dirname(credentialsFile);
     if (!existsSync(watchDir)) return;
     try {
-      this.lastCredentialsSnapshot = this.readCredentialsSnapshot(credentialsFile);
       this.credentialsWatcher = watch(watchDir, (_evt, filename) => {
         if (filename && filename !== "credentials.json") return;
-        if (this.credentialsDebounce) clearTimeout(this.credentialsDebounce);
-        this.credentialsDebounce = setTimeout(() => {
-          this.credentialsDebounce = null;
-          const snapshot = this.readCredentialsSnapshot(credentialsFile);
-          if (snapshot && snapshot !== this.lastCredentialsSnapshot) {
-            this.lastCredentialsSnapshot = snapshot;
-            if (this.connection.isPaused()) {
-              this.output.status("", "credentials.json updated — clearing paused mode");
-              this.connection.clearPaused();
-            }
-          }
-        }, 250);
+        this.scheduleCredentialsReconcile();
       });
       // Synchronous setup is wrapped in try/catch above, but the FSWatcher can
       // still emit 'error' later; without a listener that would crash the
@@ -569,6 +564,50 @@ export class ClientRuntime {
     if (this.credentialsWatcher) {
       this.credentialsWatcher.close();
       this.credentialsWatcher = null;
+    }
+  }
+
+  private scheduleCredentialsReconcile(): void {
+    if (this.credentialsDebounce) clearTimeout(this.credentialsDebounce);
+    this.credentialsDebounce = setTimeout(() => {
+      this.credentialsDebounce = null;
+      this.reconcilePausedCredentials();
+    }, 250);
+  }
+
+  /**
+   * Resume paused mode only when the current credentials differ from the
+   * credential the paused attempt actually used. The attempt identity is
+   * read live from the connection, so a stale trigger can never act on an
+   * older attempt's identity or unpause a newer failure. Unchanged
+   * credentials stay parked: the server already rejected exactly this
+   * credential, so retrying it would only re-fail.
+   */
+  private reconcilePausedCredentials(): void {
+    const reason = this.connection.getPausedReason();
+    if (reason === null) return;
+    const attemptCredential = this.connection.getAuthAttemptCredential();
+    if (attemptCredential === null) return;
+    const current = this.currentCredentialForComparison(reason);
+    if (current === null || current === attemptCredential) return;
+    this.output.status("", "credentials.json updated — clearing paused mode");
+    this.connection.clearPaused();
+  }
+
+  /**
+   * Current credential in the same identity domain the connection recorded
+   * for the paused attempt: the access token for a handshake rejection, the
+   * raw credentials file for a token-provider failure.
+   */
+  private currentCredentialForComparison(reason: ClientPausedReason): string | null {
+    const raw = this.readCredentialsSnapshot(credentialsFilePath());
+    if (raw === null) return null;
+    if (reason !== "auth_rejected") return raw;
+    try {
+      const accessToken = (JSON.parse(raw) as { accessToken?: unknown }).accessToken;
+      return typeof accessToken === "string" ? accessToken : null;
+    } catch {
+      return null;
     }
   }
 
