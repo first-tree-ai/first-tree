@@ -105,15 +105,19 @@ let runtimeInstance: {
   unwatchAgentsDir: ReturnType<typeof vi.fn>;
   watchAgentsDir: ReturnType<typeof vi.fn>;
   onReconnect: ReturnType<typeof vi.fn>;
+  onAuthPaused: ReturnType<typeof vi.fn>;
   onRuntimeAuthStart: ReturnType<typeof vi.fn>;
   onProviderModelsList: ReturnType<typeof vi.fn>;
   sendProviderModelsResult: ReturnType<typeof vi.fn>;
   emitConnectionResilienceEvent: ReturnType<typeof vi.fn>;
+  isPaused: ReturnType<typeof vi.fn>;
 };
 let refresherInstance: {
   start: ReturnType<typeof vi.fn>;
   onReconnect: ReturnType<typeof vi.fn>;
   stop: ReturnType<typeof vi.fn>;
+  pause: ReturnType<typeof vi.fn>;
+  resume: ReturnType<typeof vi.fn>;
   isInteractive: ReturnType<typeof vi.fn>;
   beginInteractive: ReturnType<typeof vi.fn>;
   endInteractive: ReturnType<typeof vi.fn>;
@@ -235,10 +239,12 @@ beforeEach(() => {
       throw new Error("stop after watch");
     }),
     onReconnect: vi.fn(),
+    onAuthPaused: vi.fn(),
     onRuntimeAuthStart: vi.fn(),
     onProviderModelsList: vi.fn(),
     sendProviderModelsResult: vi.fn(),
     emitConnectionResilienceEvent: vi.fn(),
+    isPaused: vi.fn(() => false),
   };
   coreMocks.ClientRuntime.mockImplementation(() => runtimeInstance);
 
@@ -246,6 +252,8 @@ beforeEach(() => {
     start: vi.fn(async () => undefined),
     onReconnect: vi.fn(),
     stop: vi.fn(),
+    pause: vi.fn(),
+    resume: vi.fn(),
     isInteractive: vi.fn(() => false),
     beginInteractive: vi.fn(),
     endInteractive: vi.fn(),
@@ -1166,6 +1174,106 @@ describe("daemon start command", () => {
 
     expect(output()).toContain("skills upload pin check skipped: pin check failed as string");
     expect(output()).toContain("skills upload for nova skipped: agent skill upload failed as string");
+  });
+
+  it("gates capability refresh on auth pause, ungating only after a successful registration", async () => {
+    await expect(runStart(["--foreground"])).rejects.toMatchObject({ exitCode: 1 });
+
+    // The pause wiring must be attached before `runtime.start()` — an auth
+    // pause during the initial connect (dead refresh token at boot) fires
+    // before start resolves, and a late-registered listener would miss it.
+    expect(runtimeInstance.onAuthPaused).toHaveBeenCalledWith(expect.any(Function));
+    expect(runtimeInstance.onAuthPaused.mock.invocationCallOrder[0]).toBeLessThan(
+      runtimeInstance.start.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
+    // NOTE: the mock has no `onAuthResumed` — if start.ts wired it, every
+    // test here would throw. Fresh credentials alone must not ungate.
+
+    const onAuthPaused = runtimeInstance.onAuthPaused.mock.calls[0]?.[0] as () => void;
+    onAuthPaused();
+    expect(refresherInstance.pause).toHaveBeenCalledTimes(1);
+
+    // The gate opens only AFTER runtime.start() resolved (the initial
+    // registration): resume first, then start() — while gated, start() is a
+    // no-op by design.
+    expect(refresherInstance.resume).toHaveBeenCalledTimes(1);
+    expect(refresherInstance.start).toHaveBeenCalledTimes(1);
+    expect(refresherInstance.resume.mock.invocationCallOrder[0]).toBeGreaterThan(
+      runtimeInstance.start.mock.invocationCallOrder[0] ?? Number.NEGATIVE_INFINITY,
+    );
+    expect(refresherInstance.resume.mock.invocationCallOrder[0]).toBeLessThan(
+      refresherInstance.start.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
+
+    // Re-registration path: the onReconnect callback ungates THEN refreshes,
+    // in that order (an onReconnect on a still-gated refresher would no-op).
+    const onReconnect = runtimeInstance.onReconnect.mock.calls[0]?.[0] as () => void;
+    refresherInstance.resume.mockClear();
+    onReconnect();
+    expect(refresherInstance.resume).toHaveBeenCalledTimes(1);
+    expect(refresherInstance.onReconnect).toHaveBeenCalledTimes(1);
+    expect(refresherInstance.resume.mock.invocationCallOrder[0]).toBeLessThan(
+      refresherInstance.onReconnect.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
+  });
+
+  it("runs graceful shutdown when SIGTERM arrives during the pending auth-paused initial start", async () => {
+    const signalHandlers = new Map<string, () => void>();
+    const onSpy = vi.spyOn(process, "on").mockImplementation((event, listener) => {
+      if (event === "SIGINT" || event === "SIGTERM") {
+        signalHandlers.set(event, listener as () => void);
+      }
+      return process;
+    });
+    // runtime.start() stays pending — the connection is parked on auth pause.
+    let rejectStart!: (err: Error) => void;
+    runtimeInstance.start.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectStart = reject;
+        }),
+    );
+    // In production stop() → disconnect() aborts the parked connect, which
+    // rejects start() with the auth error. Mirror that causal link here.
+    runtimeInstance.stop.mockImplementationOnce(async () => {
+      rejectStart(new Error("Refresh token rejected by server."));
+    });
+    exitSpy.mockImplementation((() => undefined) as never);
+
+    try {
+      const start = runStart(["--foreground"]);
+      // Handlers are installed BEFORE the initial start() wait, so they
+      // exist even though startup is still parked.
+      await waitForAsyncWork(() => signalHandlers.has("SIGTERM"));
+
+      signalHandlers.get("SIGTERM")?.();
+      // The startup wait settles cleanly — no exit-1 startup failure.
+      await start;
+
+      expect(runtimeInstance.stop).toHaveBeenCalledTimes(1);
+      expect(refresherInstance.stop).toHaveBeenCalledTimes(1);
+      // Exactly one ownership release (the finally's is null-guarded).
+      expect(runtimeOwnershipRelease).toHaveBeenCalledTimes(1);
+      expect(coreMocks.registerClientRuntimeMarker.mock.results[0]?.value).toHaveBeenCalled();
+      // No Sentry startup error and no supervisor-triggering exit(1).
+      expect(clientMocks.captureClientException).not.toHaveBeenCalled();
+      expect(exitSpy).toHaveBeenCalledWith(0);
+      expect(exitSpy).not.toHaveBeenCalledWith(1);
+      expect(output()).not.toContain("Error: Refresh token rejected");
+    } finally {
+      onSpy.mockRestore();
+    }
+  });
+
+  it("keeps a paused start() rejection a failure when no shutdown was requested", async () => {
+    // Paused state alone is NOT shutdown evidence: without a signal, the
+    // rejection is a real startup failure and must keep failing loudly.
+    runtimeInstance.start.mockRejectedValueOnce(new Error("Refresh token rejected by server."));
+    runtimeInstance.isPaused.mockReturnValueOnce(true);
+
+    await expect(runStart(["--foreground"])).rejects.toMatchObject({ exitCode: 1 });
+
+    expect(output()).toContain("Error: Refresh token rejected by server.");
   });
 
   it("stringifies non-Error inline startup failures", async () => {

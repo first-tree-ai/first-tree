@@ -426,7 +426,7 @@ describe("ClientConnection — WebSocket edge coverage", () => {
     ).rejects.toThrow("socket not bound");
   });
 
-  it("covers non-Error initial connect failures and paused-after-backoff exit", async () => {
+  it("covers non-Error initial connect failures and paused-after-backoff parking", async () => {
     vi.useFakeTimers();
     const connection = await makeConnection();
     const internal = priv(connection);
@@ -436,14 +436,35 @@ describe("ClientConnection — WebSocket edge coverage", () => {
     });
     connection.on("error", (err) => errors.push(err.message));
 
+    let settled = false;
     const connectPromise = connection.connect();
-    const rejection = expect(connectPromise).rejects.toBe("plain connect failure");
+    const tracked = connectPromise.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
     await flushMicrotasks();
+    expect(errors).toEqual(["plain connect failure"]);
+
+    // A pause landing during the backoff sleep parks the loop at the top
+    // instead of throwing: the promise stays pending and no further attempts
+    // or error emits happen while parked.
     internal.pausedReason = "auth_rejected";
     await vi.advanceTimersByTimeAsync(1000);
-
-    await rejection;
+    await flushMicrotasks();
+    expect(settled).toBe(false);
+    expect(internal.openWebSocket).toHaveBeenCalledTimes(1);
     expect(errors).toEqual(["plain connect failure"]);
+
+    // disconnect() aborts the park; the pending connect rejects with the
+    // original (non-Error) failure.
+    const rejection = expect(connectPromise).rejects.toBe("plain connect failure");
+    await connection.disconnect();
+    await rejection;
+    await tracked;
   });
 
   it("covers non-Error rebind and reconnect catches", async () => {

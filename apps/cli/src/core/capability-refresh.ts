@@ -114,6 +114,18 @@ export class CapabilityRefresher {
   /** Consecutive polls with no observed state change — drives the backoff. */
   private idleAttempts = 0;
   private stopped = false;
+  /**
+   * Auth-paused gate (D5). While the connection sits in auth paused mode
+   * every upload attempt ends in a doomed `/auth/refresh` 401 — and because
+   * a failed upload resets the poll backoff, the refresher would otherwise
+   * hammer the server at the base cadence forever. `pause()` disarms the
+   * poll and blocks probes/uploads; `resume()` only ungates (actual work
+   * resumes via the next registration-driven {@link onReconnect}, never
+   * before the connection is back). Orthogonal to {@link stop}: `stopped`
+   * stays terminal — `resume()` must never revive a stopped refresher, and
+   * fresh auth credentials must not unblock one either.
+   */
+  private paused = false;
 
   constructor(deps: CapabilityRefresherDeps) {
     this.deps = deps;
@@ -131,6 +143,11 @@ export class CapabilityRefresher {
    * and later polls retry convergence.
    */
   async start(): Promise<void> {
+    // Terminal stop and the auth-paused gate both win over a startup call:
+    // a stopped refresher must never be revived by a late start(), and a
+    // paused one starts working only after the daemon ungates it via
+    // resume() (which the wiring calls only after a successful registration).
+    if (this.stopped || this.paused) return;
     if (this.snapshot) {
       try {
         await this.uploadIfChanged(this.snapshot);
@@ -167,6 +184,30 @@ export class CapabilityRefresher {
   }
 
   /**
+   * Gate all probe/upload work while the connection is auth-paused. Clears a
+   * pending poll timer; an in-flight probe is not cancelled but its late
+   * completion will neither upload nor re-arm (see runRefresh). No-op after
+   * {@link stop} — terminal shutdown wins.
+   */
+  pause(): void {
+    if (this.stopped) return;
+    this.paused = true;
+    this.clearPending();
+  }
+
+  /**
+   * Ungate after fresh credentials arrived (`auth:resumed`). Deliberately
+   * performs NO work by itself: `auth:resumed` fires before the
+   * reconnect/registration completes, and uploading before the clients row
+   * is re-established would just fail. The next registration-driven
+   * {@link onReconnect} owns the catch-up. No-op after {@link stop}.
+   */
+  resume(): void {
+    if (this.stopped) return;
+    this.paused = false;
+  }
+
+  /**
    * Latest known capability entry for a provider, or undefined. The runtime-auth
    * login flow reads this to preserve a provider's existing fields (version,
    * runtimeSource) while it attaches/clears a pending browser-auth marker.
@@ -187,10 +228,14 @@ export class CapabilityRefresher {
     const next: ClientCapabilities = { ...(this.snapshot ?? {}), [provider]: entry };
     this.snapshot = next;
     this.providerWriteVersions.set(provider, ++this.providerWriteVersion);
-    try {
-      await this.uploadIfChanged(next);
-    } catch (err) {
-      this.deps.log("⚠️", `capabilities upload skipped: ${message(err)}`);
+    // Local bookkeeping always advances (a login flow must not lose its
+    // result), but the wire is gated on auth-pause/stop like runRefresh is.
+    if (!this.paused && !this.stopped) {
+      try {
+        await this.uploadIfChanged(next);
+      } catch (err) {
+        this.deps.log("⚠️", `capabilities upload skipped: ${message(err)}`);
+      }
     }
     this.scheduleNext();
   }
@@ -230,8 +275,29 @@ export class CapabilityRefresher {
     return true;
   }
 
+  /**
+   * Attempt the deduped upload with the standard log lines. Resolves `true`
+   * when the upload FAILED (caller treats the snapshot as not-uploaded for
+   * backoff/poll-continuation bookkeeping).
+   */
+  private async attemptUpload(next: ClientCapabilities, modeLabel: string, refreshStartedAt: number): Promise<boolean> {
+    try {
+      const uploaded = await this.uploadIfChanged(next);
+      if (uploaded) {
+        this.deps.log(
+          "•",
+          `runtime capabilities re-probed (${modeLabel}) and uploaded in ${Date.now() - refreshStartedAt}ms`,
+        );
+      }
+      return false;
+    } catch (uploadErr) {
+      this.deps.log("⚠️", `capabilities upload skipped after ${Date.now() - refreshStartedAt}ms: ${message(uploadErr)}`);
+      return true;
+    }
+  }
+
   private async runRefresh(trigger: "startup" | "reconnect" | "poll"): Promise<void> {
-    if (this.stopped) return;
+    if (this.stopped || this.paused) return;
     if (this.inFlight) return; // a coincident reconnect is held in pendingReconnect
 
     this.inFlight = true;
@@ -283,22 +349,14 @@ export class CapabilityRefresher {
         // provider to `ok` but whose PATCH failed must NOT let the poll stop —
         // the server would otherwise stay on the stale degraded snapshot. The
         // upload failure resets the backoff so the retry is prompt.
-        let uploadFailed = false;
-        try {
-          const uploaded = await this.uploadIfChanged(next);
-          if (uploaded) {
-            this.deps.log(
-              "•",
-              `runtime capabilities re-probed (${modeLabel}) and uploaded in ${Date.now() - refreshStartedAt}ms`,
-            );
-          }
-        } catch (uploadErr) {
-          uploadFailed = true;
-          this.deps.log(
-            "⚠️",
-            `capabilities upload skipped after ${Date.now() - refreshStartedAt}ms: ${message(uploadErr)}`,
-          );
-        }
+        //
+        // D5: a pause/stop that landed while the probe ran makes this a late
+        // completion — skip the upload (a dead token would just 401 the
+        // server again) and count it as not-uploaded so the next
+        // registration-driven refresh re-publishes the snapshot. The local
+        // snapshot above still advances; only the wire is gated.
+        const uploadBlocked = this.paused || this.stopped;
+        const uploadFailed = uploadBlocked ? true : await this.attemptUpload(next, modeLabel, refreshStartedAt);
         // A reconnect, an observed state change, or a failed upload all warrant
         // a prompt next attempt; only an unchanged, fully-synced poll backs off.
         this.idleAttempts =
@@ -318,7 +376,7 @@ export class CapabilityRefresher {
 
     // A reconnect that landed while this refresh ran is drained now (in
     // reconnect mode), so its TTL/full re-probe is never skipped.
-    if (this.pendingReconnect && !this.stopped) {
+    if (this.pendingReconnect && !this.stopped && !this.paused) {
       void this.runRefresh("reconnect");
     }
   }
@@ -334,6 +392,9 @@ export class CapabilityRefresher {
   private scheduleNext(): void {
     this.clearPending();
     if (this.stopped) return;
+    // Auth-paused: stay disarmed. resume() ungates and the next
+    // registration-driven onReconnect() re-arms via its own runRefresh.
+    if (this.paused) return;
     if (!this.needsRefresh()) {
       this.idleAttempts = 0;
       return;

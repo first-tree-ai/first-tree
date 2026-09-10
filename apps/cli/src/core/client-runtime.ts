@@ -176,6 +176,22 @@ export class ClientRuntime {
   /** Callbacks fired after a WS RE-registration (reconnect), not the first
    * register. Used by the daemon to re-probe runtime-provider capabilities. */
   private readonly reconnectListeners: Array<() => void> = [];
+  /**
+   * Set when a `server:welcome` advertised a reconnect; cleared when the
+   * matching registration completes (`connected`) and the reconnect
+   * listeners fire. Keeps reconnect publication strictly behind the
+   * registration boundary.
+   */
+  private reconnectWelcomePending = false;
+  /**
+   * Whether any registration has completed since this runtime was created.
+   * The connection's own `isReconnect` welcome flag only means "not the
+   * first welcome ever" — welcomes from FAILED attempts (auth died before
+   * `client:registered`) also flip it, so without this gate the first
+   * SUCCESSFUL registration after transient failures would be mislabeled a
+   * reconnect and fire reconnect work during startup.
+   */
+  private hasRegisteredOnce = false;
   private readonly runtimeProviderRepairAttempts = new Map<string, number>();
 
   constructor(serverUrl: string, clientId: string, options: ClientRuntimeOptions = {}) {
@@ -270,12 +286,23 @@ export class ClientRuntime {
       void this.repairRuntimeProviderMismatch(agentId);
     });
 
-    // Fire reconnect listeners only on a RE-registration (the daemon re-probes
-    // runtime-provider capabilities then). `isReconnect` is false on the first
-    // welcome, so startup is not double-probed. Listener errors are swallowed —
-    // a re-probe failure must never disturb the connection.
+    // Fire reconnect listeners only on a completed RE-registration (the
+    // daemon re-probes runtime-provider capabilities then). The
+    // `server:welcome` frame only ADVERTISES a reconnect — it arrives before
+    // `auth:ok` / `client:registered`, so publishing reconnect work on it
+    // would run before the registration actually lands. Arm on the
+    // reconnect welcome, fire on `connected` (emitted on `client:registered`).
+    // `isReconnect` is false on the first welcome, so startup is not
+    // double-probed. Listener errors are swallowed — a re-probe failure must
+    // never disturb the connection.
     this.connection.on("server:welcome", (welcome) => {
-      if (!welcome.isReconnect) return;
+      if (welcome.isReconnect && this.hasRegisteredOnce) this.reconnectWelcomePending = true;
+    });
+    this.connection.on("connected", () => {
+      const wasReconnect = this.reconnectWelcomePending;
+      this.reconnectWelcomePending = false;
+      this.hasRegisteredOnce = true;
+      if (!wasReconnect) return;
       for (const cb of this.reconnectListeners) {
         try {
           cb();
@@ -293,6 +320,17 @@ export class ClientRuntime {
    */
   onReconnect(callback: () => void): void {
     this.reconnectListeners.push(callback);
+  }
+
+  /**
+   * Register a callback fired when the connection enters auth paused mode
+   * (refresh token rejected / server-side auth rejection). Used by the
+   * daemon to gate auth-dependent background work (capability refresh)
+   * while credentials are dead — its uploads would otherwise keep firing
+   * doomed `/auth/refresh` 401s.
+   */
+  onAuthPaused(callback: () => void): void {
+    this.connection.on("auth:paused", callback);
   }
 
   /**

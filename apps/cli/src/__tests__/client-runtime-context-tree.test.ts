@@ -414,9 +414,16 @@ describe("ClientRuntime context-tree wiring", () => {
     rt.onReconnect(reconnectStringBroken);
     const welcome = connectionListeners.get("server:welcome");
     if (!welcome) throw new Error("server:welcome listener missing");
+    const connected = connectionListeners.get("connected");
+    if (!connected) throw new Error("connected listener missing");
     welcome({ isReconnect: false });
+    connected();
     expect(reconnectOk).not.toHaveBeenCalled();
+    // A reconnect welcome only ARMS publication — the listeners fire on the
+    // registration boundary (`connected`), never on the welcome frame alone.
     welcome({ isReconnect: true });
+    expect(reconnectOk).not.toHaveBeenCalled();
+    connected();
     expect(reconnectOk).toHaveBeenCalled();
     expect(print.status).toHaveBeenCalledWith("⚠️", "reconnect handler error: probe failed");
     expect(print.status).toHaveBeenCalledWith("⚠️", "reconnect handler error: probe string failed");
