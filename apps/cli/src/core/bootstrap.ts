@@ -130,11 +130,22 @@ function parseRetryAfterMs(header: string | null): number | null {
  * round-trip and race to write `credentials.json`. Share one in-flight
  * request so N concurrent callers resolve from a single HTTP call.
  *
+ * The flight carries its credential snapshot: callers only join when their
+ * resolved authority (home + server URL + refresh token) AND access-token
+ * snapshot match. A re-login that lands while an old refresh is still
+ * pending — even one that keeps the same refresh token and only rewrites
+ * the access token — gets its own flight immediately, and the old flight
+ * settles fenced-off in the background — it can never clear or poison the
+ * new one (every slot handoff compares object identity, never recency).
+ *
  * Each caller can still carry its own deadline. The underlying request is
  * aborted once every waiter has abandoned it; one short-lived caller never
  * aborts a refresh that another live caller still needs.
  */
 type InflightRefresh = {
+  authority: CredentialAuthority;
+  /** Access-token snapshot from when the flight started (late-write fencing). */
+  accessTokenSnapshot: string;
   controller: AbortController;
   promise: Promise<string>;
   settled: boolean;
@@ -142,6 +153,91 @@ type InflightRefresh = {
 };
 
 let inflightRefresh: InflightRefresh | null = null;
+
+/**
+ * Thrown when a refresh settles after its credential authority was replaced
+ * (re-login, logout, home switch) while the request was in flight.
+ * Deliberately NOT an {@link AuthRefreshFailedError}: the outcome belongs to
+ * the dead authority and must never trigger the terminal fail-stop paths
+ * (e.g. the WS reconnect pause) that a real 401 on the CURRENT credentials
+ * causes. Callers classify it like any transient error and retry against
+ * the new credentials normally.
+ */
+export class AuthRefreshSupersededError extends Error {
+  constructor(message?: string) {
+    super(message ?? "Credentials changed while a token refresh was in flight; retry with the new credentials.");
+    this.name = "AuthRefreshSupersededError";
+  }
+}
+
+/**
+ * Credential authority identity for the refresh flight/latch below: the
+ * resolved credentials file path (FIRST_TREE_HOME-derived) plus server URL
+ * plus the refresh token. Two homes holding byte-identical credentials are
+ * still distinct authorities, so a terminal failure in one can never
+ * suppress the other.
+ */
+type CredentialAuthority = {
+  credentialsPath: string;
+  serverUrl: string;
+  refreshToken: string;
+};
+
+function authorityFor(creds: StoredCredentials): CredentialAuthority {
+  return { credentialsPath: credentialsPath(), serverUrl: creds.serverUrl, refreshToken: creds.refreshToken };
+}
+
+function sameAuthority(a: CredentialAuthority, b: CredentialAuthority): boolean {
+  return a.credentialsPath === b.credentialsPath && a.serverUrl === b.serverUrl && a.refreshToken === b.refreshToken;
+}
+
+/**
+ * Terminal 401 latch. A 401 from `/auth/refresh` means the refresh token is
+ * expired or revoked — retrying the same credential authority can never
+ * succeed, yet every caller (WS reconnect loop, SDK requests, proactive
+ * refresh) used to fire its own doomed HTTP round-trip (synthetic reproduction:
+ * 20 sequential callers -> 20 refreshes). After the first 401 we latch the
+ * failure and rethrow it without touching the network.
+ *
+ * Keyed to the full credential authority (home + server URL + refresh
+ * token): a re-login — or a home switch — never matches the latched entry,
+ * so recovery with new credentials is immediate. Bounded state: a single
+ * entry, replaced by each new terminal failure; an entry whose authority
+ * was superseded simply never matches again (it is never cleared by
+ * mismatched lookups, so an old authority's completion cannot poison the
+ * new authority's latch either). Never logged — it identifies credential
+ * material.
+ */
+let terminalRefreshFailure: { authority: CredentialAuthority; message: string } | null = null;
+
+function latchedRefreshFailure(authority: CredentialAuthority): AuthRefreshFailedError | null {
+  if (!terminalRefreshFailure || !sameAuthority(terminalRefreshFailure.authority, authority)) return null;
+  return new AuthRefreshFailedError(terminalRefreshFailure.message);
+}
+
+function latchTerminalRefreshFailure(authority: CredentialAuthority, message: string): void {
+  terminalRefreshFailure = { authority, message };
+}
+
+/**
+ * Fencing for late completions: the credentials file may have been replaced
+ * (re-login, logout, home switch — or a concurrent login/refresh that
+ * already persisted a newer access token for the same refresh authority)
+ * while this request was in flight. Compares the full authority plus the
+ * access-token snapshot taken when the request started; any drift means the
+ * in-flight result is obsolete and must neither be persisted nor allowed to
+ * latch/return anything terminal.
+ */
+function authorityFence(request: { authority: CredentialAuthority; accessTokenSnapshot: string }): boolean {
+  const current = loadCredentials();
+  if (!current) return true;
+  return (
+    credentialsPath() !== request.authority.credentialsPath ||
+    current.serverUrl !== request.authority.serverUrl ||
+    current.refreshToken !== request.authority.refreshToken ||
+    current.accessToken !== request.accessTokenSnapshot
+  );
+}
 
 /** Default freshness window for HTTP callers: refresh if token expires within 30s. */
 const DEFAULT_MIN_VALIDITY_MS = 30_000;
@@ -177,22 +273,40 @@ export async function ensureFreshAccessToken(opts?: { minValidityMs?: number; si
     return creds.accessToken;
   }
 
-  if (!inflightRefresh) {
-    inflightRefresh = startRefresh(creds);
+  // A previous refresh with this exact credential authority already got a
+  // terminal 401: fail fast instead of adding another doomed HTTP call.
+  const authority = authorityFor(creds);
+  const latched = latchedRefreshFailure(authority);
+  if (latched) throw latched;
+
+  // Join the active flight only when it carries the exact same credential
+  // snapshot (authority + access token). A re-login that lands while an old
+  // refresh is still pending — even one that keeps the same refresh token
+  // and only rewrites the access token — starts its own flight immediately
+  // instead of inheriting the superseded flight's outcome.
+  if (
+    !inflightRefresh ||
+    inflightRefresh.settled ||
+    !sameAuthority(inflightRefresh.authority, authority) ||
+    inflightRefresh.accessTokenSnapshot !== creds.accessToken
+  ) {
+    inflightRefresh = startRefresh(creds, authority);
   }
   return waitForRefresh(inflightRefresh, opts?.signal);
 }
 
-function startRefresh(creds: StoredCredentials): InflightRefresh {
+function startRefresh(creds: StoredCredentials, authority: CredentialAuthority): InflightRefresh {
   const controller = new AbortController();
   const refresh: InflightRefresh = {
+    authority,
+    accessTokenSnapshot: creds.accessToken,
     controller,
     promise: Promise.resolve(""),
     settled: false,
     waiters: 0,
   };
 
-  refresh.promise = performRefresh(creds, controller.signal).finally(() => {
+  refresh.promise = performRefresh(creds, authority, controller.signal).finally(() => {
     refresh.settled = true;
     if (inflightRefresh === refresh) {
       inflightRefresh = null;
@@ -201,7 +315,11 @@ function startRefresh(creds: StoredCredentials): InflightRefresh {
   return refresh;
 }
 
-async function performRefresh(creds: StoredCredentials, cancellation: AbortSignal): Promise<string> {
+async function performRefresh(
+  creds: StoredCredentials,
+  authority: CredentialAuthority,
+  cancellation: AbortSignal,
+): Promise<string> {
   const signal = AbortSignal.any([cancellation, AbortSignal.timeout(10_000)]);
   const res = await cliFetch(`${creds.serverUrl}/api/v1/auth/refresh`, {
     method: "POST",
@@ -210,11 +328,24 @@ async function performRefresh(creds: StoredCredentials, cancellation: AbortSigna
     signal,
   });
 
+  // A caller abort (or the internal 10s timeout) must never latch a 401 or
+  // save a 200 — even when the transport or a slow body ignores the abort.
+  signal.throwIfAborted();
+
   if (res.status === 401) {
-    throw new AuthRefreshFailedError(
+    const message =
       `Refresh token rejected by server. Re-run \`${channelConfig.binName} login <code>\` ` +
-        "(get a fresh token from the Web Computers page → New Connection).",
-    );
+      "(get a fresh token from the Web Computers page → New Connection).";
+    // Fence BEFORE latching or returning anything terminal: if the authority
+    // was replaced while this request was in flight, the 401 belongs to dead
+    // credentials and must not pause the new login.
+    if (authorityFence({ authority, accessTokenSnapshot: creds.accessToken })) {
+      throw new AuthRefreshSupersededError();
+    }
+    // Terminal for this exact credential authority: subsequent callers fail
+    // fast without hitting the network until the credentials change.
+    latchTerminalRefreshFailure(authority, message);
+    throw new AuthRefreshFailedError(message);
   }
   if (res.status === 429) {
     const retryAfterMs = parseRetryAfterMs(res.headers.get("retry-after")) ?? 30_000;
@@ -225,6 +356,17 @@ async function performRefresh(creds: StoredCredentials, cancellation: AbortSigna
   }
 
   const data = (await res.json()) as { accessToken: string; refreshToken?: string };
+  // Same cancellation fence on the success path, before any side effect.
+  signal.throwIfAborted();
+  if (authorityFence({ authority, accessTokenSnapshot: creds.accessToken })) {
+    // The credential snapshot changed (re-login / logout / home switch)
+    // while this request was in flight. The replacement may belong to a
+    // DIFFERENT user, and this caller may carry the old user's agent ids /
+    // request context — credentials from another authority are never handed
+    // to the old caller. Fail non-terminally; a new caller independently
+    // reads the new credentials. No nested refresh is started here.
+    throw new AuthRefreshSupersededError();
+  }
   saveCredentials({
     ...creds,
     accessToken: data.accessToken,

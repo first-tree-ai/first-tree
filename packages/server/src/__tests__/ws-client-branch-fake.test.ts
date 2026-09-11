@@ -187,7 +187,7 @@ describe("Agent client WS branch fakes", () => {
     vi.restoreAllMocks();
   });
 
-  it("swallows auth rejection sends when the socket has already closed", async () => {
+  it("ignores frames arriving on an already-closed socket (no retry-close)", async () => {
     const { handler } = routeHarness(queuedDb([]));
     const socket = new FakeSocket();
     await handler(socket, { headers: { "user-agent": "fake" }, ip: "127.0.0.1" });
@@ -195,11 +195,13 @@ describe("Agent client WS branch fakes", () => {
     socket.readyState = socket.CLOSED;
     await emitMessage(socket, { type: "not-auth" });
 
-    expect(socket.closes).toContainEqual({ code: 4401, reason: "auth rejected" });
+    // Dispatch skips dead sockets entirely: no rejection frame is produced
+    // and the gate never attempts a second close on a dead socket.
+    expect(socket.closes).toEqual([]);
     expect(socket.sent).toEqual([]);
   });
 
-  it("swallows expired-auth sends when the socket has already closed", async () => {
+  it("ignores expired auth frames arriving on an already-closed socket", async () => {
     const { handler } = routeHarness(queuedDb([]));
     const socket = new FakeSocket();
     await handler(socket, { headers: { "user-agent": "fake" }, ip: "127.0.0.1" });
@@ -207,9 +209,10 @@ describe("Agent client WS branch fakes", () => {
     socket.readyState = socket.CLOSED;
     const expired = await signAccess({ exp: Math.floor(Date.now() / 1000) - 1 });
     await emitMessage(socket, { type: "auth", token: expired });
-    await waitUntil(() => socket.closes.length > 0);
+    // Give the (skipped) dispatch a chance to misbehave.
+    await new Promise((resolve) => setTimeout(resolve, 25));
 
-    expect(socket.closes).toContainEqual({ code: 4401, reason: "auth expired" });
+    expect(socket.closes).toEqual([]);
     expect(socket.sent).toEqual([]);
   });
 

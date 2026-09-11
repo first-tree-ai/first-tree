@@ -426,7 +426,7 @@ describe("ClientConnection — WebSocket edge coverage", () => {
     ).rejects.toThrow("socket not bound");
   });
 
-  it("covers non-Error initial connect failures and paused-after-backoff exit", async () => {
+  it("covers non-Error initial connect failures and paused-after-backoff parking", async () => {
     vi.useFakeTimers();
     const connection = await makeConnection();
     const internal = priv(connection);
@@ -436,14 +436,35 @@ describe("ClientConnection — WebSocket edge coverage", () => {
     });
     connection.on("error", (err) => errors.push(err.message));
 
+    let settled = false;
     const connectPromise = connection.connect();
-    const rejection = expect(connectPromise).rejects.toBe("plain connect failure");
+    const tracked = connectPromise.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
     await flushMicrotasks();
+    expect(errors).toEqual(["plain connect failure"]);
+
+    // A pause landing during the backoff sleep parks the loop at the top
+    // instead of throwing: the promise stays pending and no further attempts
+    // or error emits happen while parked.
     internal.pausedReason = "auth_rejected";
     await vi.advanceTimersByTimeAsync(1000);
-
-    await rejection;
+    await flushMicrotasks();
+    expect(settled).toBe(false);
+    expect(internal.openWebSocket).toHaveBeenCalledTimes(1);
     expect(errors).toEqual(["plain connect failure"]);
+
+    // disconnect() aborts the park; the pending connect rejects with the
+    // original (non-Error) failure.
+    const rejection = expect(connectPromise).rejects.toBe("plain connect failure");
+    await connection.disconnect();
+    await rejection;
+    await tracked;
   });
 
   it("covers non-Error rebind and reconnect catches", async () => {
@@ -854,5 +875,49 @@ describe("ClientConnection — WebSocket edge coverage", () => {
         .map((raw) => JSON.parse(raw) as { type?: string; entryId?: number })
         .filter((message) => message.type === "inbox:ack"),
     ).toEqual([]);
+  });
+  it("does not let a retired attempt's timer close a successor waiting for its token", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-10T00:00:00Z"));
+    let releaseSecond: (token: string) => void = () => {};
+    const getAccessToken = vi
+      .fn()
+      .mockResolvedValueOnce(makeJwt({ exp: Math.floor(Date.now() / 1000) + 75 }))
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            releaseSecond = resolve;
+          }),
+      )
+      .mockResolvedValue(makeJwt({ exp: Math.floor(Date.now() / 1000) + 3600 }));
+    const connection = await makeConnection({ getAccessToken });
+    connection.on("error", () => {});
+    const internal = priv(connection);
+    const firstAttempt = internal.openWebSocket();
+    const first = FakeWebSocket.instances[0];
+    if (!first) throw new Error("missing first socket");
+    const firstFailure = expect(firstAttempt).rejects.toThrow("WebSocket connect timeout");
+    first.emitOpen();
+    await flushMicrotasks();
+    expect(first.sent).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await firstFailure;
+    const secondAttempt = internal.openWebSocket().catch(() => {});
+    const second = FakeWebSocket.instances[1];
+    if (!second) throw new Error("missing second socket");
+    second.emitOpen();
+    await flushMicrotasks();
+    first.emit("close", 1006);
+    try {
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(getAccessToken).toHaveBeenCalledTimes(2);
+      expect(second.closeCalls).toHaveLength(0);
+    } finally {
+      second.close(1000, "test cleanup");
+      releaseSecond("synthetic-late-token");
+      await secondAttempt;
+      await connection.disconnect();
+      internal.clearTimers();
+    }
   });
 });

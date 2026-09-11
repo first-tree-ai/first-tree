@@ -136,8 +136,16 @@ describe("logger ErrorSink bridging", () => {
     applyLoggerConfig({ level: "trace", format: "json", bridgeToSpanLevel: "error" });
     const { calls, restore } = installSpySink();
 
-    // Object whose JSON will exceed MAX_JSON_LEN (8192)
-    const big = { items: Array.from({ length: 1000 }, (_, i) => ({ id: i, data: "x".repeat(50) })) };
+    // Object whose JSON will exceed MAX_JSON_LEN (8192) so the per-field
+    // truncation is exercised, while the whole log record stays comfortably
+    // below the output layer's 64 KiB whole-record cap — above that cap the
+    // record is intentionally replaced before parsing/bridging (covered by
+    // the shared logger-output-bounds tests, not by this one).
+    const big = { items: Array.from({ length: 200 }, (_, i) => ({ id: i, data: "x".repeat(50) })) };
+    const fieldJson = JSON.stringify(big);
+    expect(fieldJson.length).toBeGreaterThan(8192);
+    // >2x safety margin: the full record adds only ~200 bytes of envelope.
+    expect(fieldJson.length).toBeLessThan(32 * 1024);
     createLogger("M").error({ state: big }, "bulky state");
 
     expect(calls).toHaveLength(1);

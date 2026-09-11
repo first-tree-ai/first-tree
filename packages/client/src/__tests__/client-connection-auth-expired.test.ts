@@ -165,8 +165,23 @@ describe("ClientConnection — auth:expired reconnect", () => {
     connection.on("reconnecting", () => events.push("reconnecting"));
     connection.on("error", () => {});
 
-    await expect(connection.connect()).rejects.toThrow();
+    // D1: the initial connect PARKS on auth pause instead of rejecting —
+    // rejecting used to push the daemon into process.exit and the
+    // supervisor's ~10s restart loop (staging auth-failure storm).
+    let settled = false;
+    const connectPromise = connection.connect();
+    const tracked = connectPromise.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
 
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(settled).toBe(false);
+    expect(connection.isPaused()).toBe(true);
     // Deterministic assertion: initial-handshake rejection must never schedule
     // a reconnect (wasRegistered is false at close). No need to wait on wall time.
     expect(events).not.toContain("reconnecting");
@@ -174,5 +189,7 @@ describe("ClientConnection — auth:expired reconnect", () => {
     expect(connection.isConnected).toBe(false);
 
     await connection.disconnect();
+    await expect(connectPromise).rejects.toThrow();
+    await tracked;
   }, 10_000);
 });

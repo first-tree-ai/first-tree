@@ -125,6 +125,9 @@ importers:
       '@types/semver':
         specifier: ^7.5.8
         version: 7.7.1
+      '@types/ws':
+        specifier: 8.18.1
+        version: 8.18.1
       '@vitest/coverage-v8':
         specifier: 3.2.4
         version: 3.2.4(vitest@3.2.4(@types/debug@4.1.13)(@types/node@22.19.15)(happy-dom@20.9.0)(jiti@2.6.1)(lightningcss@1.32.0)(tsx@4.21.0)(yaml@2.8.3))

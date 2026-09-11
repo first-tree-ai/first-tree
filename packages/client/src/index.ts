@@ -199,6 +199,7 @@ export { CHILD_CATEGORIES, getChildProcessRegistry } from "./runtime/child-proce
 export type { CliBinding } from "./runtime/cli-binding.js";
 export { getCliBinding, setCliBinding } from "./runtime/cli-binding.js";
 export type {
+  AuthAttemptCredential,
   BoundAgent,
   ClientConnectionConfig,
   ProviderModelsListCommand,

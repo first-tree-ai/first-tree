@@ -49,7 +49,13 @@ export function attachClientWsConnection(
   const handleSessionFrame = createSessionFrameHandler(app, socket, notifier, instanceId, context);
   auth.start();
 
+  // Once the socket is gone (peer close, auth close, server shutdown) no
+  // inbound frame may be dispatched: the auth gate is terminal and the
+  // session handlers would act on a dead connection.
+  let socketClosed = false;
+
   socket.on("message", async (raw) => {
+    if (socketClosed || socket.readyState !== socket.OPEN) return;
     let msg: unknown;
     try {
       msg = JSON.parse(String(raw));
@@ -109,7 +115,9 @@ export function attachClientWsConnection(
   });
 
   socket.on("close", (closeCode?: number) => {
+    socketClosed = true;
     endWsConnectionSpan(socket, closeCode);
+    auth.handleClose();
     context.close();
   });
 }

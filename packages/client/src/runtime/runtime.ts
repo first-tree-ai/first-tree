@@ -1,4 +1,4 @@
-import type { UpdateAttempt } from "@first-tree/shared";
+import type { ClientPausedReason, UpdateAttempt } from "@first-tree/shared";
 import { createLogger, type pino } from "../cloud/observability/logger.js";
 import type { AccessTokenProvider } from "../cloud/sdk.js";
 import { AgentSlot } from "./agent-slot.js";
@@ -15,6 +15,11 @@ export type AgentRuntimeOptions = {
    * every WS handshake and every SDK request.
    */
   getAccessToken: AccessTokenProvider;
+  /**
+   * Notify the host when authentication needs new credentials. After updating
+   * its token provider, the host calls resumeAfterCredentialsChange().
+   */
+  onAuthPaused?: (reason: ClientPausedReason, error: Error) => void | Promise<void>;
   /**
    * Instance-level readonly handler factory map. Standalone runtimes must
    * supply this explicitly — there is no process-global handler registry.
@@ -83,6 +88,14 @@ export class AgentRuntime {
     // failures) to operators. ClientConnection's own reconnect loop handles
     // recovery; a process-wide crash guard lives in ClientConnection itself.
     this.clientConnection.on("error", (err) => this.logger.error({ err }, "client connection error"));
+    this.clientConnection.on("auth:paused", (reason, error) => {
+      this.logger.warn({ reason }, "authentication paused — update credentials and call resumeAfterCredentialsChange");
+      // Host observers may be asynchronous; neither sync throws nor rejected
+      // promises may interrupt the connection's pause/cleanup transition.
+      void Promise.resolve()
+        .then(() => options.onAuthPaused?.(reason, error))
+        .catch((err) => this.logger.error({ err }, "auth pause callback failed"));
+    });
 
     for (const [name, agentConfig] of Object.entries(this.config.agents)) {
       // Own-key only: a plain `{}` map still inherits Object.prototype, so
@@ -132,6 +145,16 @@ export class AgentRuntime {
     return { activeCount, lastActivityMs };
   }
 
+  getPausedReason(): ClientPausedReason | null {
+    return this.clientConnection.getPausedReason();
+  }
+
+  /** Explicit host recovery; fresh credentials do not count as registration. Stop stays terminal. */
+  resumeAfterCredentialsChange(): void {
+    if (!this.stopping) this.clientConnection.clearPaused();
+  }
+
+  /** Stays pending during auth pause; the host must supply credentials and resume, or stop. */
   async start(): Promise<void> {
     // Attach before connecting so the first welcome frame on a stale Client
     // is acted on rather than missed until the next reconnect.
@@ -214,6 +237,7 @@ export class AgentRuntime {
   }
 
   async stop(reason?: string): Promise<void> {
+    this.stopping = true;
     this.updateManager?.dispose();
     this.updateManager = null;
     await Promise.allSettled(this.slots.map((slot) => slot.stop(reason)));

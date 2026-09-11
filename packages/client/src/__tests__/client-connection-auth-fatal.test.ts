@@ -8,9 +8,14 @@ import { ClientConnection } from "../runtime/client-connection.js";
  *
  *   1. Refresh token expired → `getAccessToken` throws; client previously
  *      thrashed at 1Hz forever, burning CPU and log volume. The fix:
- *      surface `auth:fatal` on `AuthRefreshFailedError`, mark closing,
- *      stop the reconnect loop. The CLI consumer then exits 75 so
- *      systemd/launchd applies its restart backoff.
+ *      surface `auth:fatal`/`auth:paused` on `AuthRefreshFailedError` and
+ *      stop the reconnect loop. The initial-connect path then used to
+ *      THROW out of `connect()` — which pushed the CLI into process.exit
+ *      and let systemd/launchd restart it into the same dead credentials
+ *      every ~10s (the staging auth-failure storm). `connect()` now parks
+ *      while paused and only resolves after `clearPaused()` + a successful
+ *      registration; these tests pin both halves (park, then prompt abort
+ *      on disconnect).
  *
  *   2. The 1Hz cadence itself was caused by `reconnectAttempt = 0` on
  *      `ws.on("open")` — a TCP-level success was treated as application
@@ -40,7 +45,7 @@ describe("ClientConnection — auth-fatal + reconnect backoff regressions", () =
     await new Promise<void>((resolve) => httpServer.close(() => resolve()));
   });
 
-  it("emits auth:fatal and stops reconnecting when getAccessToken throws AuthRefreshFailedError", async () => {
+  it("parks the initial connect (auth:fatal) instead of throwing when getAccessToken throws AuthRefreshFailedError", async () => {
     // Server accepts the WS but the client never gets that far — its first
     // call to getAccessToken throws synthetically, the same shape the
     // command-layer's bootstrap throws on a real `/auth/refresh` 401.
@@ -72,12 +77,23 @@ describe("ClientConnection — auth-fatal + reconnect backoff regressions", () =
     // fail the run.
     connection.on("error", () => {});
 
-    await expect(connection.connect()).rejects.toThrow(/Refresh token/);
+    let settled = false;
+    const connectPromise = connection.connect();
+    const tracked = connectPromise.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
 
-    // Give the close handler one tick to settle (it runs in the WS
-    // close-event microtask), then assert no reconnect was scheduled.
-    await new Promise((resolve) => setTimeout(resolve, 100));
-
+    // The connect promise must NOT reject into the consumer anymore — it
+    // parks silently while paused. A throw here is what used to push the
+    // daemon into process.exit and the supervisor's ~10s restart loop.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(settled).toBe(false);
+    expect(connection.isPaused()).toBe(true);
     expect(events).toContain("auth:fatal");
     expect(events).not.toContain("reconnecting");
     // The pre-fix bug spammed sockets at 1Hz; assert we opened **one** and
@@ -85,7 +101,11 @@ describe("ClientConnection — auth-fatal + reconnect backoff regressions", () =
     // reconnect after an unrecoverable auth error.
     expect(socketCount).toBeLessThanOrEqual(1);
 
+    // disconnect() aborts the park promptly; the pending connect rejects
+    // with the original auth error.
     await connection.disconnect();
+    await expect(connectPromise).rejects.toThrow(/Refresh token/);
+    await tracked;
   }, 10_000);
 
   it("does not collapse exponential backoff to 1Hz when the auth phase fails after ws.open", async () => {

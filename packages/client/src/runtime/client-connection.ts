@@ -120,6 +120,11 @@ type PendingSessionEvent = {
   reject: (err: Error) => void;
 };
 
+/** Credential identity from the live attempt; never log or persist this value. */
+export type AuthAttemptCredential =
+  | { readonly kind: "access_token"; readonly value: string }
+  | { readonly kind: "credential_snapshot"; readonly value: string };
+
 export type ClientConnectionConfig = {
   serverUrl: string;
   /** Stable per-machine client identifier. Generated if omitted. */
@@ -132,6 +137,16 @@ export type ClientConnectionConfig = {
    * after reconnecting.
    */
   getAccessToken: AccessTokenProvider;
+  /**
+   * Optional synchronous snapshot of the consumer's credential store (e.g.
+   * raw credentials.json content), treated as an opaque identity string.
+   * Read once before each token-provider invocation; when the provider
+   * fails terminally (no token is ever sent), the snapshot becomes the
+   * attempt identity exposed via {@link getAuthAttemptCredential} so a
+   * paused consumer can tell "credentials changed since the failed
+   * attempt" apart from "unchanged".
+   */
+  getCredentialsSnapshot?: () => string | null;
   /**
    * Optional `User-Agent` string forwarded to every per-agent SDK created by
    * `agent:bound`. Distinct from `sdkVersion` (which is the value advertised
@@ -507,6 +522,7 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
   private readonly sdkVersion: string | undefined;
   private readonly userAgent: string | undefined;
   private readonly getAccessToken: AccessTokenProvider;
+  private readonly getCredentialsSnapshot: (() => string | null) | undefined;
   private readonly getLastUpdateAttempt: (() => UpdateAttempt | null) | undefined;
   private readonly heartbeatIntervalMs: number;
   private readonly heartbeatTimeoutMs: number;
@@ -534,6 +550,13 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
    * tick to notice `closing`.
    */
   private connectAbort: AbortController | null = null;
+  /**
+   * True while {@link connect}'s initial-connect loop is running. Lets
+   * {@link clearPaused} tell who owns the retry: the parked connect loop
+   * wakes itself on `auth:resumed`, so arming a second reconnect timer
+   * would open duplicate sockets / double-register the client.
+   */
+  private connectActive = false;
   /**
    * If the most recent refresh attempt was rate-limited (HTTP 429), the
    * server-suggested wait in ms — consumed by the next `scheduleReconnect`
@@ -568,6 +591,17 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
    * sends ahead of `auth:ok`.
    */
   private serverSupportsSessionResetV1 = false;
+  /**
+   * Identity of the credential used by the latest live auth attempt: the
+   * access token actually sent in the handshake (post-refresh — a
+   * successful provider refresh may rotate both tokens), or the
+   * pre-provider credential-store snapshot when the provider failed before
+   * any token was sent. Recorded only behind the retired-attempt fences,
+   * so a stale provider completion can never overwrite a newer attempt's
+   * identity. The kind identifies how to compare current credentials with
+   * the ones that failed.
+   */
+  private authAttemptCredential: AuthAttemptCredential | null = null;
   /**
    * Last handshake error, stashed for the `close` handler to surface a typed
    * reason (e.g. {@link ClientOrgMismatchError}) instead of a generic
@@ -618,6 +652,7 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
     this.sdkVersion = config.sdkVersion;
     this.userAgent = config.userAgent;
     this.getAccessToken = config.getAccessToken;
+    this.getCredentialsSnapshot = config.getCredentialsSnapshot;
     this.getLastUpdateAttempt = config.getLastUpdateAttempt;
     this.heartbeatIntervalMs = config.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS;
     this.heartbeatTimeoutMs = config.heartbeatTimeoutMs ?? HEARTBEAT_TIMEOUT_MS;
@@ -667,6 +702,27 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
   }
 
   /**
+   * Identity of the credential used by the latest live auth attempt — the
+   * token sent in the handshake, or the consumer-supplied credential
+   * snapshot when the token provider failed terminally. Meaningful while
+   * paused: compare against the current credential store to resume only on
+   * a real change.
+   */
+  getAuthAttemptCredential(): AuthAttemptCredential | null {
+    return this.authAttemptCredential;
+  }
+
+  /** Consumer snapshot hook, tolerated if it throws (disk hiccups). */
+  private readCredentialsSnapshot(): AuthAttemptCredential | null {
+    try {
+      const value = this.getCredentialsSnapshot?.();
+      return value == null ? null : { kind: "credential_snapshot", value };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Clear paused mode and kick off a reconnect attempt. Intended to be
    * called by the consumer's credentials-file watcher after the operator
    * runs `<binName> login <new-token>` (which writes a fresh JWT to
@@ -682,7 +738,11 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
     );
     this.emit("auth:resumed", prev);
     this.emit("resilience.connection.resumed", { previousReason: prev });
-    if (!this.closing && !this.isConnected) {
+    // Single reconnect owner: while connect()'s initial loop is alive it
+    // wakes itself from the `auth:resumed` above and retries on its own —
+    // arming our own timer here would open a duplicate socket and
+    // double-register the client.
+    if (!this.closing && !this.isConnected && !this.connectActive) {
       this.scheduleReconnect();
     }
   }
@@ -1174,29 +1234,55 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
    * Bring up the socket, retrying transient handshake failures with the same
    * exponential schedule as {@link scheduleReconnect}. Resolves once the
    * server has acknowledged `client:register`; rejects only when something
-   * unrecoverable has flipped `closing` (auth:fatal, register:rejected for
-   * user/org mismatch). Without this loop, a temporary DNS hiccup at startup
-   * propagated up to `client-runtime.start` and exited the process — which
-   * leaned on systemd's restart to recover instead of the in-process backoff
-   * the live reconnect path already uses.
+   * unrecoverable has flipped `closing` (register:rejected for user/org
+   * mismatch, or {@link disconnect} aborting the loop). Without this loop, a
+   * temporary DNS hiccup at startup propagated up to `client-runtime.start`
+   * and exited the process — which leaned on systemd's restart to recover
+   * instead of the in-process backoff the live reconnect path already uses.
+   *
+   * Paused mode (Bug 2, D1): when the auth layer enters paused mode
+   * (`auth_rejected` / `auth_refresh_failed`) the loop PARKS instead of
+   * throwing. Throwing pushed the failure out to the CLI, which exited and
+   * let systemd/launchd restart the whole process every ~10s — each boot
+   * re-fired doomed `/auth/refresh` POSTs plus a wasted WS handshake (as
+   * reproduced with a revoked token), and no consumer ever re-invoked `connect()`
+   * to make the throw recoverable. Parking keeps the promise pending with
+   * zero network activity until the consumer's credentials watcher calls
+   * {@link clearPaused} (`auth:resumed` wakes the loop) or {@link disconnect}
+   * aborts it. Registration/readiness is never signalled from the park — the
+   * promise resolves only on a real `client:registered`.
    */
   async connect(): Promise<void> {
     this.closing = false;
-    this.connectAbort = new AbortController();
+    const connectAbort = new AbortController();
+    this.connectAbort = connectAbort;
+    this.connectActive = true;
     let attempt = 0;
+    let lastError: unknown = new Error("Client connection closed before ready");
     try {
       while (true) {
+        if (this.pausedReason !== null) {
+          this.wsLogger.debug(
+            { pausedReason: this.pausedReason },
+            "initial connect paused — awaiting fresh credentials",
+          );
+          await this.waitForPausedResume(connectAbort.signal);
+          if (this.closing) throw lastError;
+          // Operator recovered — retry immediately with the fresh credentials
+          // and start the transient backoff schedule fresh.
+          attempt = 0;
+          continue;
+        }
         try {
           await this.openWebSocket();
           return;
         } catch (err) {
+          lastError = err;
           if (this.closing) throw err;
-          // Bug 2: paused mode (auth_rejected / auth_refresh_failed) is an
-          // operator-recovery state — keep the initial-connect promise from
-          // looping forever. Surface the error so the consumer knows the
-          // initial handshake failed; the credentials watcher will trigger
-          // a fresh `connect()` once login succeeds.
-          if (this.pausedReason !== null) throw err;
+          // Auth pause → park at the top of the loop. Not transient: no
+          // backoff, no "error" emit (paused mode has its own events), and
+          // no retry on any timer.
+          if (this.pausedReason !== null) continue;
           attempt++;
           const { delayMs, floorMs } = this.consumeReconnectDelay(attempt);
           this.wsLogger.warn(
@@ -1204,14 +1290,78 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
             "initial connect failed, will retry",
           );
           this.emit("error", err instanceof Error ? err : new Error(String(err)));
-          await waitWithAbort(delayMs, this.connectAbort.signal);
+          await waitWithAbort(delayMs, connectAbort.signal);
           if (this.closing) throw err;
-          if (this.pausedReason !== null) throw err;
         }
       }
     } finally {
+      this.connectActive = false;
       this.connectAbort = null;
     }
+  }
+
+  /**
+   * Park the initial-connect loop while paused mode is active. Resolves when
+   * {@link clearPaused} emits `auth:resumed` (fresh credentials arrived) or
+   * when the abort signal fires ({@link disconnect}). Both listeners are
+   * removed on settle so repeated pause/resume cycles never accumulate them.
+   * The synchronous `if (signal.aborted)` check closes the same-tick race
+   * where disconnect lands between the paused check and listener attachment.
+   */
+  private waitForPausedResume(signal: AbortSignal): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const finish = () => {
+        this.off("auth:resumed", onResumed);
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      };
+      const onResumed = () => finish();
+      const onAbort = () => finish();
+      this.once("auth:resumed", onResumed);
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    });
+  }
+
+  /**
+   * Await the access-token provider for a connect attempt, but settle early
+   * when the initial-connect abort fires (disconnect()). The signal is also
+   * forwarded to the provider so its own `/auth/refresh` can be cancelled —
+   * but a provider that ignores it would otherwise leave the open handler
+   * pending past disconnect()'s removeAllListeners, dangling the connect()
+   * promise and leaving the token free to arrive late on a torn-down socket.
+   * The provider promise is consumed in BOTH branches, so nothing is left
+   * unhandled when the abort wins. On the reconnect path `connectAbort` is
+   * null — the provider promise is used directly and the call site's fence
+   * (`settled` / `closing` / socket identity / readyState) discards any late
+   * result instead.
+   *
+   * Freshness: ask for a token still valid past the proactive-refresh lead
+   * time, otherwise the cached token returned here would already be inside
+   * the lead window and the next proactive refresh would be a no-op — the
+   * server would push `auth:expired` instead. The +5_000 is a readability
+   * slack so the boundary check explicitly clears the lead window rather
+   * than comparing equal; any positive epsilon would do.
+   */
+  private attemptAccessToken(): Promise<string> {
+    const signal = this.connectAbort?.signal;
+    const provider = Promise.resolve(this.getAccessToken({ minValidityMs: AUTH_REFRESH_LEAD_MS + 5_000, signal }));
+    if (!signal) return provider;
+    return new Promise<string>((resolve, reject) => {
+      const finish = (callback: () => void) => {
+        signal.removeEventListener("abort", onAbort);
+        callback();
+      };
+      const onAbort = () => {
+        finish(() => reject(signal.reason ?? new Error("Client disconnected")));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      provider.then(
+        (token) => finish(() => resolve(token)),
+        (err: unknown) => finish(() => reject(err instanceof Error ? err : new Error(String(err)))),
+      );
+      if (signal.aborted) onAbort();
+    });
   }
 
   /**
@@ -1524,59 +1674,79 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
         // success signal — `client:registered` — instead.
         this.wsLogger.debug("socket opened, sending auth");
 
+        // Snapshot the consumer's credential store BEFORE the provider runs:
+        // if the provider fails terminally (refresh rejected) no token is
+        // ever sent, and this snapshot is the failed attempt's only identity.
+        const credentialsSnapshot = this.readCredentialsSnapshot();
         try {
-          // Ask for a token still valid past our proactive-refresh lead
-          // time, otherwise the cached token returned here would already be
-          // inside the lead window and the next proactive refresh would be
-          // a no-op — server would push `auth:expired` instead.
-          //
-          // The +5_000 is just a readability slack so the boundary check
-          // explicitly clears the lead window rather than comparing equal.
-          // Any positive epsilon would do; 5s reads as deliberate at a
-          // glance and is small enough to never matter operationally.
-          const token = await this.getAccessToken({ minValidityMs: AUTH_REFRESH_LEAD_MS + 5_000 });
+          const token = await this.attemptAccessToken();
+          // Retired-attempt fence: the token arrived AFTER this attempt
+          // already concluded (connect timeout / server close settled the
+          // openWebSocket promise), after disconnect() tore the socket
+          // down, or after a newer attempt became the live socket. A late
+          // token must never be sent on a stale socket nor arm the
+          // proactive refresh timer for a dead attempt.
+          if (settled || this.closing || this.ws !== ws || ws.readyState !== WebSocket.OPEN) return;
           ws.send(JSON.stringify({ type: "auth", token }));
+          // Attempt identity = the token actually sent. Deliberately NOT
+          // the pre-provider snapshot: a successful refresh may have
+          // rotated access/refresh tokens inside the provider.
+          this.authAttemptCredential = { kind: "access_token", value: token };
           // C5: arm the proactive refresh timer as soon as we've sent the
           // auth frame — auth:ok only confirms the token was accepted, the
           // exp itself is already fixed on the token payload.
           this.scheduleProactiveAuthRefresh(token);
         } catch (err) {
-          this.authLogger.error({ err }, "failed to obtain access token");
+          // Retired-attempt fence: a late token failure belonging to a
+          // settled attempt (connect timeout / server close) or to a socket
+          // a newer live attempt has replaced must never reach the live
+          // connection — pausing here is exactly how a dead attempt took a
+          // healthy registered one down. While `closing`, disconnect() owns
+          // teardown — but the CURRENT attempt must still settle below so
+          // the connect loop unwinds instead of dangling.
+          if (settled || (this.ws !== ws && !this.closing)) {
+            this.authLogger.debug({ err }, "late token failure on retired connect attempt — ignored");
+            return;
+          }
           // Refresh token expired / revoked is unrecoverable from inside the
           // process — no amount of retrying will succeed without the
-          // operator running `<binName> login <new-token>`. Mark the
-          // connection closed so `ws.on("close")` doesn't reschedule, and
-          // surface an `auth:fatal` event so the consumer (typically the
-          // CLI) can print a recovery prompt and exit, letting systemd /
-          // launchd back off instead of looping at the WS reconnect base.
+          // operator running `<binName> login <new-token>`.
           //
           // `name` duck-typed instead of `instanceof` so this file doesn't
           // pull a runtime dependency on the command package (one-way:
           // command depends on client, not the other way around).
           const e = err instanceof Error ? err : new Error(String(err));
-          if (e.name === "AuthRefreshFailedError") {
-            // Bug 2: instead of marking the connection permanently closed and
-            // letting the consumer process.exit, enter paused mode. The
-            // operator can recover by running the channel-aware login command and the
-            // credentials-watcher will call clearPaused() to resume.
-            this.enterPausedMode("auth_refresh_failed", e);
-          } else if (e.name === "AuthRefreshRateLimitedError") {
-            // Pull the server-suggested wait off the typed error and stash it
-            // for the next scheduleReconnect; falls back to 30s if absent.
-            // Without this floor the WS layer's 1/2/4/8s exponential backoff
-            // hammers the rate-limit window from below and stretches the
-            // outage from "1 minute" to "however long until the bucket
-            // empties under our own load".
-            const retryAfterMs = (e as { retryAfterMs?: number }).retryAfterMs ?? 30_000;
-            this.nextReconnectMinDelayMs = Math.max(this.nextReconnectMinDelayMs, retryAfterMs);
-            this.authLogger.warn({ retryAfterMs }, "refresh rate-limited; deferring reconnect");
+          if (!this.closing) {
+            this.authLogger.error({ err }, "failed to obtain access token");
+            if (e.name === "AuthRefreshFailedError") {
+              // Bug 2: enter paused mode; the credentials watcher will call
+              // clearPaused() to resume. The pre-provider snapshot identifies
+              // the credential authority that failed.
+              this.authAttemptCredential = credentialsSnapshot;
+              this.enterPausedMode("auth_refresh_failed", e);
+            } else if (e.name === "AuthRefreshRateLimitedError") {
+              // Pull the server-suggested wait off the typed error and stash
+              // it for the next scheduleReconnect; falls back to 30s if
+              // absent. Without this floor the WS layer's 1/2/4/8s
+              // exponential backoff hammers the rate-limit window from below
+              // and stretches the outage from "1 minute" to "however long
+              // until the bucket empties under our own load".
+              const retryAfterMs = (e as { retryAfterMs?: number }).retryAfterMs ?? 30_000;
+              this.nextReconnectMinDelayMs = Math.max(this.nextReconnectMinDelayMs, retryAfterMs);
+              this.authLogger.warn({ retryAfterMs }, "refresh rate-limited; deferring reconnect");
+            }
           }
           settle(reject, e);
-          ws.close();
+          if (!this.closing) ws.close();
         }
       });
 
       ws.on("message", (data) => {
+        // Retired-attempt guard: frames arriving on a socket that is no
+        // longer the live one (a newer attempt already replaced it) must not
+        // touch shared state — a late `auth:rejected` on the old socket must
+        // not re-pause a healthy newer connection.
+        if (this.ws !== ws) return;
         // Any inbound frame proves the peer is alive — refresh the silence
         // watchdog before parsing so malformed frames still count.
         this.lastServerMessageAt = Date.now();
@@ -1592,10 +1762,19 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
       // send our own pings from the heartbeat tick — those round-trips are
       // what surface a wedged socket within HEARTBEAT_TIMEOUT_MS.
       ws.on("pong", () => {
+        if (this.ws !== ws) return;
         this.lastServerMessageAt = Date.now();
       });
 
       ws.on("close", (code) => {
+        // Retired-attempt guard: a late close from a socket that already
+        // settled (auth failed / connect timeout) and is no longer the live
+        // socket must not tear down shared state (heartbeat, registration,
+        // pending frames) nor emit/reconnect — the newer attempt owns those
+        // now. A close that settles the in-flight attempt (`!settled`) must
+        // still be processed below even when `this.ws` was never assigned to
+        // it (pre-open handshake failure).
+        if (settled && this.ws !== ws) return;
         this.stopHeartbeat();
         this.clearAuthRefreshTimer();
         this.clearPendingInboxRecoverTimers();
@@ -1633,6 +1812,9 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
       });
 
       ws.on("error", (err) => {
+        // Pre-open handshake errors belong to the in-flight attempt and stay
+        // emitted; a settled retired socket's error is noise.
+        if (settled && this.ws !== ws) return;
         this.emit("error", err);
       });
     });
@@ -2554,7 +2736,11 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
     const delay = exp * 1000 - Date.now() - AUTH_REFRESH_LEAD_MS;
     if (delay <= 0) return;
     this.authLogger.debug({ delayMs: delay }, "scheduled proactive auth refresh");
+    const armedSocket = this.ws;
     this.authRefreshTimer = setTimeout(() => {
+      this.authRefreshTimer = null;
+      // A retired attempt must not refresh or close its successor's socket.
+      if (this.ws !== armedSocket) return;
       void this.runProactiveAuthRefresh();
     }, delay);
   }
@@ -2563,6 +2749,7 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
     this.authRefreshTimer = null;
     if (this.closing) return;
     this.authLogger.info("triggering proactive auth refresh");
+    const credentialsSnapshot = this.readCredentialsSnapshot();
     try {
       // Force a fetch — the cached token is by definition still inside the
       // 60s lead window here, so we ask for >lead validity to make
@@ -2586,6 +2773,7 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
         // dance; reconnecting would just throw the same error from the open
         // handler. clearPaused() (driven by the credentials watcher) will
         // resume.
+        this.authAttemptCredential = credentialsSnapshot;
         this.enterPausedMode("auth_refresh_failed", e);
         return;
       } else {

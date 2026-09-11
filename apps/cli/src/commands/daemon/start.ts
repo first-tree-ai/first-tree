@@ -130,6 +130,17 @@ export function registerDaemonStartCommand(daemon: Command): void {
       let releaseRuntimeOwnership: (() => void) | null = null;
       let unregisterCodexCandidateChange: (() => void) | null = null;
       let codexCapabilityPublicationStarted = false;
+      // Hoisted out of the try so the catch can tell "start() rejected after
+      // a signal requested shutdown" from a real startup failure. `promise`
+      // becomes non-null ONLY once a SIGINT/SIGTERM handler actually ran.
+      // Held in an object because the only writer is the signal closure — a
+      // bare `let` would be flow-narrowed to `null`/`never` at the catch.
+      const shutdownRequest: { promise: Promise<void> | null } = { promise: null };
+      // The signal handler reference, for removal on the failure paths — the
+      // handlers are registered before the (possibly indefinite) initial
+      // start() wait, so a start that never reaches the keep-alive must not
+      // leak them onto the process.
+      let onShutdownSignal: (() => void) | null = null;
       try {
         // Service-mode delegation. We split four cases so the user gets a
         // single coherent command:
@@ -440,7 +451,9 @@ export function registerDaemonStartCommand(daemon: Command): void {
             });
         };
         unregisterCodexCandidateChange = onCodexVerifiedAutomaticCandidateChange(publishCodexVerifiedSelection);
-        runtime.onReconnect(() => capabilityRefresher.onReconnect());
+        // Initial and later registrations share one readiness boundary.
+        runtime.onRegistered((isReconnect) => capabilityRefresher.onRegistered(isReconnect));
+        runtime.onAuthPaused(() => capabilityRefresher.pause());
 
         // In-product runtime-auth: the server pushes `runtime-auth:start` when a
         // member clicks "Connect <provider>" in the console. The daemon drives
@@ -496,14 +509,37 @@ export function registerDaemonStartCommand(daemon: Command): void {
           })();
         });
 
+        // Graceful shutdown — installed BEFORE the initial start() wait: the
+        // connection may now PARK indefinitely on auth pause (dead refresh
+        // token at boot), and a SIGINT/SIGTERM landing during that wait must
+        // run the full cleanup instead of hitting the default signal handler.
+        // `shutdownRequest` doubles as the "a shutdown was actually
+        // requested" evidence for the catch below: a start() rejection is a
+        // clean shutdown ONLY when a signal truly arrived.
+        const shutdown = async () => {
+          writeLine("\n  Shutting down...\n");
+          codexCapabilityPublicationStarted = false;
+          unregisterCodexCandidateChange?.();
+          unregisterCodexCandidateChange = null;
+          capabilityRefresher.stop();
+          runtime.unwatchAgentsDir();
+          await runtime.stop(resolveClientRuntimeStopReason());
+          unregisterRuntimeMarker?.();
+          unregisterRuntimeMarker = null;
+          releaseRuntimeOwnership?.();
+          releaseRuntimeOwnership = null;
+          await flushClientSentry();
+          process.exit(0);
+        };
+        const onSignal = () => {
+          shutdownRequest.promise ??= shutdown();
+        };
+        onShutdownSignal = onSignal;
+        process.on("SIGINT", onSignal);
+        process.on("SIGTERM", onSignal);
+
         await runtime.start();
 
-        // Post-register capabilities upload + arm the background poll — the
-        // `clients` row only exists after the `client:register` WS handshake,
-        // so the first PATCH runs here rather than pre-flight. Best-effort: a
-        // transient failure logs and moves on; agents still bind, and the poll
-        // (or a later restart) retries.
-        void capabilityRefresher.start();
         codexCapabilityPublicationStarted = true;
         if (codexCapabilityPublicationPending) {
           codexCapabilityPublicationPending = false;
@@ -570,25 +606,6 @@ export function registerDaemonStartCommand(daemon: Command): void {
         // Watch agents config dir for hot-add
         runtime.watchAgentsDir(agentsDir);
 
-        // Graceful shutdown
-        const shutdown = async () => {
-          writeLine("\n  Shutting down...\n");
-          codexCapabilityPublicationStarted = false;
-          unregisterCodexCandidateChange?.();
-          unregisterCodexCandidateChange = null;
-          capabilityRefresher.stop();
-          runtime.unwatchAgentsDir();
-          await runtime.stop(resolveClientRuntimeStopReason());
-          unregisterRuntimeMarker?.();
-          unregisterRuntimeMarker = null;
-          releaseRuntimeOwnership?.();
-          releaseRuntimeOwnership = null;
-          await flushClientSentry();
-          process.exit(0);
-        };
-        process.on("SIGINT", () => void shutdown());
-        process.on("SIGTERM", () => void shutdown());
-
         // Keep process alive
         await new Promise(() => {});
       } catch (error) {
@@ -634,6 +651,18 @@ export function registerDaemonStartCommand(daemon: Command): void {
             output: daemonOutput ?? undefined,
           });
         }
+        // A start() rejection is a clean shutdown ONLY when a signal
+        // actually arrived (e.g. SIGTERM aborting an auth-paused
+        // initial-connect park via stop()). Await the handler's cleanup so
+        // marker/ownership release completes before the finally below runs
+        // its own (null-guarded) release. Without that evidence the
+        // rejection is a real startup failure and must keep failing loudly —
+        // paused state alone is NOT shutdown evidence.
+        if (shutdownRequest.promise) {
+          // Cleanup failures must propagate instead of being treated as a clean shutdown.
+          await shutdownRequest.promise;
+          return;
+        }
         const msg = error instanceof Error ? error.message : String(error);
         if (!isDaemonRuntimeOwnershipError(error)) {
           captureClientException(error, { command: "daemon start" });
@@ -650,6 +679,14 @@ export function registerDaemonStartCommand(daemon: Command): void {
         unregisterCodexCandidateChange?.();
         unregisterRuntimeMarker?.();
         releaseRuntimeOwnership?.();
+        // Failure/return paths must not leak the early-registered signal
+        // handlers onto the process (the keep-alive path never reaches here,
+        // so a running daemon keeps them).
+        if (onShutdownSignal) {
+          process.off("SIGINT", onShutdownSignal);
+          process.off("SIGTERM", onShutdownSignal);
+          onShutdownSignal = null;
+        }
         // Reset singleton so other commands can reinit
         resetConfig();
         resetConfigMeta();

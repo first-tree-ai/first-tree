@@ -528,3 +528,142 @@ describe("CapabilityRefresher", () => {
     refresher.stop();
   });
 });
+
+/**
+ * D5 (staging auth-failure storm): while the connection sits in auth paused
+ * mode the poll's uploads would keep firing doomed `/auth/refresh` 401s at
+ * the base cadence forever (a failed upload reset the backoff to 0, so the
+ * retry was always 15s away). `pause()` gates probe/upload work until `onRegistered()` releases it.
+ * A credentials change alone never reopens work; `stop()` stays terminal.
+ */
+describe("CapabilityRefresher — auth pause gate (D5)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("pause disarms work until one registration notification performs the catch-up", async () => {
+    const { refresher, upload, reprobe, revalidate } = makeRefresher({ initial: codexMissing() });
+    await refresher.start();
+    expect(upload).toHaveBeenCalledTimes(1);
+
+    refresher.pause();
+    // While paused nothing polls and nothing uploads, even well past the
+    // previous 15s-flat retry cadence.
+    await vi.advanceTimersByTimeAsync(MAX * 4);
+    expect(revalidate).not.toHaveBeenCalled();
+    expect(upload).toHaveBeenCalledTimes(1);
+
+    // Credentials may already be fresh, but registration has not completed.
+    await vi.advanceTimersByTimeAsync(MAX * 4);
+    expect(revalidate).not.toHaveBeenCalled();
+    expect(reprobe).not.toHaveBeenCalled();
+    expect(upload).toHaveBeenCalledTimes(1);
+
+    // Successful re-registration drives the refresh through the existing
+    // reconnect path (TTL/interactive ownership untouched).
+    reprobe.mockResolvedValueOnce({ capabilities: allOk(), mode: "revalidate" as const });
+    refresher.onRegistered(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reprobe).toHaveBeenCalledTimes(1);
+    expect(upload).toHaveBeenCalledTimes(2);
+    expect(upload).toHaveBeenLastCalledWith(allOk());
+    refresher.stop();
+  });
+
+  it("a pause landing mid-probe blocks the late upload and does not re-arm — even after credentials resume, until registration", async () => {
+    const gate = deferred<ClientCapabilities>();
+    const { refresher, upload, reprobe, revalidate } = makeRefresher({ initial: codexMissing() });
+    revalidate.mockReturnValueOnce(gate.promise); // poll #1 hangs in flight
+
+    await refresher.start();
+    expect(upload).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(BASE);
+    expect(revalidate).toHaveBeenCalledTimes(1);
+
+    refresher.pause();
+    // Credentials changed, but registration is still pending. The old probe
+    // resolves inside this gap…
+    gate.resolve(allOk());
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(0);
+
+    // …and must NOT upload (a dead token would just 401 the server again)
+    // and must NOT re-arm the poll. The snapshot IS kept locally, so the
+    // post-registration refresh still publishes the recovery.
+    expect(upload).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(MAX * 4);
+    expect(revalidate).toHaveBeenCalledTimes(1);
+
+    // Registration completed: one notification owns the catch-up upload.
+    refresher.onRegistered(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reprobe).toHaveBeenCalledTimes(1);
+    expect(upload).toHaveBeenCalledTimes(2);
+    expect(upload).toHaveBeenLastCalledWith(allOk());
+    refresher.stop();
+  });
+
+  it("stop stays terminal across pauses and later registrations", async () => {
+    const { refresher, upload, reprobe, revalidate } = makeRefresher({ initial: codexMissing() });
+    await refresher.start();
+    refresher.stop();
+
+    refresher.pause();
+    refresher.onRegistered(true); // must NOT revive a stopped refresher
+    await vi.advanceTimersByTimeAsync(MAX * 4);
+
+    expect(revalidate).not.toHaveBeenCalled();
+    expect(reprobe).not.toHaveBeenCalled();
+    expect(upload).toHaveBeenCalledTimes(1);
+  });
+
+  it("setProviderEntry keeps local state but does not upload while paused", async () => {
+    const { refresher, upload } = makeRefresher({ initial: codexPendingSnapshot() });
+    await refresher.start();
+    expect(upload).toHaveBeenCalledTimes(1);
+
+    refresher.pause();
+    // The credentials-resumed → registration gap: a login flow finishing
+    // inside it must not push anything onto the wire yet.
+    await refresher.setProviderEntry("codex", ok({ detectedAt: "2026-06-17T00:01:00.000Z" }));
+    // Local snapshot/provider-write bookkeeping still advances (the login
+    // flow must not lose its result)…
+    expect(refresher.currentEntry("codex")?.state).toBe("ok");
+    // …but nothing reaches the server while credentials are dead.
+    expect(upload).toHaveBeenCalledTimes(1);
+    refresher.stop();
+  });
+
+  it("start() after stop() performs no work — terminal stop is never revived by a late startup", async () => {
+    const { refresher, upload, reprobe, revalidate } = makeRefresher({ initial: codexMissing() });
+    refresher.stop();
+    await refresher.start();
+
+    expect(upload).not.toHaveBeenCalled();
+    expect(reprobe).not.toHaveBeenCalled();
+    expect(revalidate).not.toHaveBeenCalled();
+
+    // A later registration must not revive a stopped refresher either.
+    refresher.onRegistered(false);
+    await refresher.start();
+    expect(upload).not.toHaveBeenCalled();
+    expect(reprobe).not.toHaveBeenCalled();
+  });
+
+  it("start respects the paused gate; first registration releases it and uploads once", async () => {
+    const { refresher, upload, reprobe } = makeRefresher({ initial: codexMissing() });
+    refresher.pause();
+    await refresher.start();
+    expect(upload).not.toHaveBeenCalled();
+    expect(reprobe).not.toHaveBeenCalled();
+
+    refresher.onRegistered(false);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(upload).toHaveBeenCalledTimes(1);
+    refresher.stop();
+  });
+});
