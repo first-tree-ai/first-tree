@@ -1293,7 +1293,7 @@ value already exists in `client.yaml`, external mode stays off and `doctor`
 reports the value rather than calling it unset.
 
 With it set, `login` runs `context-tree install`, which writes
-the `context-tree-{setup,create,connect,read,write,publish}` Skills into
+the `context-tree-{setup,create,connect,read,write,publish,cleanup,schedule-cleanup}` Skills into
 `~/.claude/skills` and `~/.codex/skills`, then `context-tree connect
 <OWNER/REPO>` for each existing agent workspace. The tree itself is cloned to
 `~/.context-tree/trees/<repo>` and the project mapping is recorded in
@@ -1336,19 +1336,18 @@ Re-running `first-tree login` also links any workspace created since.
 `https` URL and the `context-tree` package holds no tokens of its own, so run
 `gh auth setup-git` (or configure a credential helper) first.
 
-**To revert**, unset the key and re-run `first-tree login`. First Tree runs
-`context-tree uninstall`, which removes every `context-tree-*` Skill from this
-machine's Claude and Codex Skill directories, including one installed by hand,
-and removes only a shim that First Tree still owns. First Tree's Skills are
-reprojected on the next session. The uninstall does not prune host directories
-or touch project `AGENTS.md` pointers, tree checkouts under
-`~/.context-tree/trees/`, or connection records in
-`~/.context-tree/connections.json`.
+**To revert**, unset the key and re-run `first-tree login`. First Tree removes
+only Skill directories it recorded as newly created during its own installation
+and whose contents still match the bundled payload. Independently installed
+Skills, edited copies, and legacy copies without ownership records are preserved
+and reported. Only a shim carrying First Tree's marker is removed. First Tree's
+Skills are reprojected on the next session. Cleanup leaves host directories,
+project instructions, tree checkouts, and connection records untouched.
 
-This matters because a *global* npm install runs the bundled dependency's own
-`postinstall`, which places the Skills in `~/.claude/skills` and
-`~/.codex/skills` regardless of this key. Running `first-tree login` with the key
-unset is what stands them back down.
+The bundled Context Tree dependency does not install Skills during a global
+First Tree package installation: its postinstall only installs them for a direct
+global Context Tree install. An unset `context_tree.repository` therefore needs
+no cleanup of dependency lifecycle side effects.
 
 **Team bindings are ignored in this mode.** The tree named by
 `context_tree.repository` is what the agent sees — not the server-side Team

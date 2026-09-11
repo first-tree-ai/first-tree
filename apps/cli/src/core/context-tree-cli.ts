@@ -3,6 +3,8 @@ import type { Dirent } from "node:fs";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
+  mkdirSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -55,7 +57,7 @@ export type ContextTreeConnectFailure = {
 export type ContextTreeSetupReport = {
   /**
    * `skipped` means the CLI is unavailable, so nothing was written and the
-   * caller carries on. `removed` means external mode is off and uninstall
+   * caller carries on. `removed` means external mode is off and owned cleanup
    * completed, including an already-clean inspection.
    */
   status: "skipped" | "installed" | "failed" | "removed";
@@ -76,7 +78,7 @@ export type ContextTreeSetupReport = {
   removedSkillPaths?: string[];
   /**
    * `context-tree-*` Skill directories left in place because they were not
-   * provably an unmodified packaged copy — a hand-installed or edited Skill a
+   * recorded as First Tree-created and unmodified — a hand-installed or edited Skill a
    * login must never delete.
    */
   preservedSkillPaths?: string[];
@@ -327,7 +329,7 @@ const HOST_SKILL_DIRS = [
  * The packaged Skill payload the bundled CLI ships (`<pkg>/skills`), or null
  * when the dependency is absent. Both the dependency's postinstall and our
  * `context-tree install` write exactly these bytes, so byte-identity with this
- * tree is the safe ownership test for removal.
+ * tree checks for edits; a separate installation record establishes ownership.
  */
 function packagedSkillsRoot(): string | null {
   const entry = resolveContextTreeCli()?.args[0];
@@ -335,6 +337,18 @@ function packagedSkillsRoot(): string | null {
   // …/dist/cli/index.mjs -> …/skills
   const root = join(dirname(entry), "..", "..", "skills");
   return existsSync(root) ? root : null;
+}
+
+/** Only this versioned record proves that First Tree created a Skill directory. */
+function readOwnedSkillPaths(): Set<string> {
+  try {
+    const value: unknown = JSON.parse(readFileSync(join(defaultDataDir(), "context-tree-owned-skills.json"), "utf8"));
+    if (!isRecord(value) || value.schemaVersion !== 1 || !Array.isArray(value.paths)) return new Set();
+    return new Set(value.paths.filter((path): path is string => typeof path === "string"));
+  } catch {
+    // Missing or unreadable provenance never authorizes deletion.
+    return new Set();
+  }
 }
 
 /** True when `left` and `right` are identical directory trees (same shape, same bytes). */
@@ -367,15 +381,9 @@ function directoriesEqual(left: string, right: string): boolean {
 /**
  * Undo external mode once the key is unset.
  *
- * Only verifiably First Tree-installed, unmodified artifacts are removed: a
- * `context-tree-*` Skill directory is deleted solely when its name matches a
- * packaged Skill AND its contents are byte-identical to the bundled payload
- * (either the dependency postinstall or our own `install` writes those bytes).
- * Anything a user wrote or edited by hand is preserved and reported, because an
- * ordinary login on a machine that never enabled external mode must not delete
- * independently owned files. The external CLI's own `uninstall --host all` keys
- * on the `context-tree-` prefix alone, so it is not a safe removal primitive for
- * this path.
+ * Only directories recorded as newly created by First Tree and still matching
+ * the packaged payload are removed. Independent official installs and legacy
+ * copies without provenance are preserved, even when their bytes are identical.
  *
  * Connections, managed trees, pointers, and the user's global `context-tree`
  * binary are deliberately left alone.
@@ -405,12 +413,15 @@ export async function removeContextTreeSkills(): Promise<ContextTreeSetupReport>
     return { ...base, status: "failed", reason: "could not resolve the user home directory" };
   }
 
+  const ownedPaths = readOwnedSkillPaths();
   const removedSkillPaths: string[] = [];
   const preservedSkillPaths: string[] = [];
   for (const [, relative] of HOST_SKILL_DIRS) {
     const skillsRoot = join(home, relative);
     let entries: Dirent[];
     try {
+      // Never delete through a host directory redirected after installation.
+      if (realpathSync(skillsRoot) !== skillsRoot) continue;
       entries = readdirSync(skillsRoot, { withFileTypes: true });
     } catch {
       continue; // No Skill directory for this host — nothing to clean up.
@@ -418,7 +429,11 @@ export async function removeContextTreeSkills(): Promise<ContextTreeSetupReport>
     for (const entry of entries) {
       if (!entry.isDirectory() || !entry.name.startsWith("context-tree-")) continue;
       const target = join(skillsRoot, entry.name);
-      if (!packagedNames.includes(entry.name) || !directoriesEqual(target, join(packagedRoot, entry.name))) {
+      if (
+        !ownedPaths.has(target) ||
+        !packagedNames.includes(entry.name) ||
+        !directoriesEqual(target, join(packagedRoot, entry.name))
+      ) {
         preservedSkillPaths.push(target);
         continue;
       }
@@ -444,9 +459,9 @@ export async function removeContextTreeSkills(): Promise<ContextTreeSetupReport>
   }
 
   try {
-    unlinkSync(join(defaultDataDir(), "context-tree-install.json"));
+    unlinkSync(join(defaultDataDir(), "context-tree-owned-skills.json"));
   } catch {
-    // Upgraded machines may have no legacy ledger to clear.
+    // No ownership record may exist; preserved copies are no longer owned.
   }
 
   return {
@@ -461,9 +476,9 @@ export async function removeContextTreeSkills(): Promise<ContextTreeSetupReport>
 /**
  * Install the external Context Tree Skills and link the configured tree.
  *
- * Gated on `context_tree.repository`. That gate is what keeps the two Skill
- * families from ever being live together: an unconfigured machine never gets the
- * `context-tree-*` Skills installed, and a configured one has the overlapping
+ * Gated on `context_tree.repository`: First Tree does not install external
+ * Skills on an unconfigured machine. Independently installed Skills remain the
+ * operator's responsibility. A configured machine has the overlapping
  * `first-tree-{read,write,seed}` projection stood down by the Client (see
  * `ContextSource` kind `external`).
  *
@@ -480,9 +495,7 @@ export async function ensureContextTreeSkills(): Promise<ContextTreeSetupReport>
 
   const setting = readContextTreeRepositorySetting();
   if (!setting.repository) {
-    // Not a no-op: a global install runs the dependency's own postinstall, which
-    // places the Skills regardless of this key. Undoing that is what makes the
-    // switch real in both directions rather than one-way.
+    // Revert only our recorded installations; dependency installs have no home side effects.
     const removal = await removeContextTreeSkills();
     if (setting.raw !== null) {
       return {
@@ -498,9 +511,39 @@ export async function ensureContextTreeSkills(): Promise<ContextTreeSetupReport>
     return { ...base, reason: `${CONTEXT_TREE_PACKAGE} is not installed beside this CLI` };
   }
 
+  const ownedPaths = readOwnedSkillPaths();
+  const newPaths: string[] = [];
+  try {
+    const packagedRoot = packagedSkillsRoot();
+    if (packagedRoot === null) return { ...base, status: "failed", reason: "Packaged Skills are missing" };
+    const home = realpathSync(homedir());
+    for (const [, relative] of HOST_SKILL_DIRS) {
+      for (const entry of readdirSync(packagedRoot, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !entry.name.startsWith("context-tree-")) continue;
+        const target = join(home, relative, entry.name);
+        if (lstatSync(target, { throwIfNoEntry: false }) === undefined) newPaths.push(target);
+      }
+    }
+  } catch (error) {
+    return { ...base, status: "failed", reason: String(error) };
+  }
+
   const install = await runContextTreeCommand(["install", "--host", "all"]);
   if (!install.ok) {
     return { ...base, status: "failed", reason: install.reason };
+  }
+
+  try {
+    for (const path of newPaths) {
+      if (lstatSync(path, { throwIfNoEntry: false })?.isDirectory()) ownedPaths.add(path);
+    }
+    mkdirSync(defaultDataDir(), { recursive: true });
+    writeFileSync(
+      join(defaultDataDir(), "context-tree-owned-skills.json"),
+      JSON.stringify({ schemaVersion: 1, paths: [...ownedPaths] }),
+    );
+  } catch (error) {
+    return { ...base, status: "failed", reason: `Could not record Skill ownership: ${String(error)}` };
   }
 
   const shim = writeContextTreeShim();
