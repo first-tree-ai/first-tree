@@ -25,7 +25,7 @@
   English | <a href="README_zh-CN.md">中文</a>
 </p>
 
-> checkout our recent work [opentag.build](https://github.com/first-tree-ai/opentag) — the opensource ai coworker. Claude Tag alternative. support using ur own subscription. 
+> checkout our recent work [opentag.build](https://github.com/first-tree-ai/opentag) — the opensource ai coworker. Claude Tag alternative. support using ur own subscription.
 
 # First-Tree
 
