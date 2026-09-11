@@ -533,10 +533,8 @@ describe("CapabilityRefresher", () => {
  * D5 (staging auth-failure storm): while the connection sits in auth paused
  * mode the poll's uploads would keep firing doomed `/auth/refresh` 401s at
  * the base cadence forever (a failed upload reset the backoff to 0, so the
- * retry was always 15s away). `pause()`/`resume()` gate all probe/upload work
- * on the existing auth events WITHOUT touching the terminal `stop()` state:
- * resume must never revive a stopped refresher, and resume itself performs no
- * work — the next registration-driven `onReconnect()` owns the catch-up.
+ * retry was always 15s away). `pause()` gates probe/upload work until `onRegistered()` releases it.
+ * A credentials change alone never reopens work; `stop()` stays terminal.
  */
 describe("CapabilityRefresher — auth pause gate (D5)", () => {
   beforeEach(() => {
@@ -547,7 +545,7 @@ describe("CapabilityRefresher — auth pause gate (D5)", () => {
     vi.restoreAllMocks();
   });
 
-  it("pause() disarms the poll; resume() alone performs no work; the next onReconnect owns the catch-up", async () => {
+  it("pause disarms work until one registration notification performs the catch-up", async () => {
     const { refresher, upload, reprobe, revalidate } = makeRefresher({ initial: codexMissing() });
     await refresher.start();
     expect(upload).toHaveBeenCalledTimes(1);
@@ -559,9 +557,7 @@ describe("CapabilityRefresher — auth pause gate (D5)", () => {
     expect(revalidate).not.toHaveBeenCalled();
     expect(upload).toHaveBeenCalledTimes(1);
 
-    // auth:resumed fires BEFORE the reconnect/registration completes —
-    // resume() must ungate without probing or uploading by itself.
-    refresher.resume();
+    // Credentials may already be fresh, but registration has not completed.
     await vi.advanceTimersByTimeAsync(MAX * 4);
     expect(revalidate).not.toHaveBeenCalled();
     expect(reprobe).not.toHaveBeenCalled();
@@ -570,7 +566,7 @@ describe("CapabilityRefresher — auth pause gate (D5)", () => {
     // Successful re-registration drives the refresh through the existing
     // reconnect path (TTL/interactive ownership untouched).
     reprobe.mockResolvedValueOnce({ capabilities: allOk(), mode: "revalidate" as const });
-    refresher.onReconnect();
+    refresher.onRegistered(true);
     await vi.advanceTimersByTimeAsync(0);
     expect(reprobe).toHaveBeenCalledTimes(1);
     expect(upload).toHaveBeenCalledTimes(2);
@@ -589,8 +585,7 @@ describe("CapabilityRefresher — auth pause gate (D5)", () => {
     expect(revalidate).toHaveBeenCalledTimes(1);
 
     refresher.pause();
-    // Credentials-resumed ONLY (no resume() call — the daemon now ungates
-    // exclusively on a completed registration). The old in-flight probe
+    // Credentials changed, but registration is still pending. The old probe
     // resolves inside this gap…
     gate.resolve(allOk());
     await vi.advanceTimersByTimeAsync(0);
@@ -603,10 +598,8 @@ describe("CapabilityRefresher — auth pause gate (D5)", () => {
     await vi.advanceTimersByTimeAsync(MAX * 4);
     expect(revalidate).toHaveBeenCalledTimes(1);
 
-    // Registration completed: the daemon wiring calls resume() then
-    // onReconnect() — exactly one catch-up upload.
-    refresher.resume();
-    refresher.onReconnect();
+    // Registration completed: one notification owns the catch-up upload.
+    refresher.onRegistered(true);
     await vi.advanceTimersByTimeAsync(0);
     expect(reprobe).toHaveBeenCalledTimes(1);
     expect(upload).toHaveBeenCalledTimes(2);
@@ -614,14 +607,13 @@ describe("CapabilityRefresher — auth pause gate (D5)", () => {
     refresher.stop();
   });
 
-  it("stop() stays terminal across pause/resume and later reconnects", async () => {
+  it("stop stays terminal across pauses and later registrations", async () => {
     const { refresher, upload, reprobe, revalidate } = makeRefresher({ initial: codexMissing() });
     await refresher.start();
     refresher.stop();
 
     refresher.pause();
-    refresher.resume(); // must NOT revive a stopped refresher
-    refresher.onReconnect();
+    refresher.onRegistered(true); // must NOT revive a stopped refresher
     await vi.advanceTimersByTimeAsync(MAX * 4);
 
     expect(revalidate).not.toHaveBeenCalled();
@@ -655,24 +647,22 @@ describe("CapabilityRefresher — auth pause gate (D5)", () => {
     expect(reprobe).not.toHaveBeenCalled();
     expect(revalidate).not.toHaveBeenCalled();
 
-    // resume() must not make a later start() work either.
-    refresher.resume();
+    // A later registration must not revive a stopped refresher either.
+    refresher.onRegistered(false);
     await refresher.start();
     expect(upload).not.toHaveBeenCalled();
     expect(reprobe).not.toHaveBeenCalled();
   });
 
-  it("start() respects the paused gate and works after resume()", async () => {
+  it("start respects the paused gate; first registration releases it and uploads once", async () => {
     const { refresher, upload, reprobe } = makeRefresher({ initial: codexMissing() });
     refresher.pause();
     await refresher.start();
     expect(upload).not.toHaveBeenCalled();
     expect(reprobe).not.toHaveBeenCalled();
 
-    // The daemon calls resume() only after a successful registration, then
-    // start() — the normal startup upload follows.
-    refresher.resume();
-    await refresher.start();
+    refresher.onRegistered(false);
+    await vi.advanceTimersByTimeAsync(0);
     expect(upload).toHaveBeenCalledTimes(1);
     refresher.stop();
   });

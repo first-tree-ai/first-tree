@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -137,6 +137,8 @@ describe("ClientRuntime — paused-mode credential recovery", () => {
     saveCredentials({ serverUrl, accessToken: token("old"), refreshToken: "synthetic-old" });
 
     const runtime = new ClientRuntime(serverUrl, "synthetic-early-login", { output: silentOutput });
+    const registrations = vi.fn();
+    runtime.onRegistered(registrations);
     let pauses = 0;
     runtime.onAuthPaused(() => pauses++);
     const starting = runtime.start().then(
@@ -149,6 +151,7 @@ describe("ClientRuntime — paused-mode credential recovery", () => {
       expect(registered).toBe(1);
       expect(authFrames).toBe(2);
       expect(pauses).toBe(1);
+      expect(registrations).toHaveBeenCalledExactlyOnceWith(false);
     } finally {
       await runtime.stop("synthetic race complete");
       await starting;
@@ -331,6 +334,15 @@ describe("ClientRuntime — paused-mode credential recovery", () => {
       expect(runtime.pausedReason()).toBe("auth_refresh_failed");
       // Unchanged credentials: parked, and the 401 latch keeps the failed
       // authority from re-hitting the network.
+      await sleep(700);
+      expect(runtime.isPaused()).toBe(true);
+      expect(counts).toEqual({ refresh401: 1, refresh200: 0, sockets: 1, registrations: 0 });
+
+      // Formatting, field order, and unrelated metadata do not change auth identity.
+      writeFileSync(
+        join(home, "config", "credentials.json"),
+        JSON.stringify({ note: "edited", refreshToken: "synthetic-dead", accessToken: staleToken, serverUrl }, null, 2),
+      );
       await sleep(700);
       expect(runtime.isPaused()).toBe(true);
       expect(counts).toEqual({ refresh401: 1, refresh200: 0, sockets: 1, registrations: 0 });

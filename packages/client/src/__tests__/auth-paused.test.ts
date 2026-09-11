@@ -609,7 +609,7 @@ describe("ClientConnection — auth paused mode (Bug 2, D1)", () => {
     await waitFor(() => connection.isPaused());
     // No token was ever sent — the failed attempt's identity is the
     // credential-store snapshot taken before the provider ran.
-    expect(connection.getAuthAttemptCredential()).toBe("cred-v1");
+    expect(connection.getAuthAttemptCredential()).toEqual({ kind: "credential_snapshot", value: "cred-v1" });
 
     // Operator re-login rotates the snapshot; the next attempt's identity
     // becomes the token actually sent in the handshake.
@@ -617,7 +617,7 @@ describe("ClientConnection — auth paused mode (Bug 2, D1)", () => {
     allowToken = true;
     connection.clearPaused();
     await tracked.promise;
-    expect(connection.getAuthAttemptCredential()).toBe("good-token");
+    expect(connection.getAuthAttemptCredential()).toEqual({ kind: "access_token", value: "good-token" });
     expect(counters.registrations).toBe(1);
 
     await connection.disconnect();

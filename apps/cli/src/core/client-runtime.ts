@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, watch, writeFileSync } from "node:
 import { dirname, join } from "node:path";
 import {
   AgentSlot,
+  type AuthAttemptCredential,
   type BuiltinHandlerRegistry,
   ClientConnection,
   createBuiltinHandlerRegistry,
@@ -26,7 +27,7 @@ import {
 import type { AgentConfig } from "@first-tree/shared/config";
 import { agentConfigSchema, defaultConfigDir, loadAgents } from "@first-tree/shared/config";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { ensureFreshAccessToken } from "./bootstrap.js";
+import { ensureFreshAccessToken, loadCredentials } from "./bootstrap.js";
 import { channelConfig } from "./channel.js";
 import { cliFetch } from "./cli-fetch.js";
 import { print } from "./output.js";
@@ -107,6 +108,11 @@ function credentialsFilePath(): string {
   return join(defaultConfigDir(), "credentials.json");
 }
 
+/** Stable auth identity: formatting and unrelated file fields do not trigger recovery. */
+function credentialSnapshot(creds: NonNullable<ReturnType<typeof loadCredentials>>): string {
+  return JSON.stringify([credentialsFilePath(), creds.serverUrl, creds.accessToken, creds.refreshToken]);
+}
+
 export type ClientRuntimeOptions = {
   /**
    * Version of the Command package this process was launched from. Passed to
@@ -172,24 +178,8 @@ export class ClientRuntime {
   private credentialsWatcher: FSWatcher | null = null;
   private credentialsDebounce: ReturnType<typeof setTimeout> | null = null;
 
-  /** Callbacks fired after a WS RE-registration (reconnect), not the first
-   * register. Used by the daemon to re-probe runtime-provider capabilities. */
-  private readonly reconnectListeners: Array<() => void> = [];
-  /**
-   * Set when a `server:welcome` advertised a reconnect; cleared when the
-   * matching registration completes (`connected`) and the reconnect
-   * listeners fire. Keeps reconnect publication strictly behind the
-   * registration boundary.
-   */
-  private reconnectWelcomePending = false;
-  /**
-   * Whether any registration has completed since this runtime was created.
-   * The connection's own `isReconnect` welcome flag only means "not the
-   * first welcome ever" — welcomes from FAILED attempts (auth died before
-   * `client:registered`) also flip it, so without this gate the first
-   * SUCCESSFUL registration after transient failures would be mislabeled a
-   * reconnect and fire reconnect work during startup.
-   */
+  private readonly registeredListeners: Array<(isReconnect: boolean) => void> = [];
+  /** Failed handshakes do not count as registrations. */
   private hasRegisteredOnce = false;
   private readonly runtimeProviderRepairAttempts = new Map<string, number>();
 
@@ -205,7 +195,7 @@ export class ClientRuntime {
       getAccessToken: (opts) => ensureFreshAccessToken(opts),
       // Lets the connection anchor a failed token-provider attempt to the
       // exact credentials it used (see getAuthAttemptCredential).
-      getCredentialsSnapshot: () => this.readCredentialsSnapshot(credentialsFilePath()),
+      getCredentialsSnapshot: () => this.readCredentialsSnapshot(),
       // Forward the last self-update outcome on every `client:register`
       // so the server can persist it into `clients.metadata.lastUpdateAttempt`
       // and the admin dashboard can flag clients that are failing to
@@ -292,26 +282,13 @@ export class ClientRuntime {
       void this.repairRuntimeProviderMismatch(agentId);
     });
 
-    // Fire reconnect listeners only on a completed RE-registration (the
-    // daemon re-probes runtime-provider capabilities then). The
-    // `server:welcome` frame only ADVERTISES a reconnect — it arrives before
-    // `auth:ok` / `client:registered`, so publishing reconnect work on it
-    // would run before the registration actually lands. Arm on the
-    // reconnect welcome, fire on `connected` (emitted on `client:registered`).
-    // `isReconnect` is false on the first welcome, so startup is not
-    // double-probed. Listener errors are swallowed — a re-probe failure must
-    // never disturb the connection.
-    this.connection.on("server:welcome", (welcome) => {
-      if (welcome.isReconnect && this.hasRegisteredOnce) this.reconnectWelcomePending = true;
-    });
+    // Registration is the readiness boundary for both startup and recovery.
     this.connection.on("connected", () => {
-      const wasReconnect = this.reconnectWelcomePending;
-      this.reconnectWelcomePending = false;
+      const wasReconnect = this.hasRegisteredOnce;
       this.hasRegisteredOnce = true;
-      if (!wasReconnect) return;
-      for (const cb of this.reconnectListeners) {
+      for (const cb of this.registeredListeners) {
         try {
-          cb();
+          cb(wasReconnect);
         } catch (err) {
           this.output.status("⚠️", `reconnect handler error: ${err instanceof Error ? err.message : String(err)}`);
         }
@@ -325,7 +302,14 @@ export class ClientRuntime {
    * runtime-provider capabilities without a restart.
    */
   onReconnect(callback: () => void): void {
-    this.reconnectListeners.push(callback);
+    this.onRegistered((isReconnect) => {
+      if (isReconnect) callback();
+    });
+  }
+
+  /** Fired only after client:registered, including the first successful registration. */
+  onRegistered(callback: (isReconnect: boolean) => void): void {
+    this.registeredListeners.push(callback);
   }
 
   /**
@@ -584,39 +568,33 @@ export class ClientRuntime {
    * credential, so retrying it would only re-fail.
    */
   private reconcilePausedCredentials(): void {
-    const reason = this.connection.getPausedReason();
-    if (reason === null) return;
+    if (!this.connection.isPaused()) return;
     const attemptCredential = this.connection.getAuthAttemptCredential();
     if (attemptCredential === null) return;
-    const current = this.currentCredentialForComparison(reason);
-    if (current === null || current === attemptCredential) return;
+    const current = this.currentCredentialForComparison(attemptCredential);
+    if (current === null || current === attemptCredential.value) return;
     this.output.status("", "credentials.json updated — clearing paused mode");
     this.connection.clearPaused();
   }
 
   /**
-   * Current credential in the same identity domain the connection recorded
-   * for the paused attempt: the access token for a handshake rejection, the
-   * raw credentials file for a token-provider failure.
+   * Compare in the identity domain recorded by the attempt, independently
+   * of how the auth error was classified.
    */
-  private currentCredentialForComparison(reason: ClientPausedReason): string | null {
-    const raw = this.readCredentialsSnapshot(credentialsFilePath());
-    if (raw === null) return null;
-    if (reason !== "auth_rejected") return raw;
-    try {
-      const accessToken = (JSON.parse(raw) as { accessToken?: unknown }).accessToken;
-      return typeof accessToken === "string" ? accessToken : null;
-    } catch {
-      return null;
+  private currentCredentialForComparison(attempt: AuthAttemptCredential): string | null {
+    const creds = loadCredentials();
+    if (!creds) return null;
+    switch (attempt.kind) {
+      case "access_token":
+        return creds.accessToken;
+      case "credential_snapshot":
+        return credentialSnapshot(creds);
     }
   }
 
-  private readCredentialsSnapshot(path: string): string | null {
-    try {
-      return readFileSync(path, "utf-8");
-    } catch {
-      return null;
-    }
+  private readCredentialsSnapshot(): string | null {
+    const creds = loadCredentials();
+    return creds ? credentialSnapshot(creds) : null;
   }
 
   /** Test helper / external probe — true once paused mode is active. */

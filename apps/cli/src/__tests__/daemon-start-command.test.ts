@@ -104,7 +104,7 @@ let runtimeInstance: {
   stop: ReturnType<typeof vi.fn>;
   unwatchAgentsDir: ReturnType<typeof vi.fn>;
   watchAgentsDir: ReturnType<typeof vi.fn>;
-  onReconnect: ReturnType<typeof vi.fn>;
+  onRegistered: ReturnType<typeof vi.fn>;
   onAuthPaused: ReturnType<typeof vi.fn>;
   onRuntimeAuthStart: ReturnType<typeof vi.fn>;
   onProviderModelsList: ReturnType<typeof vi.fn>;
@@ -113,11 +113,9 @@ let runtimeInstance: {
   isPaused: ReturnType<typeof vi.fn>;
 };
 let refresherInstance: {
-  start: ReturnType<typeof vi.fn>;
-  onReconnect: ReturnType<typeof vi.fn>;
+  onRegistered: ReturnType<typeof vi.fn>;
   stop: ReturnType<typeof vi.fn>;
   pause: ReturnType<typeof vi.fn>;
-  resume: ReturnType<typeof vi.fn>;
   isInteractive: ReturnType<typeof vi.fn>;
   beginInteractive: ReturnType<typeof vi.fn>;
   endInteractive: ReturnType<typeof vi.fn>;
@@ -232,13 +230,13 @@ beforeEach(() => {
 
   runtimeInstance = {
     addAgent: vi.fn(),
-    start: vi.fn(async () => undefined),
+    start: vi.fn(async () => runtimeInstance.onRegistered.mock.calls[0]?.[0](false)),
     stop: vi.fn(async () => undefined),
     unwatchAgentsDir: vi.fn(),
     watchAgentsDir: vi.fn(() => {
       throw new Error("stop after watch");
     }),
-    onReconnect: vi.fn(),
+    onRegistered: vi.fn(),
     onAuthPaused: vi.fn(),
     onRuntimeAuthStart: vi.fn(),
     onProviderModelsList: vi.fn(),
@@ -249,11 +247,9 @@ beforeEach(() => {
   coreMocks.ClientRuntime.mockImplementation(() => runtimeInstance);
 
   refresherInstance = {
-    start: vi.fn(async () => undefined),
-    onReconnect: vi.fn(),
+    onRegistered: vi.fn(),
     stop: vi.fn(),
     pause: vi.fn(),
-    resume: vi.fn(),
     isInteractive: vi.fn(() => false),
     beginInteractive: vi.fn(),
     endInteractive: vi.fn(),
@@ -609,9 +605,9 @@ describe("daemon start command", () => {
       expect.objectContaining({ upload: expect.any(Function), log: expect.any(Function) }),
     );
     expect(coreMocks.CapabilityRefresher.mock.calls[0]?.[0]).not.toHaveProperty("initial");
-    expect(runtimeInstance.onReconnect).toHaveBeenCalledWith(expect.any(Function));
+    expect(runtimeInstance.onRegistered).toHaveBeenCalledWith(expect.any(Function));
     expect(runtimeInstance.onProviderModelsList).toHaveBeenCalledWith(expect.any(Function));
-    expect(refresherInstance.start).toHaveBeenCalled();
+    expect(refresherInstance.onRegistered).toHaveBeenCalledExactlyOnceWith(false);
     expect(coreMocks.listPinnedAgents).toHaveBeenCalledWith({
       serverUrl: "https://first-tree.example",
       accessToken: "access-token",
@@ -712,18 +708,15 @@ describe("daemon start command", () => {
     expect(output()).toContain("manual log check");
   });
 
-  it("routes the runtime's reconnect callback into the capability refresher", async () => {
+  it("routes initial and later registrations into the capability refresher", async () => {
     await expect(runStart(["--foreground"])).rejects.toMatchObject({ exitCode: 1 });
 
-    // start.ts no longer re-probes inline; it hands the runtime's reconnect
-    // signal to the refresher (whose probe/upload/dedup behavior is covered by
-    // capability-refresh.test.ts).
-    const reconnect = runtimeInstance.onReconnect.mock.calls[0]?.[0];
-    if (typeof reconnect !== "function") throw new Error("Reconnect callback was not registered");
+    const registered = runtimeInstance.onRegistered.mock.calls[0]?.[0];
+    if (typeof registered !== "function") throw new Error("Registration callback was not registered");
 
-    expect(refresherInstance.onReconnect).not.toHaveBeenCalled();
-    reconnect();
-    expect(refresherInstance.onReconnect).toHaveBeenCalledTimes(1);
+    expect(refresherInstance.onRegistered).toHaveBeenCalledExactlyOnceWith(false);
+    registered(true);
+    expect(refresherInstance.onRegistered.mock.calls).toEqual([[false], [true]]);
   });
 
   it("serializes runtime-auth login requests per provider", async () => {
@@ -771,6 +764,7 @@ describe("daemon start command", () => {
 
   it("publishes a runtime-verified Codex selection through the live capability refresher", async () => {
     runtimeInstance.start.mockImplementationOnce(async () => {
+      runtimeInstance.onRegistered.mock.calls[0]?.[0](false);
       codexCandidateChangeListener?.();
     });
 
@@ -779,7 +773,7 @@ describe("daemon start command", () => {
 
     expect(clientMocks.onCodexVerifiedAutomaticCandidateChange).toHaveBeenCalledTimes(1);
     expect(clientMocks.probeCodexCapability).toHaveBeenCalledTimes(1);
-    expect(refresherInstance.start).toHaveBeenCalledTimes(1);
+    expect(refresherInstance.onRegistered).toHaveBeenCalledExactlyOnceWith(false);
     expect(refresherInstance.setProviderEntry).toHaveBeenCalledWith(
       "codex",
       expect.objectContaining({
@@ -1193,32 +1187,19 @@ describe("daemon start command", () => {
     onAuthPaused();
     expect(refresherInstance.pause).toHaveBeenCalledTimes(1);
 
-    // The gate opens only AFTER runtime.start() resolved (the initial
-    // registration): resume first, then start() — while gated, start() is a
-    // no-op by design.
-    expect(refresherInstance.resume).toHaveBeenCalledTimes(1);
-    expect(refresherInstance.start).toHaveBeenCalledTimes(1);
-    expect(refresherInstance.resume.mock.invocationCallOrder[0]).toBeGreaterThan(
-      runtimeInstance.start.mock.invocationCallOrder[0] ?? Number.NEGATIVE_INFINITY,
+    expect(runtimeInstance.onRegistered.mock.invocationCallOrder[0]).toBeLessThan(
+      runtimeInstance.start.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
     );
-    expect(refresherInstance.resume.mock.invocationCallOrder[0]).toBeLessThan(
-      refresherInstance.start.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
-    );
-
-    // Re-registration path: the onReconnect callback ungates THEN refreshes,
-    // in that order (an onReconnect on a still-gated refresher would no-op).
-    const onReconnect = runtimeInstance.onReconnect.mock.calls[0]?.[0] as () => void;
-    refresherInstance.resume.mockClear();
-    onReconnect();
-    expect(refresherInstance.resume).toHaveBeenCalledTimes(1);
-    expect(refresherInstance.onReconnect).toHaveBeenCalledTimes(1);
-    expect(refresherInstance.resume.mock.invocationCallOrder[0]).toBeLessThan(
-      refresherInstance.onReconnect.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
-    );
+    expect(refresherInstance.onRegistered).toHaveBeenCalledExactlyOnceWith(false);
+    const onRegistered = runtimeInstance.onRegistered.mock.calls[0]?.[0] as (isReconnect: boolean) => void;
+    onRegistered(true);
+    expect(refresherInstance.onRegistered.mock.calls).toEqual([[false], [true]]);
   });
 
   it("keeps capability work paused when authentication fails during startup", async () => {
     runtimeInstance.start.mockImplementationOnce(async () => {
+      // Registration completes, then auth fails while agents are starting.
+      runtimeInstance.onRegistered.mock.calls[0]?.[0](false);
       runtimeInstance.isPaused.mockReturnValue(true);
       const onAuthPaused = runtimeInstance.onAuthPaused.mock.calls[0]?.[0] as () => void;
       onAuthPaused();
@@ -1227,14 +1208,15 @@ describe("daemon start command", () => {
     await expect(runStart(["--foreground"])).rejects.toMatchObject({ exitCode: 1 });
 
     expect(refresherInstance.pause).toHaveBeenCalledOnce();
-    expect(refresherInstance.resume).not.toHaveBeenCalled();
-    expect(refresherInstance.start).not.toHaveBeenCalled();
+    expect(refresherInstance.onRegistered).toHaveBeenCalledExactlyOnceWith(false);
+    expect(refresherInstance.onRegistered.mock.invocationCallOrder[0]).toBeLessThan(
+      refresherInstance.pause.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
 
     runtimeInstance.isPaused.mockReturnValue(false);
-    const onReconnect = runtimeInstance.onReconnect.mock.calls[0]?.[0] as () => void;
-    onReconnect();
-    expect(refresherInstance.resume).toHaveBeenCalledOnce();
-    expect(refresherInstance.onReconnect).toHaveBeenCalledOnce();
+    const onRegistered = runtimeInstance.onRegistered.mock.calls[0]?.[0] as (isReconnect: boolean) => void;
+    onRegistered(true);
+    expect(refresherInstance.onRegistered.mock.calls).toEqual([[false], [true]]);
   });
 
   it("runs graceful shutdown when SIGTERM arrives during the pending auth-paused initial start", async () => {

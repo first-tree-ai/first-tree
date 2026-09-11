@@ -1,6 +1,7 @@
 import { watch as importedWatch, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import type { AuthAttemptCredential } from "@first-tree/client";
 import type { ClientPausedReason } from "@first-tree/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -69,7 +70,7 @@ const connectionMock = {
   emit: vi.fn(),
   isPaused: vi.fn(() => false),
   getPausedReason: vi.fn<() => ClientPausedReason | null>(() => null),
-  getAuthAttemptCredential: vi.fn<() => string | null>(() => null),
+  getAuthAttemptCredential: vi.fn<() => AuthAttemptCredential | null>(() => null),
   clearPaused: vi.fn(),
   getMaxListeners: vi.fn(() => connectionMaxListeners),
   setMaxListeners: vi.fn((n: number) => {
@@ -144,7 +145,8 @@ vi.mock("@first-tree/client", () => {
   };
 });
 
-vi.mock("../core/bootstrap.js", () => ({
+vi.mock("../core/bootstrap.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../core/bootstrap.js")>()),
   ensureFreshAccessToken: vi.fn(async () => "tok-test"),
 }));
 
@@ -416,19 +418,18 @@ describe("ClientRuntime context-tree wiring", () => {
     rt.onReconnect(reconnectOk);
     rt.onReconnect(reconnectBroken);
     rt.onReconnect(reconnectStringBroken);
-    const welcome = connectionListeners.get("server:welcome");
-    if (!welcome) throw new Error("server:welcome listener missing");
+    const registered = vi.fn();
+    rt.onRegistered(registered);
     const connected = connectionListeners.get("connected");
     if (!connected) throw new Error("connected listener missing");
-    welcome({ isReconnect: false });
+    // Welcome is irrelevant to registration readiness, including failed handshakes.
+    expect(connectionListeners.has("server:welcome")).toBe(false);
     connected();
     expect(reconnectOk).not.toHaveBeenCalled();
-    // A reconnect welcome only ARMS publication — the listeners fire on the
-    // registration boundary (`connected`), never on the welcome frame alone.
-    welcome({ isReconnect: true });
-    expect(reconnectOk).not.toHaveBeenCalled();
+    expect(registered).toHaveBeenLastCalledWith(false);
     connected();
     expect(reconnectOk).toHaveBeenCalled();
+    expect(registered).toHaveBeenLastCalledWith(true);
     expect(print.status).toHaveBeenCalledWith("⚠️", "reconnect handler error: probe failed");
     expect(print.status).toHaveBeenCalledWith("⚠️", "reconnect handler error: probe string failed");
 
@@ -1224,20 +1225,30 @@ describe("ClientRuntime context-tree wiring", () => {
     expect(watchMockProbe).toBe(fsWatchMocks.watch);
     const { ClientRuntime } = await import("../core/client-runtime.js");
     mkdirSync(join(home, "config"), { recursive: true });
-    const oldCredentials = JSON.stringify({ refreshToken: "old" });
+    const oldCredentials = JSON.stringify({
+      serverUrl: "https://hub.test",
+      accessToken: "access",
+      refreshToken: "old",
+    });
     writeFileSync(join(home, "config", "credentials.json"), oldCredentials);
     const rt = new ClientRuntime("https://hub.test", "client-test");
     connectionMock.isPaused.mockReturnValue(true);
     connectionMock.getPausedReason.mockReturnValue("auth_refresh_failed");
     // The paused attempt used the credentials currently on disk.
-    connectionMock.getAuthAttemptCredential.mockReturnValue(oldCredentials);
+    connectionMock.getAuthAttemptCredential.mockReturnValue({
+      kind: "credential_snapshot",
+      value: JSON.stringify([join(home, "config", "credentials.json"), "https://hub.test", "access", "old"]),
+    });
 
     const paused = connectionListeners.get("auth:paused");
     if (!paused) throw new Error("auth:paused listener missing");
     paused("auth_refresh_failed", new Error("refresh rejected"));
     paused("auth_refresh_failed", new Error("refresh rejected again"));
     fsWatchMocks.state.callback("rename", "ignored.txt");
-    writeFileSync(join(home, "config", "credentials.json"), JSON.stringify({ refreshToken: "new" }));
+    writeFileSync(
+      join(home, "config", "credentials.json"),
+      JSON.stringify({ serverUrl: "https://hub.test", accessToken: "access", refreshToken: "new" }),
+    );
     if (!fsWatchMocks.state.registered) throw new Error("credentials watcher callback missing");
     fsWatchMocks.state.callback("change", "credentials.json");
     fsWatchMocks.state.callback("change", null);
@@ -1247,12 +1258,13 @@ describe("ClientRuntime context-tree wiring", () => {
 
     const runtimeProbe = rt as unknown as {
       credentialsDebounce: ReturnType<typeof setTimeout> | null;
-      readCredentialsSnapshot(path: string): string | null;
+      readCredentialsSnapshot(): string | null;
       readAgentYamlRecord(name: string): Record<string, unknown>;
       scanForNewAgents(agentsDir: string): void;
     };
     runtimeProbe.credentialsDebounce = setTimeout(() => undefined, 10_000);
-    expect(runtimeProbe.readCredentialsSnapshot(join(home, "config", "missing.json"))).toBeNull();
+    writeFileSync(join(home, "config", "credentials.json"), "invalid JSON");
+    expect(runtimeProbe.readCredentialsSnapshot()).toBeNull();
     expect(runtimeProbe.readAgentYamlRecord("missing")).toEqual({});
     mkdirSync(join(home, "config", "agents", "array-yaml"), { recursive: true });
     writeFileSync(join(home, "config", "agents", "array-yaml", "agent.yaml"), "[]\n");

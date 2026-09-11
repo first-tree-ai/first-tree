@@ -120,6 +120,11 @@ type PendingSessionEvent = {
   reject: (err: Error) => void;
 };
 
+/** Credential identity from the live attempt; never log or persist this value. */
+export type AuthAttemptCredential =
+  | { readonly kind: "access_token"; readonly value: string }
+  | { readonly kind: "credential_snapshot"; readonly value: string };
+
 export type ClientConnectionConfig = {
   serverUrl: string;
   /** Stable per-machine client identifier. Generated if omitted. */
@@ -593,10 +598,10 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
    * pre-provider credential-store snapshot when the provider failed before
    * any token was sent. Recorded only behind the retired-attempt fences,
    * so a stale provider completion can never overwrite a newer attempt's
-   * identity. Read together with {@link getPausedReason} to decide whether
-   * current credentials differ from the ones that failed.
+   * identity. The kind identifies how to compare current credentials with
+   * the ones that failed.
    */
-  private authAttemptCredential: string | null = null;
+  private authAttemptCredential: AuthAttemptCredential | null = null;
   /**
    * Last handshake error, stashed for the `close` handler to surface a typed
    * reason (e.g. {@link ClientOrgMismatchError}) instead of a generic
@@ -703,14 +708,15 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
    * paused: compare against the current credential store to resume only on
    * a real change.
    */
-  getAuthAttemptCredential(): string | null {
+  getAuthAttemptCredential(): AuthAttemptCredential | null {
     return this.authAttemptCredential;
   }
 
   /** Consumer snapshot hook, tolerated if it throws (disk hiccups). */
-  private readCredentialsSnapshot(): string | null {
+  private readCredentialsSnapshot(): AuthAttemptCredential | null {
     try {
-      return this.getCredentialsSnapshot?.() ?? null;
+      const value = this.getCredentialsSnapshot?.();
+      return value == null ? null : { kind: "credential_snapshot", value };
     } catch {
       return null;
     }
@@ -1685,7 +1691,7 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
           // Attempt identity = the token actually sent. Deliberately NOT
           // the pre-provider snapshot: a successful refresh may have
           // rotated access/refresh tokens inside the provider.
-          this.authAttemptCredential = token;
+          this.authAttemptCredential = { kind: "access_token", value: token };
           // C5: arm the proactive refresh timer as soon as we've sent the
           // auth frame — auth:ok only confirms the token was accepted, the
           // exp itself is already fixed on the token payload.

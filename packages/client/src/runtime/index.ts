@@ -5,6 +5,7 @@ export { AgentSlot } from "./agent-slot.js";
 export type { ContextTreeBinding } from "./bootstrap.js";
 export { resolveAgentContextTreeBinding } from "./bootstrap.js";
 export type {
+  AuthAttemptCredential,
   BoundAgent,
   ClientConnectionConfig,
   ProviderModelsListCommand,

@@ -451,20 +451,8 @@ export function registerDaemonStartCommand(daemon: Command): void {
             });
         };
         unregisterCodexCandidateChange = onCodexVerifiedAutomaticCandidateChange(publishCodexVerifiedSelection);
-        // D5: gate capability probe/upload work on the connection's auth
-        // paused mode — while credentials are dead, the poll's uploads would
-        // fire doomed `/auth/refresh` 401s at the base cadence forever. The
-        // gate opens ONLY after a successful (re)registration: onReconnect
-        // fires on a completed RE-registration, and the post-start path below
-        // handles the initial one. resume() merely ungates (it performs no
-        // work itself); onReconnect() then owns the catch-up, and stop()
-        // stays terminal — a credentials change must not revive a stopped
-        // refresher. There is deliberately no auth:resumed wiring: fresh
-        // credentials alone must not ungate before the registration lands.
-        runtime.onReconnect(() => {
-          capabilityRefresher.resume();
-          capabilityRefresher.onReconnect();
-        });
+        // Initial and later registrations share one readiness boundary.
+        runtime.onRegistered((isReconnect) => capabilityRefresher.onRegistered(isReconnect));
         runtime.onAuthPaused(() => capabilityRefresher.pause());
 
         // In-product runtime-auth: the server pushes `runtime-auth:start` when a
@@ -552,13 +540,6 @@ export function registerDaemonStartCommand(daemon: Command): void {
 
         await runtime.start();
 
-        // Registration precedes agent startup. If authentication failed
-        // while agents were starting, keep probes and uploads paused until
-        // a later successful registration resumes them.
-        if (!runtime.isPaused()) {
-          capabilityRefresher.resume();
-          void capabilityRefresher.start();
-        }
         codexCapabilityPublicationStarted = true;
         if (codexCapabilityPublicationPending) {
           codexCapabilityPublicationPending = false;

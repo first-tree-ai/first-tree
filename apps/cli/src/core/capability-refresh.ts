@@ -118,12 +118,8 @@ export class CapabilityRefresher {
    * Auth-paused gate (D5). While the connection sits in auth paused mode
    * every upload attempt ends in a doomed `/auth/refresh` 401 — and because
    * a failed upload resets the poll backoff, the refresher would otherwise
-   * hammer the server at the base cadence forever. `pause()` disarms the
-   * poll and blocks probes/uploads; `resume()` only ungates (actual work
-   * resumes via the next registration-driven {@link onReconnect}, never
-   * before the connection is back). Orthogonal to {@link stop}: `stopped`
-   * stays terminal — `resume()` must never revive a stopped refresher, and
-   * fresh auth credentials must not unblock one either.
+   * hammer the server at the base cadence forever. Only {@link onRegistered}
+   * releases this gate; fresh credentials alone do not. Stop stays terminal.
    */
   private paused = false;
 
@@ -145,8 +141,7 @@ export class CapabilityRefresher {
   async start(): Promise<void> {
     // Terminal stop and the auth-paused gate both win over a startup call:
     // a stopped refresher must never be revived by a late start(), and a
-    // paused one starts working only after the daemon ungates it via
-    // resume() (which the wiring calls only after a successful registration).
+    // paused one starts working only after onRegistered releases the gate.
     if (this.stopped || this.paused) return;
     if (this.snapshot) {
       try {
@@ -195,16 +190,12 @@ export class CapabilityRefresher {
     this.clearPending();
   }
 
-  /**
-   * Ungate after fresh credentials arrived (`auth:resumed`). Deliberately
-   * performs NO work by itself: `auth:resumed` fires before the
-   * reconnect/registration completes, and uploading before the clients row
-   * is re-established would just fail. The next registration-driven
-   * {@link onReconnect} owns the catch-up. No-op after {@link stop}.
-   */
-  resume(): void {
+  /** Release auth pause and start the appropriate work at the registration boundary. */
+  onRegistered(isReconnect: boolean): void {
     if (this.stopped) return;
     this.paused = false;
+    if (isReconnect) this.onReconnect();
+    else void this.start();
   }
 
   /**
@@ -392,8 +383,7 @@ export class CapabilityRefresher {
   private scheduleNext(): void {
     this.clearPending();
     if (this.stopped) return;
-    // Auth-paused: stay disarmed. resume() ungates and the next
-    // registration-driven onReconnect() re-arms via its own runRefresh.
+    // Auth-paused: only onRegistered can release this gate and re-arm work.
     if (this.paused) return;
     if (!this.needsRefresh()) {
       this.idleAttempts = 0;
