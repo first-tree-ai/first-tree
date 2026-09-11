@@ -431,7 +431,99 @@ export type MessagePurpose = z.infer<typeof messagePurposeSchema>;
  * false on every other message.
  */
 export const AGENT_FINAL_TEXT_METADATA_KEY = "agentFinalText";
+
+/**
+ * Metadata flag marking a STORED message as an operator-facing runtime notice
+ * ("the provider failed", "the usage limit is reached") rather than anything
+ * the agent chose to say.
+ *
+ * SERVER-OWNED, like `AGENT_FINAL_TEXT_METADATA_KEY`: the server strips any
+ * inbound copy on every write path and re-stamps the flag itself, so the stored
+ * value always reflects which endpoint was called rather than what a body
+ * claimed. That keeps the classification honest — the flag decides whether a
+ * row counts as an agent final-text mirror, which the staging view toggle
+ * filters on.
+ *
+ * It is a CLASSIFICATION LABEL, not a capability. It confers no authority a
+ * caller does not already have: the dedicated runtime-notice endpoint is gated
+ * on chat membership exactly like an ordinary send, so any credential that can
+ * reach one can reach the other.
+ */
 export const RUNTIME_NOTICE_METADATA_KEY = "runtimeNotice";
+
+/**
+ * Upper bound on a runtime notice's text. The longest notice the runtime
+ * composes today is a provider-failure lead plus a 500-character redacted
+ * provider preview; this leaves generous headroom while keeping the dedicated
+ * route from becoming a general-purpose writing surface.
+ */
+export const RUNTIME_NOTICE_MAX_LENGTH = 4_000;
+
+/**
+ * Body of `POST /api/v1/agent/chats/:chatId/runtime-notices`.
+ *
+ * Deliberately carries ONLY the notice text: `source`, `format`, `purpose` and
+ * every metadata marker are authored by the server. `.strict()` makes an
+ * attempt to smuggle those fields a 400 rather than a silent drop, so a caller
+ * that still believes it can shape the stored row fails loudly.
+ */
+export const runtimeNoticeRequestSchema = z
+  .object({
+    content: z.string().min(1).max(RUNTIME_NOTICE_MAX_LENGTH),
+  })
+  .strict();
+export type RuntimeNoticeRequest = z.infer<typeof runtimeNoticeRequestSchema>;
+
+/**
+ * The wire shape a client OLDER than the runtime-notice endpoint uses to
+ * publish the same notice: an ordinary agent send decorated with the marker and
+ * the silent final-text delivery purpose. Every pre-endpoint call site — the
+ * provider-failure notice and both Codex usage-limit notices — emitted exactly
+ * these five fields.
+ *
+ * It exists in shared so the two halves of the rolling-deploy story cannot
+ * drift: the SDK falls back to this body when the new endpoint 404s on an older
+ * server, and the server recognises this body with
+ * `isLegacyRuntimeNoticeSend()` when an older client posts to a new server. A
+ * provider-failure notice is most valuable exactly during a deploy, so neither
+ * direction may drop it.
+ */
+export function legacyRuntimeNoticeSendBody(content: string): SendMessage {
+  return {
+    source: "api",
+    format: "text",
+    content,
+    metadata: { [RUNTIME_NOTICE_METADATA_KEY]: true },
+    purpose: "agent-final-text",
+  };
+}
+
+/**
+ * True when a send body is exactly the legacy runtime-notice shape above.
+ *
+ * SHAPE MATCHING, NOT AUTHORIZATION. The match is deliberately exact — the
+ * final-text purpose, `format: "text"`, `source: "api"`, and `runtimeNotice`
+ * as the sole metadata key — so it recognises the bodies real older clients
+ * emit and nothing else. It is not a permission check and must not be read as
+ * one: any caller could assemble this body, just as any caller could POST to
+ * the runtime-notice endpoint directly. Both are membership-gated and neither
+ * is a security boundary; matching here only preserves the delivery an older
+ * client already had.
+ */
+export function isLegacyRuntimeNoticeSend(body: {
+  format?: unknown;
+  source?: unknown;
+  purpose?: unknown;
+  metadata?: Record<string, unknown> | null;
+}): boolean {
+  if (body.purpose !== "agent-final-text") return false;
+  if (body.format !== "text") return false;
+  if (body.source !== "api") return false;
+  const metadata = body.metadata;
+  if (!metadata) return false;
+  const keys = Object.keys(metadata);
+  return keys.length === 1 && keys[0] === RUNTIME_NOTICE_METADATA_KEY && metadata[RUNTIME_NOTICE_METADATA_KEY] === true;
+}
 
 /** True when a stored message's metadata marks it as an agent final-text mirror. */
 export function isAgentFinalTextMetadata(metadata: Record<string, unknown> | null | undefined): boolean {

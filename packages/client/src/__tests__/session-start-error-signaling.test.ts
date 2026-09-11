@@ -37,8 +37,10 @@ import { mockEntry } from "./test-helpers.js";
 function mockSdk(): {
   sdk: FirstTreeHubSDK;
   sendMessage: ReturnType<typeof vi.fn>;
+  postRuntimeNotice: ReturnType<typeof vi.fn>;
 } {
   const sendMessage = vi.fn().mockResolvedValue({ id: "msg-reply" });
+  const postRuntimeNotice = vi.fn().mockResolvedValue({ id: "runtime-notice" });
   const listChatParticipants = vi.fn().mockResolvedValue([
     { agentId: "agent-1", role: "member", mode: "full", name: "agent", displayName: "Agent", type: "agent" },
     { agentId: "user-1", role: "member", mode: "full", name: "user", displayName: "User", type: "human" },
@@ -47,10 +49,12 @@ function mockSdk(): {
     sdk: {
       register: vi.fn(),
       sendMessage,
+      postRuntimeNotice,
       sendToAgent: vi.fn().mockResolvedValue({ id: "msg-dm" }),
       listChatParticipants,
     } as unknown as FirstTreeHubSDK,
     sendMessage,
+    postRuntimeNotice,
   };
 }
 

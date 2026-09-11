@@ -135,6 +135,16 @@ export const chatParticipantDetailSchema = chatParticipantSchema.extend({
 });
 export type ChatParticipantDetail = z.infer<typeof chatParticipantDetailSchema>;
 
+/**
+ * External IM conversations a First Tree chat can be bridged to. Distinct from
+ * `ChatSource` (a conversation-list origin label projected from
+ * `chats.metadata`): this one is a live binding state, so it goes back to
+ * `null` once the binding detaches.
+ */
+export const CHAT_EXTERNAL_CHANNELS = ["feishu"] as const;
+export const chatExternalChannelSchema = z.enum(CHAT_EXTERNAL_CHANNELS);
+export type ChatExternalChannel = z.infer<typeof chatExternalChannelSchema>;
+
 export const chatSchema = z.object({
   id: z.string(),
   organizationId: z.string(),
@@ -201,6 +211,18 @@ export const chatDetailSchema = chatSchema.extend({
    * payload.
    */
   lastReadAt: z.string().nullable().default(null),
+  /**
+   * The external IM conversation this chat is currently bridged to, or NULL.
+   * Authoritative live binding state (`im_chat_bindings` filtered to
+   * `status = 'active'`), not the `metadata.source` label — a detached chat
+   * reports NULL here while its metadata still says `"feishu"`.
+   *
+   * The agent CLI reads it to refuse `chat create` / `chat open` from inside a
+   * bridged chat before spending a write, using the exact same signal the
+   * server's own agent-scope boundary enforces. `.default(null)`: only the
+   * agent chat-detail route populates it.
+   */
+  externalChannel: chatExternalChannelSchema.nullable().default(null),
 });
 export type ChatDetail = z.infer<typeof chatDetailSchema>;
 

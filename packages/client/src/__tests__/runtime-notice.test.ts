@@ -1,6 +1,6 @@
-import { type ProviderRetryEventPayload, RUNTIME_NOTICE_METADATA_KEY } from "@first-tree/shared";
-import { describe, expect, it, vi } from "vitest";
-import { FirstTreeHubSDK } from "../cloud/sdk.js";
+import type { ProviderRetryEventPayload } from "@first-tree/shared";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { FirstTreeHubSDK, SdkError } from "../cloud/sdk.js";
 import {
   formatProviderFailureRuntimeNotice,
   isEgressForbiddenText,
@@ -156,9 +156,9 @@ describe("runtime notice formatting", () => {
     expect(isEgressForbiddenText("Request not allowed")).toBe(false);
   });
 
-  it("sends the formatted notice as final API text with runtime metadata", async () => {
+  it("publishes the formatted notice through the dedicated runtime-notice endpoint", async () => {
     const sdk = new FirstTreeHubSDK({ serverUrl: "https://first-tree.test", getAccessToken: () => "token" });
-    const sendMessage = vi.spyOn(sdk, "sendMessage").mockResolvedValue({
+    const postRuntimeNotice = vi.spyOn(sdk, "postRuntimeNotice").mockResolvedValue({
       id: "msg-1",
       chatId: "chat-1",
       senderId: "agent-1",
@@ -174,12 +174,88 @@ describe("runtime notice formatting", () => {
 
     await postProviderFailureRuntimeNotice(sdk, "chat-1", payload({ messagePreview: "refresh token revoked" }));
 
-    expect(sendMessage).toHaveBeenCalledWith("chat-1", {
+    // Only the text travels: the server authors source/format/purpose and the
+    // stored runtimeNotice marker, so a notice cannot quietly become an
+    // addressed message.
+    expect(postRuntimeNotice).toHaveBeenCalledWith("chat-1", expect.stringContaining("refresh token revoked"));
+  });
+});
+
+/**
+ * ROLLING DEPLOY, new client → old server. The runtime is upgraded
+ * independently of the server it talks to, so a runtime that knows the
+ * dedicated endpoint will meet servers that do not. A provider-failure notice
+ * is most valuable precisely then, so a 404 must degrade to the older wire
+ * shape rather than drop the notice.
+ */
+describe("runtime notice endpoint compatibility", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function jsonResponse(data: unknown, status = 200): Response {
+    return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
+  }
+
+  function storedMessage(): Record<string, unknown> {
+    return {
+      id: "msg-1",
+      chatId: "chat-1",
+      senderId: "agent-1",
+      senderKind: "member",
+      senderProvider: null,
+      format: "text",
+      content: "notice",
+      metadata: {},
+      inReplyTo: null,
+      source: "api",
+      createdAt: "2026-07-09T00:00:00.000Z",
+    };
+  }
+
+  function makeSdk(): FirstTreeHubSDK {
+    return new FirstTreeHubSDK({
+      serverUrl: "https://first-tree.example",
+      agentId: "agent-1",
+      getAccessToken: () => "access-token",
+    });
+  }
+
+  it("falls back to the legacy send shape when the server has no runtime-notice route", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ error: "Route POST:/api/v1/... not found" }, 404))
+      .mockResolvedValueOnce(jsonResponse(storedMessage(), 201));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const message = await makeSdk().postRuntimeNotice("chat-1", "provider failed");
+
+    expect(message.id).toBe("msg-1");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/runtime-notices");
+    const fallbackUrl = String(fetchMock.mock.calls[1]?.[0]);
+    expect(fallbackUrl).toContain("/chats/chat-1/messages");
+    // Exactly the body the server recognises as a legacy runtime notice; the
+    // two sides share `legacyRuntimeNoticeSendBody` so they cannot drift.
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
       source: "api",
       format: "text",
-      content: expect.stringContaining("refresh token revoked"),
-      metadata: { [RUNTIME_NOTICE_METADATA_KEY]: true },
+      content: "provider failed",
+      metadata: { runtimeNotice: true },
       purpose: "agent-final-text",
     });
+  });
+
+  it("does not reshape a genuine refusal into an ordinary send", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ error: "Not a participant of this chat" }, 403));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(makeSdk().postRuntimeNotice("chat-1", "provider failed")).rejects.toBeInstanceOf(SdkError);
+    // Only 404 means "this server predates the route". Anything else must not
+    // be retried as a plain message, which in a bridged chat would be refused
+    // anyway and elsewhere would land mislabelled.
+    for (const call of fetchMock.mock.calls) {
+      expect(String(call[0])).toContain("/runtime-notices");
+    }
   });
 });

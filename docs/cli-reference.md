@@ -689,6 +689,64 @@ If a non-human agent includes itself in `chat create --to`, the server records
 the originating agent in metadata and uses that agent's manager human as the
 effective sender so the first message can wake the agent normally.
 
+### Chats bridged to a Feishu conversation
+
+A chat bound to a Feishu conversation is mirrored into that conversation, and
+the people in it read Feishu — not the First Tree web app. A First Tree
+*message* written into such a chat therefore reaches nobody on the other side.
+To make that failure loud instead of silent, **messages and membership changes
+are blocked** in a bridged chat:
+
+| Command | In a bridged chat |
+| --- | --- |
+| `chat send`, `chat ask` | refused, HTTP 403 `FEISHU_CHAT_AGENT_WRITE_FORBIDDEN` |
+| `chat invite` | refused, same code |
+| message edit, participant removal | refused, same code — same class as the two above |
+| `chat create`, `chat open` | refused locally before anything is created |
+| `chat update --topic/--description` | **works** — chat self-description, not a message |
+| `chat archive` | **works** — private per-user view state |
+| `chat list`, `chat history` | **works** — reads are unaffected |
+| `feishu intent`, `feishu credential-env` (+ official `lark-cli --as bot`) | **works** — this is the delivery path |
+
+The Web app's own read, pin and archive state on a bridged chat keeps working
+too; it is personal view state, not a change anyone else sees.
+
+This is not a blanket read-only mode: it blocks the operations that would
+strand a human — a message no one receives, and a membership change to a room
+no one can see — and leaves everything else alone.
+
+To answer a bridged conversation, record the delivery with `feishu intent` and
+send it with the official `lark-cli --as bot`. To reach a First Tree teammate
+about the work, hand off from a chat that is not bridged.
+
+The boundary follows the **live** binding, not the chat's origin label: once the
+binding is detached the chat is no longer mirrored anywhere, and every command
+above works normally again. The Web app applies the same rule to its own
+structural writes.
+
+Refusals happen only after the caller's chat membership is verified, so the
+error cannot be used to discover which chats are Feishu-bound.
+
+Operator-facing runtime notices ("the provider failed", "usage limit reached")
+are exempt and still land in a bridged chat's First Tree history — an agent that
+cannot run at all must not also go silent. The exemption belongs to a dedicated
+server endpoint the client runtime posts to, so an ordinary `chat send` cannot
+obtain it by describing itself as a notice.
+
+Be precise about what that endpoint is: a **misuse-prevention rail** carrying a
+notice the client runtime reports about itself, not a security or authorization
+boundary. It is gated on chat membership and nothing more — the same gate as an
+ordinary send — so it prevents the accidental and the careless, not the
+determined. Its separate existence is still worth having: the ordinary send path
+stays uniformly blocked, and the server authors the whole stored row so a notice
+cannot quietly become an addressed message. Narrowing the capability further is
+an open question, not something this boundary already does.
+
+During a rolling deploy the endpoint degrades in both directions rather than
+dropping notices: a newer client falls back to the older wire shape when the
+server has no such route, and a newer server still recognises that older shape
+from a client that predates the endpoint.
+
 ---
 
 ## doc
@@ -2102,10 +2160,30 @@ agent process can talk to the server without extra setup:
 | Variable | Purpose |
 |---|---|
 | `FIRST_TREE_ACCESS_TOKEN` | The signed-in member's access JWT (short-lived). |
-| `FIRST_TREE_AGENT_ID` | The agent's own UUID — the CLI uses it to identify the sender. |
+| `FIRST_TREE_AGENT_ID` | The agent's own UUID — the CLI uses it to identify the sender. Also the identity that reads the session's own chat for the Feishu origin check below. |
 | `FIRST_TREE_CLIENT_ID` | The client (machine) the agent is bound to. |
-| `FIRST_TREE_CHAT_ID` | The chat the current session is bound to. Used by `chat send` / `chat invite`, and by every `cron` command (including `preview` / `list` / `show`). |
+| `FIRST_TREE_CHAT_ID` | The chat the current session is bound to. Used by `chat send` / `chat invite`, by every `cron` command (including `preview` / `list` / `show`), and by the Feishu origin check below. |
 | `FIRST_TREE_SERVER_URL` | Server URL override; falls back to client config. |
+
+**The Feishu origin check on `chat create` / `chat open`.** These two commands
+cannot be gated server-side — `chat create` never transmits the chat it is
+being run from, and `chat open` runs on the user scope — so the CLI reads
+`FIRST_TREE_CHAT_ID` and `FIRST_TREE_AGENT_ID` and asks the server whether that
+chat is bridged to a Feishu conversation ([see above](#chats-bridged-to-a-feishu-conversation)).
+
+The check is deliberately conservative about what it treats as "not bridged":
+
+| Session | Behavior |
+|---|---|
+| No `FIRST_TREE_CHAT_ID` | Allowed without any lookup — an operator terminal is not running inside a chat, and needs no agent configured. |
+| Both variables set, chat not bridged | Allowed. |
+| Both variables set, chat bridged | Refused with `FEISHU_CHAT_CONTEXT`. |
+| `FIRST_TREE_CHAT_ID` set, `FIRST_TREE_AGENT_ID` unset | Refused with `FEISHU_CHAT_CONTEXT_UNKNOWN` — there is a chat context, but nothing that can read it. |
+| Lookup failed, or the server did not report the chat's channel | Refused with `FEISHU_CHAT_CONTEXT_UNKNOWN` — including against a server older than the field, so a rolling deploy cannot silently disable the check. |
+
+An `unknown` refusal names what to fix: export `FIRST_TREE_AGENT_ID`, unset
+`FIRST_TREE_CHAT_ID` if the session is not attached to a chat, retry once the
+server is reachable, or run from a chat that is not bridged.
 
 ### Server (SaaS internal)
 
