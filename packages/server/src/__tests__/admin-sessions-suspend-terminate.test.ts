@@ -1107,24 +1107,36 @@ describe("Terminate with apply-ack (?waitForApply=true) — the Web Reset path",
   it("falls back to the durable ack when the result wake is lost", async () => {
     const { app, admin, agent, chat, ws } = await setup("suspended");
     setClientReplyTimeoutMsForTests(50);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
+      let resolveSent: ((frame: { ref: string }) => void) | undefined;
+      const sent = new Promise<{ ref: string }>((resolve) => {
+        resolveSent = resolve;
+      });
+      ws.send.mockImplementationOnce((raw: string) => {
+        resolveSent?.(JSON.parse(raw) as { ref: string });
+      });
+
       const pending = terminateReq(app, admin, agent.uuid, chat.id);
-      await vi.waitFor(() => expect(ws.send).toHaveBeenCalled());
-      const frame = JSON.parse(ws.send.mock.calls[0]?.[0] as string) as { ref: string };
+      const frame = await sent;
       // The ack lands durable but the NOTIFY wake is lost (not sent); the
       // waiter will time out and the route must read the durable copy once
       // before failing.
-      await storeSessionCommandRpcResult(
-        app.db,
-        admin.clientId,
-        frame.ref,
-        { command: "session:terminate", agentId: agent.uuid, chatId: chat.id, applied: true },
-        LOCAL_INSTANCE,
-      );
+      expect(
+        await storeSessionCommandRpcResult(
+          app.db,
+          admin.clientId,
+          frame.ref,
+          { command: "session:terminate", agentId: agent.uuid, chatId: chat.id, applied: true },
+          LOCAL_INSTANCE,
+        ),
+      ).toBe(true);
+      await vi.advanceTimersByTimeAsync(50);
       const res = await pending;
       expect(res.statusCode).toBe(200);
       expect(res.json()).toMatchObject({ state: "evicted", applied: true });
     } finally {
+      vi.useRealTimers();
       setClientReplyTimeoutMsForTests(null);
       cleanup(admin, ws);
     }
