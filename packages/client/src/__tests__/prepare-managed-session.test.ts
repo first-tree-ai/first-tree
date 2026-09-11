@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -67,6 +67,10 @@ vi.mock("../runtime/managed-skills.js", () => ({
     runtimeConfig: unknown,
     log: unknown,
     resolver: unknown,
+    // Forwarded so a test can assert the mode the projection was asked for.
+    // `external` must arrive as itself: it selects the reduced Core Skill set,
+    // and the admission proof is keyed to the same value.
+    contextSourceKind?: unknown,
   ) => {
     const result = await reconcileManagedSkillsForConfig(
       workspace,
@@ -75,12 +79,15 @@ vi.mock("../runtime/managed-skills.js", () => ({
       runtimeConfig,
       log,
       resolver,
+      contextSourceKind,
     );
     const root = join(
       workspace as string,
       (providerSkillRoots as Record<string, string>)[provider as string] as string,
     );
-    for (const name of ["first-tree-read", "first-tree-write"]) {
+    // Mirror the real reconciler: external mode projects neither of these.
+    const projected = contextSourceKind === "external" ? [] : ["first-tree-read", "first-tree-write"];
+    for (const name of projected) {
       const skillDir = join(root, name);
       mkdirSync(skillDir, { recursive: true });
       writeFileSync(join(skillDir, "SKILL.md"), `# ${name}\n`);
@@ -108,7 +115,7 @@ vi.mock("../runtime/agent-bootstrap.js", () => ({
     sessionCtx: SessionContext;
     agentName: string;
     contextTreePath: string | null;
-    contextSourceKind: "remote" | "local" | "none";
+    contextSourceKind: "remote" | "local" | "none" | "external";
     briefing: string;
     currentSourceRepoNames: ReadonlySet<string> | null;
   }) => {
@@ -135,7 +142,10 @@ vi.mock("../runtime/agent-bootstrap.js", () => ({
     rmSync(claudePath, { force: true });
     if (process.platform === "win32") writeFileSync(claudePath, params.briefing);
     else symlinkSync("AGENTS.md", claudePath);
-    if (params.contextSourceKind !== "none" && params.currentSourceRepoNames !== null) {
+    // External mode owns no workspace tree directory, so like `none` it gets no
+    // workspace manifest — `workspaceTreeName("external")` is null.
+    const ownsTree = params.contextSourceKind !== "none" && params.contextSourceKind !== "external";
+    if (ownsTree && params.currentSourceRepoNames !== null) {
       const stateDir = join(params.workspace, ".first-tree");
       mkdirSync(stateDir, { recursive: true });
       writeFileSync(
@@ -244,6 +254,99 @@ describe("prepareManagedSession", () => {
   async function loadPrepare() {
     const mod = await import("../runtime/provider-support/preparation.js");
     return mod.prepareManagedSession;
+  }
+
+  it("forwards external mode to the projection instead of collapsing it to remote", async () => {
+    // External mode is driven by `context_tree.repository` in client.yaml, and
+    // `resolveAgentContextSource` reads it through FIRST_TREE_HOME. Point that at
+    // a scratch home so the real resolution path runs.
+    const configHome = mkdtempSync(join(tmpdir(), "prepare-external-home-"));
+    mkdirSync(join(configHome, "config"), { recursive: true });
+    writeFileSync(
+      join(configHome, "config", "client.yaml"),
+      "server:\n  url: http://localhost:8000\ncontext_tree:\n  repository: acme/context\n",
+      "utf8",
+    );
+    const previousHome = process.env.FIRST_TREE_HOME;
+    process.env.FIRST_TREE_HOME = configHome;
+
+    try {
+      // Claude is one of the two hosts the external installer supports, so this
+      // is a provider where external mode can actually deliver the Skills.
+      await runExternalModePreparation("claude-code");
+    } finally {
+      if (previousHome === undefined) delete process.env.FIRST_TREE_HOME;
+      else process.env.FIRST_TREE_HOME = previousHome;
+    }
+  });
+
+  it("keeps First Tree's own Skills for a provider the external installer cannot reach", async () => {
+    // `context-tree install` supports only `claude` and `codex`; for any other
+    // host it installs nothing and reports a skip. Standing down
+    // `first-tree-{read,write}` here would leave the machine with no Context
+    // Tree Skills at all, so external mode must not apply to this provider.
+    const configHome = mkdtempSync(join(tmpdir(), "prepare-external-unsupported-"));
+    mkdirSync(join(configHome, "config"), { recursive: true });
+    writeFileSync(
+      join(configHome, "config", "client.yaml"),
+      "server:\n  url: http://localhost:8000\ncontext_tree:\n  repository: acme/context\n",
+      "utf8",
+    );
+    const previousHome = process.env.FIRST_TREE_HOME;
+    process.env.FIRST_TREE_HOME = configHome;
+
+    try {
+      await runExternalModePreparation("cursor");
+    } finally {
+      if (previousHome === undefined) delete process.env.FIRST_TREE_HOME;
+      else process.env.FIRST_TREE_HOME = previousHome;
+    }
+  });
+
+  async function runExternalModePreparation(runtimeProvider: "claude-code" | "cursor"): Promise<void> {
+    const supported = runtimeProvider === "claude-code";
+    const prepareManagedSession = await loadPrepare();
+    const payload = {
+      kind: "cursor" as const,
+      prompt: { append: "" },
+      model: "",
+      mcpServers: [],
+      env: [],
+      gitRepos: [],
+      resourceSkills: [],
+    };
+
+    await prepareManagedSession({
+      sessionCtx: sessionCtx(),
+      workspaceRoot,
+      agentName: "prep-agent",
+      runtimeProvider,
+      providerSkillRoots: TEST_PROVIDER_SKILL_ROOTS,
+      runtimeConfig: null,
+      payload,
+      payloadResolved: true,
+      contextTree: { kind: "external", path: null, repoUrl: null, branch: null, repository: "acme/context" },
+    });
+
+    const kinds = reconcileManagedSkillsForConfig.mock.calls.map((call) => call[6]);
+    if (supported) {
+      // Regression guard: the projection used to receive `remote` for anything
+      // that was not `local`. That would project `first-tree-read` /
+      // `first-tree-write` and then fail the admission proof, which expects them
+      // gone in this mode.
+      expect(kinds).toContain("external");
+      expect(kinds).not.toContain("remote");
+    } else {
+      // `none` collapses to the ordinary full-Skill mode on the way into the
+      // reconciler, which is the point: this provider keeps
+      // `first-tree-{read,write,seed}` instead of having them stood down for
+      // `context-tree-*` Skills that were never installed for it.
+      expect(kinds).not.toContain("external");
+      expect(kinds).toContain("remote");
+    }
+
+    // Either way no workspace tree is owned, so no manifest names one.
+    expect(existsSync(join(workspaceRoot, ".first-tree", "workspace.json"))).toBe(false);
   }
 
   it("runs the admission sequence in order and returns stable consumer values", async () => {

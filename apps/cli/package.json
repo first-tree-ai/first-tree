@@ -71,6 +71,7 @@
     "node": ">=22.13.0"
   },
   "dependencies": {
+    "@antfu/utils": "^9.3.0",
     "@anthropic-ai/claude-agent-sdk": "^0.3.187",
     "@botiverse/kimi-code-sdk": "0.26.0-botiverse.2",
     "@deepseek-ai/dsh-agent-spine-demo": "0.0.1-rc.5",
@@ -83,7 +84,7 @@
     "@deepseek-ai/dsh-sdk-protocol": "0.0.1-rc.5",
     "@deepseek-ai/dsh-session": "0.0.1-rc.5",
     "@deepseek-ai/dsh-session-persistence-jsonl": "0.0.1-rc.5",
-    "@antfu/utils": "^9.3.0",
+    "@first-tree-ai/context-tree": "^0.1.12",
     "@inquirer/prompts": "^8.3.0",
     "@openai/codex-sdk": "^0.144.1",
     "commander": "^13.1.0",

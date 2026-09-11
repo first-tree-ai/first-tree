@@ -8,7 +8,14 @@ export {
   DEFAULT_WORKING_GRACE_SECONDS,
 } from "./agent-config.js";
 export type { ClientConfig } from "./client-config.js";
-export { clientConfigSchema, getClientConfig, updatePolicySchema } from "./client-config.js";
+export {
+  clientConfigSchema,
+  getClientConfig,
+  normalizeContextTreeRepository,
+  readContextTreeRepository,
+  readContextTreeRepositorySetting,
+  updatePolicySchema,
+} from "./client-config.js";
 // Agent loader
 export { loadAgents } from "./loader.js";
 export type { UpdatePolicy } from "./phase.js";

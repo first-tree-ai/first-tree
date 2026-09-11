@@ -24,6 +24,7 @@ import { bootstrapWorkspace, type PredeclaredSourceRepo, writeAgentBriefing } fr
 import { type ChatContext, fetchChatContext } from "../chat-context.js";
 import {
   type ContextSourceKind,
+  effectiveContextSourceKind,
   inspectRemoteLatch,
   recordRemoteBindingObservation,
   resolveAgentContextSource,
@@ -63,10 +64,20 @@ export type ContextTreeCoordinates = {
   path: string | null;
   repoUrl: string | null;
   branch: string | null;
+  /**
+   * GitHub OWNER/REPO in external mode, null otherwise.
+   *
+   * It travels with the coordinates rather than being re-read from config at
+   * render time because the briefing is compared byte-for-byte during admission:
+   * both the expected and the published briefing must derive it identically.
+   */
+  repository?: string | null;
 };
 
 function contextSourceKindFromCoordinates(tree: ContextTreeCoordinates): ContextSourceKind {
-  if (tree.kind === "local" || tree.kind === "remote" || tree.kind === "none") return tree.kind;
+  if (tree.kind === "local" || tree.kind === "remote" || tree.kind === "none" || tree.kind === "external") {
+    return tree.kind;
+  }
   if (tree.path && tree.repoUrl) return "remote";
   return "none";
 }
@@ -305,7 +316,9 @@ async function verifyCompleteCapturedProjection(
     contextTree: ContextTreeCoordinates;
   },
 ): Promise<VerifiedManagedSkillsProjection | null> {
-  const kind = contextSourceKindFromCoordinates(expected.contextTree);
+  // Provider-aware: admission must derive the same kind the projection used, or
+  // it rejects the state it just published. See `effectiveContextSourceKind`.
+  const kind = effectiveContextSourceKind(contextSourceKindFromCoordinates(expected.contextTree), runtimeProvider);
   const expectedIdentity = JSON.parse(
     JSON.stringify({
       agentId: expected.sessionCtx.agent.agentId,
@@ -340,6 +353,7 @@ async function verifyCompleteCapturedProjection(
     workspace: targetWorkspace,
     provider: runtimeProvider,
     providerSkillRoots,
+    contextSourceKind: kind,
   });
   if (!managed) return null;
 
@@ -353,6 +367,7 @@ async function verifyCompleteCapturedProjection(
     contextTreeRepoUrl: expected.contextTree.repoUrl,
     contextTreeBranch: expected.contextTree.branch,
     contextSourceKind: kind,
+    contextTreeRepository: expected.contextTree.repository ?? null,
     teamSkills: managed.teamSkills,
   });
   const agentsPath = join(targetWorkspace, "AGENTS.md");
@@ -515,7 +530,10 @@ function sameContextCoordinates(left: ContextTreeCoordinates, right: ContextTree
     contextSourceKindFromCoordinates(left) === contextSourceKindFromCoordinates(right) &&
     left.path === right.path &&
     left.repoUrl === right.repoUrl &&
-    left.branch === right.branch
+    left.branch === right.branch &&
+    // Retargeting external mode at a different repository is a source
+    // transition, not a no-op: the Agent's whole Context Tree changes.
+    (left.repository ?? null) === (right.repository ?? null)
   );
 }
 
@@ -526,7 +544,11 @@ function coordinatesFromResolvedSource(
     ? { kind: "remote", path: source.path, repoUrl: source.repoUrl, branch: source.branch }
     : source.kind === "local"
       ? { kind: "local", path: source.path, repoUrl: null, branch: null }
-      : { kind: "none", path: null, repoUrl: null, branch: null };
+      : source.kind === "external"
+        ? // External mode owns no workspace tree path; the coordinates carry the
+          // mode and repository so the projection and briefing can branch on it.
+          { kind: "external", path: null, repoUrl: null, branch: null, repository: source.repository }
+        : { kind: "none", path: null, repoUrl: null, branch: null };
 }
 
 export type ProjectedManagedWorkspace = {
@@ -674,7 +696,10 @@ export async function projectManagedWorkspace(
       }
       contextTree = resolvedTree;
     }
-    const requestedKind = contextSourceKindFromCoordinates(contextTree);
+    // A provider the external installer cannot reach falls back to `none`, so it
+    // keeps First Tree's own Tree Skills instead of standing them down for
+    // `context-tree-*` Skills that were never installed there.
+    const requestedKind = effectiveContextSourceKind(contextSourceKindFromCoordinates(contextTree), runtimeProvider);
     const latch = inspectRemoteLatch(sourceAuthorityRoot);
 
     assertRuntimeConfigCanPublish(workspace, sourceAuthorityRoot, runtimeConfig, existingPayload !== undefined);
@@ -684,6 +709,7 @@ export async function projectManagedWorkspace(
         workspace,
         provider: runtimeProvider,
         providerSkillRoots,
+        contextSourceKind: requestedKind,
       });
       if (!managedProjection) {
         throw new ManagedSkillsUnsafeDiscoveryError(
@@ -804,7 +830,12 @@ export async function projectManagedWorkspace(
       ensureTrustedChildDirectory(trustedAuthority, WORKSPACE_STATE_DIRNAME, "Workspace manifest directory");
     }
 
-    const skillKind: ContextSourceKind = requestedKind === "local" ? "local" : "remote";
+    // `local` selects the private Local Skill variants; `external` selects the
+    // reduced Core Skill set. Both must survive — the admission proof is keyed to
+    // the same mode, so collapsing `external` to `remote` here would project the
+    // superseded Skills and then fail the proof that expects them gone.
+    const skillKind: ContextSourceKind =
+      requestedKind === "local" || requestedKind === "external" ? requestedKind : "remote";
     const sourceRepos = suppressSourceRepos ? [] : declaredSourceRepos(workspace, payload);
 
     const { teamSkills, teamSkillCommands, resourceConfigVersion, staleTeamSnapshot } =
@@ -867,6 +898,7 @@ export async function projectManagedWorkspace(
         workspace,
         provider: runtimeProvider,
         providerSkillRoots,
+        contextSourceKind: requestedKind,
       });
       sessionCtx.publishTeamSkillCommands(
         verified
@@ -896,6 +928,7 @@ export async function projectManagedWorkspace(
       contextTreeRepoUrl: contextTree.repoUrl,
       contextTreeBranch: contextTree.branch,
       contextSourceKind: requestedKind,
+      contextTreeRepository: contextTree.repository ?? null,
       teamSkills,
     });
     const publicationSourceNames = currentSourceRepoNamesFromPayload(payload, payloadResolved);
