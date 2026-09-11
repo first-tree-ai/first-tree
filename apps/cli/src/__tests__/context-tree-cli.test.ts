@@ -324,6 +324,30 @@ describe("ensureContextTreeSkills switched back off", () => {
     expect(existsSync(join(home, ".claude", "skills", "context-tree-read"))).toBe(true);
   });
 
+  it.each([false, true])("preserves customized Skills on repeated login (owned: %s)", async (owned) => {
+    const home = scratchHome("acme/context");
+    scratchBinDir("first-tree-test");
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    const { ensureContextTreeSkills, runContextTreeCommand, formatContextTreeSetupReport } = await loadModule();
+    if (!owned) expect((await runContextTreeCommand(["install", "--host", "all"])).ok).toBe(true);
+    await ensureContextTreeSkills();
+    const skill = join(realpathSync(home), ".claude", "skills", "context-tree-read");
+    writeFileSync(join(skill, "SKILL.md"), "# My custom instructions\n");
+    writeFileSync(join(skill, "personal.txt"), "keep this too");
+    mkdirSync(join(home, ".codex"), { recursive: true });
+
+    const report = await ensureContextTreeSkills();
+    expect(readFileSync(join(skill, "SKILL.md"), "utf8")).toBe("# My custom instructions\n");
+    expect(readFileSync(join(skill, "personal.txt"), "utf8")).toBe("keep this too");
+    expect(report.preservedSkillPaths).toContain(skill);
+    expect(report.installedHosts).toEqual(["codex"]);
+    expect(formatContextTreeSetupReport(report)).toContain("unowned or edited Skills preserved");
+    writeFileSync(join(home, "config", "client.yaml"), "server:\n  url: http://localhost:8000\n");
+    const removal = await ensureContextTreeSkills();
+    expect(removal.preservedSkillPaths).toContain(skill);
+    expect(readFileSync(join(skill, "SKILL.md"), "utf8")).toBe("# My custom instructions\n");
+  });
+
   it("preserves a packaged-named Skill the user edited, with no ledger", async () => {
     const home = scratchHome();
     const packaged = await packagedSkillsRoot();

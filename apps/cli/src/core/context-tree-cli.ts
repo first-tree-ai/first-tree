@@ -513,24 +513,49 @@ export async function ensureContextTreeSkills(): Promise<ContextTreeSetupReport>
 
   const ownedPaths = readOwnedSkillPaths();
   const newPaths: string[] = [];
+  const installHosts: string[] = [];
+  const preservedSkillPaths: string[] = [];
+  const installFailures: ContextTreeConnectFailure[] = [];
   try {
     const packagedRoot = packagedSkillsRoot();
     if (packagedRoot === null) return { ...base, status: "failed", reason: "Packaged Skills are missing" };
     const home = realpathSync(homedir());
-    for (const [, relative] of HOST_SKILL_DIRS) {
+    for (const [host, relative] of HOST_SKILL_DIRS) {
+      const protectedPaths: string[] = [];
       for (const entry of readdirSync(packagedRoot, { withFileTypes: true })) {
         if (!entry.isDirectory() || !entry.name.startsWith("context-tree-")) continue;
         const target = join(home, relative, entry.name);
-        if (lstatSync(target, { throwIfNoEntry: false }) === undefined) newPaths.push(target);
+        const existing = lstatSync(target, { throwIfNoEntry: false });
+        if (existing === undefined) newPaths.push(target);
+        else if (
+          !ownedPaths.has(target) ||
+          !existing.isDirectory() ||
+          !directoriesEqual(target, join(packagedRoot, entry.name))
+        ) {
+          protectedPaths.push(target);
+        }
+      }
+      // The upstream installer replaces every packaged-name destination for a
+      // host. Do not invoke it when any of those destinations is protected.
+      if (protectedPaths.length > 0) {
+        preservedSkillPaths.push(...protectedPaths);
+        installFailures.push({
+          workspace: host,
+          reason: `${host} Skill installation skipped: unowned or edited Skills preserved at ${protectedPaths.join(", ")}`,
+        });
+      } else {
+        installHosts.push(host);
       }
     }
   } catch (error) {
     return { ...base, status: "failed", reason: String(error) };
   }
 
-  const install = await runContextTreeCommand(["install", "--host", "all"]);
-  if (!install.ok) {
-    return { ...base, status: "failed", reason: install.reason };
+  const installedHosts: string[] = [];
+  for (const host of installHosts) {
+    const install = await runContextTreeCommand(["install", "--host", host]);
+    if (!install.ok) installFailures.push({ workspace: host, reason: install.reason });
+    else installedHosts.push(...installedHostsFrom(install.payload));
   }
 
   try {
@@ -551,9 +576,10 @@ export async function ensureContextTreeSkills(): Promise<ContextTreeSetupReport>
 
   const report: ContextTreeSetupReport = {
     status: "installed",
-    installedHosts: installedHostsFrom(install.payload),
+    installedHosts,
+    preservedSkillPaths,
     connectedWorkspaces: [],
-    failures: [],
+    failures: installFailures,
     shimPath,
   };
   // The Skills are useless without the shim, so a failure to write it is

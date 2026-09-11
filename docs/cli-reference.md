@@ -1292,7 +1292,11 @@ names must start with an alphanumeric character, so identities such as
 value already exists in `client.yaml`, external mode stays off and `doctor`
 reports the value rather than calling it unset.
 
-With it set, `login` runs `context-tree install`, which writes
+With it set, `login` runs `context-tree install` separately for each safe host.
+If a host has any unowned or edited packaged-name Skill, login preserves that
+host’s entire Skill set and reports the skipped installation. Other hosts can
+still be installed. Replacement of preserved Skills is an operator-managed
+action; login never authorizes it. The installer writes
 the `context-tree-{setup,create,connect,read,write,publish,cleanup,schedule-cleanup}` Skills into
 `~/.claude/skills` and `~/.codex/skills`, then `context-tree connect
 <OWNER/REPO>` for each existing agent workspace. The tree itself is cloned to
