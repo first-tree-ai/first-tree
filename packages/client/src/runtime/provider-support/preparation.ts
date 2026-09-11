@@ -272,12 +272,17 @@ function assertRuntimeConfigCanPublish(
       );
     }
     const state = readManagedStateResult(root);
-    if (state.kind !== "current") {
+    // Schema v1 state predates the Team Resource fence, so it publishes at
+    // version 0; reconcile migrates it in place once the session is admitted.
+    // Only future/invalid state is unsafe to mutate.
+    const publishedVersion =
+      state.kind === "current" ? state.state.resourceConfigVersion : state.kind === "legacy" ? 0 : null;
+    if (publishedVersion === null) {
       throw new ManagedSkillsUnsafeDiscoveryError(
         "Managed Skills state is unreadable or from an unsupported version; preserving the existing projection",
       );
     }
-    highestPublishedVersion = Math.max(highestPublishedVersion ?? 0, state.state.resourceConfigVersion);
+    highestPublishedVersion = Math.max(highestPublishedVersion ?? 0, publishedVersion);
   }
   if (highestPublishedVersion === null) return;
   if (runtimeConfig === null && !hasCapturedPayload) {
