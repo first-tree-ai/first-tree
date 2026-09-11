@@ -25,7 +25,7 @@
   English | <a href="README_zh-CN.md">中文</a>
 </p>
 
-> Try [first-tree 🌳](https://first-tree.ai/?utm_source=github&utm_medium=readme&utm_campaign=top-cta-site) **free** — the fastest way to give every agent your team's shared context.
+> checkout our recent work [opentag.build](https://github.com/first-tree-ai/opentag) — the opensource ai coworker. Claude Tag alternative. support using ur own subscription. 
 
 # First-Tree
 
