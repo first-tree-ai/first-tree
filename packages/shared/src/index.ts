@@ -37,6 +37,12 @@ export {
   portableCliExecutable,
 } from "./connect-bootstrap.js";
 export { BYO_CONTEXT_ADDITIONAL_CONTEXT_LIMIT } from "./context-integration-limits.js";
+export {
+  type ContextTreeSourceRef,
+  contextTreeSourceHref,
+  type GitLabBlobRoute,
+  gitlabBlobRouteForVersion,
+} from "./context-source-link.js";
 // -- Document review (docloop) anchor building / locating --
 export {
   type BuildDocAnchorInput,

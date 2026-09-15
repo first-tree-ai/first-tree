@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { contextTreeSourceHref } from "../context-source-link.js";
 import {
   contextDecisionFromImpactNote,
   parseContextImpactNotes,
@@ -79,6 +80,56 @@ describe("parseExactContextSourceLink", () => {
       expect(() => parseExactContextSourceLink(`${REPO}/blob/${COMMIT}/${bad}`)).not.toThrow();
       expect(parseExactContextSourceLink(`${REPO}/blob/${COMMIT}/${bad}`)).toBeNull();
     }
+  });
+});
+
+// The builder (context-source-link) and this parser are two ends of the same
+// contract: a link the builder emits for a connected instance must read back
+// as the exact repository, commit, and node path it was built from — on both
+// GitLab route generations — and a short SHA must be refused by both ends.
+describe("contextTreeSourceHref / parseExactContextSourceLink round trips", () => {
+  const GITLAB_ORIGIN = "https://gitlab.example.com";
+  const GITLAB_REPO = `${GITLAB_ORIGIN}/group/sub/context-tree`;
+
+  it("round-trips a legacy /blob/ link built for a pre-12.7 GitLab", () => {
+    const href = contextTreeSourceHref(
+      { repoUrl: GITLAB_REPO, commit: COMMIT, nodePath: "domains/pricing policy/roadmap.md" },
+      GITLAB_ORIGIN,
+      "11.11.3",
+    );
+    expect(href).toBe(`${GITLAB_REPO}/blob/${COMMIT}/domains/pricing%20policy/roadmap.md`);
+    expect(parseExactContextSourceLink(href ?? "")).toEqual({
+      commit: COMMIT,
+      nodePath: "domains/pricing policy/roadmap.md",
+      repoUrl: GITLAB_REPO,
+      repositoryIdentity: "gitlab.example.com/group/sub/context-tree",
+    });
+  });
+
+  it("round-trips a scoped /-/blob/ link built for a current GitLab", () => {
+    const href = contextTreeSourceHref(
+      { repoUrl: GITLAB_REPO, commit: COMMIT, nodePath: NODE },
+      GITLAB_ORIGIN,
+      "17.11.2-ee",
+    );
+    expect(href).toBe(`${GITLAB_REPO}/-/blob/${COMMIT}/${NODE}`);
+    expect(parseExactContextSourceLink(href ?? "")).toEqual({
+      commit: COMMIT,
+      nodePath: NODE,
+      repoUrl: GITLAB_REPO,
+      repositoryIdentity: "gitlab.example.com/group/sub/context-tree",
+    });
+  });
+
+  it("rejects a short SHA at both ends of the contract", () => {
+    const short = "83c3939e90b";
+    for (const version of ["11.11.3", "17.11.2"]) {
+      expect(
+        contextTreeSourceHref({ repoUrl: GITLAB_REPO, commit: short, nodePath: NODE }, GITLAB_ORIGIN, version),
+      ).toBeNull();
+    }
+    expect(parseExactContextSourceLink(`${GITLAB_REPO}/blob/${short}/${NODE}`)).toBeNull();
+    expect(parseExactContextSourceLink(`${GITLAB_REPO}/-/blob/${short}/${NODE}`)).toBeNull();
   });
 });
 

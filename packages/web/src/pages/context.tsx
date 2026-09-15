@@ -303,7 +303,7 @@ function ContextInfluence({ snapshot }: { snapshot: ContextTreeSnapshot }) {
   // A GitLab-hosted tree only resolves to a web URL against the Team's own
   // connected origin; without it every node here would render as inert text and
   // the "inspectable source" promise would hold on GitHub teams only.
-  const { instanceOrigin } = useGitlabEntityPresentation(organizationId ?? null);
+  const { instanceOrigin, gitlabVersion } = useGitlabEntityPresentation(organizationId ?? null);
   // The ranking deliberately carries no title: a citation's label is the
   // agent's own wording inside a chat the viewer may not be in. Resolve the
   // display name from the org-visible tree snapshot instead, falling back to
@@ -368,6 +368,7 @@ function ContextInfluence({ snapshot }: { snapshot: ContextTreeSnapshot }) {
                   ? contextTreeSourceHref(
                       { repoUrl: snapshot.repo, commit: snapshot.headCommit, nodePath: node.nodePath },
                       instanceOrigin,
+                      gitlabVersion,
                     )
                   : null;
               const title = nodeTitleByPath.get(node.nodePath) ?? nodeFileName(node.nodePath);

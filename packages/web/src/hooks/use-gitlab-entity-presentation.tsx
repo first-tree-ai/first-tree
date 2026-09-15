@@ -14,6 +14,7 @@ const GITLAB_CONNECTION_REFRESH_MS = 30_000;
  */
 export function useGitlabEntityPresentation(organizationId: string | null): {
   instanceOrigin: string | null;
+  gitlabVersion: string | null;
   markdownComponents: Components;
 } {
   const connections = useQuery({
@@ -23,7 +24,13 @@ export function useGitlabEntityPresentation(organizationId: string | null): {
     staleTime: GITLAB_CONNECTION_REFRESH_MS,
     refetchInterval: GITLAB_CONNECTION_REFRESH_MS,
   });
-  const instanceOrigin = connections.data?.[0]?.instanceOrigin ?? null;
+  const connection = connections.data?.[0];
+  const instanceOrigin = connection?.instanceOrigin ?? null;
+  // The observed GitLab version decides which blob route the connected
+  // instance can serve (pre-12.7 has no `/-/blob/`); a connection that has
+  // never reported one intentionally yields plain-text source links rather
+  // than a guessed route.
+  const gitlabVersion = connection?.reviewerCapability?.lastObservedVersion ?? null;
   const markdownComponents = useMemo<Components>(
     () => ({
       a: ({ node, href, children, ...props }) => {
@@ -47,5 +54,5 @@ export function useGitlabEntityPresentation(organizationId: string | null): {
     [instanceOrigin],
   );
 
-  return { instanceOrigin, markdownComponents };
+  return { instanceOrigin, gitlabVersion, markdownComponents };
 }

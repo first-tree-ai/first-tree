@@ -1536,6 +1536,8 @@ first-tree tree
 │        --repo URL --branch BRANCH \
 │        (--create|--adopt)                  # initialize through local gh/glab + git
 ├── read --team ID --snapshot DIR            # activate one exact task read snapshot
+├── source-link --repo URL --commit SHA --path FILE
+│        [--gitlab-origin URL] [--gitlab-version VERSION] # format an exact citation
 ├── write --team ID --snapshot DIR \
 │        [--github-login LOGIN]               # provider-aware authoring preflight
 ├── review --run ID --event EVENT \
@@ -1552,6 +1554,34 @@ first-tree tree
 │      [--since TS] [--until TS] \
 │      [--limit N] [--cursor C] [--all]    # this agent's own Context Tree read/write events
 ```
+
+`first-tree tree source-link` formats one exact-commit file citation with the
+same URL builder used by the Context page. Supply the credential-free binding
+repository, a complete 40- or 64-character commit SHA, and a Tree-root-relative
+file path. It does not read the file or establish the caller's binding authority.
+Short SHAs, invalid paths, and unrecognized forge origins fail without emitting
+a guessed link. Normal output is the URL; `--json` returns `url`, `commit`, and
+`gitlabVersion`.
+
+GitHub needs no version argument. GitLab requires `--gitlab-origin` matching
+the binding's verified web origin, including its web port. By default the
+command runs `glab api version --hostname <host>` with local forge credentials;
+`--gitlab-version` reuses a version already verified for that same instance.
+GitLab before 12.7 uses `/blob/`, and 12.7 or later uses `/-/blob/`. Missing or
+unrecognized version evidence fails closed. An SSH transport port is never
+treated as a GitLab web port. This command creates no remote resources.
+
+```sh
+first-tree tree source-link \
+  --repo https://gitlab.example.com/group/context-tree.git \
+  --commit 0123456789abcdef0123456789abcdef01234567 \
+  --path 'engineering/mobile interaction.md' \
+  --gitlab-origin https://gitlab.example.com --gitlab-version 11.11.3
+```
+
+The example SHA illustrates the required format; use the actual full commit
+from the read snapshot. The Context page uses the connection's observed version
+and renders plain text when that version is unknown.
 
 `first-tree tree read` is the explicit-Team snapshot primitive used by managed
 and administrative workflows. Both `--team <team-id>` and

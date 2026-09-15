@@ -575,6 +575,7 @@ describe("tree verify strict content policy", () => {
       "tree",
       "local",
       "read",
+      "source-link",
       "io",
       "write",
       "review",

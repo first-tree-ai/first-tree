@@ -53,7 +53,10 @@ export const MOCK_CONTEXT_SNAPSHOT: ContextTreeSnapshot = {
   // the preview uses one so source links resolve the way they do in production.
   repo: "https://github.com/agent-team-foundation/first-tree-context",
   branch: "main",
-  headCommit: "83c3939e90b",
+  // Full 40-hex SHA: source links are exact-commit by contract and the
+  // builder rejects short SHAs, so the preview must cite one the way a real
+  // binding does.
+  headCommit: "83c3939e90b1a2b3c4d5e6f708192a3b4c5d6e7f",
   syncedAt: new Date().toISOString(),
   snapshotStatus: "active",
   contextStatus: {

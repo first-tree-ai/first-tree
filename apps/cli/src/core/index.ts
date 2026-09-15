@@ -126,6 +126,8 @@ export type {
   PreflightContextTreeSeedInput,
 } from "./context-tree-seed.js";
 export { ContextTreeSeedPreflightCliError, preflightContextTreeSeed } from "./context-tree-seed.js";
+export type { ContextTreeSourceLinkInput, ContextTreeSourceLinkResult } from "./context-tree-source-link.js";
+export { resolveContextTreeSourceLink } from "./context-tree-source-link.js";
 export type {
   ContextTreeWriteAuthorityReader,
   ContextTreeWritePreflight,

@@ -47,6 +47,10 @@ const githubMocks = vi.hoisted(() => ({
   listOrgGithubRepos: vi.fn(),
 }));
 
+const gitlabConnectionMocks = vi.hoisted(() => ({
+  listGitlabConnectionsAt: vi.fn(),
+}));
+
 const authMock = vi.hoisted(() => ({
   value: {
     organizationId: "org-1" as string | null,
@@ -61,6 +65,11 @@ vi.mock("../../api/onboarding-events.js", () => onboardingEventMocks);
 vi.mock("../../api/org-settings.js", () => orgSettingsMocks);
 vi.mock("../../api/github-app.js", () => githubAppMocks);
 vi.mock("../../api/github.js", () => githubMocks);
+
+vi.mock("../../api/gitlab-connections.js", () => ({
+  gitlabConnectionsQueryKey: (organizationId: string | null) => ["gitlab-connections", organizationId] as const,
+  listGitlabConnectionsAt: gitlabConnectionMocks.listGitlabConnectionsAt,
+}));
 
 vi.mock("../../auth/auth-context.js", () => ({
   useAuth: () => authMock.value,
@@ -148,6 +157,44 @@ async function waitForText(container: ParentNode, text: string, timeoutMs = 3000
   throw new Error(`Missing text: ${text}\n${container.textContent ?? ""}`);
 }
 
+async function waitForSelector(container: ParentNode, selector: string, timeoutMs = 3000): Promise<Element> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const found = container.querySelector(selector);
+    if (found) return found;
+    await flush();
+  }
+  throw new Error(`Missing selector: ${selector}\n${container.textContent ?? ""}`);
+}
+
+function gitlabConnection(overrides: { lastObservedVersion: string | null }) {
+  return {
+    id: "connection-1",
+    organizationId: "org-1",
+    displayName: "Private GitLab",
+    instanceOrigin: "https://gitlab.example.com",
+    endpointSeen: true,
+    stableDeliveryObserved: true,
+    reviewerCapability: {
+      mode: "reviewers",
+      lastObservedVersion: overrides.lastObservedVersion,
+      lastSchemaAnomalyAt: null,
+      lastSchemaAnomalyCode: null,
+    },
+    health: {
+      readiness: "routing_verified",
+      lastValidInboundAt: "2026-05-28T11:00:00.000Z",
+      lastSystemHookInboundAt: null,
+      lastProjectHookInboundAt: "2026-05-28T11:00:00.000Z",
+      lastSystemHookMergeRequestInboundAt: null,
+      lastProcessingFailureAt: null,
+      lastProcessingFailureCode: null,
+    },
+    createdAt: "2026-05-01T00:00:00.000Z",
+    updatedAt: "2026-05-28T11:00:00.000Z",
+  };
+}
+
 function snapshot(overrides: Partial<ContextTreeSnapshot> = {}): ContextTreeSnapshot {
   return {
     ...MOCK_CONTEXT_SNAPSHOT,
@@ -231,6 +278,10 @@ beforeEach(() => {
   githubAppMocks.getGithubAppInstallUrl.mockReset();
   githubMocks.listGithubRepos.mockReset();
   githubMocks.listOrgGithubRepos.mockReset();
+  gitlabConnectionMocks.listGitlabConnectionsAt.mockReset();
+  // Default: no GitLab connection — GitLab node citations stay plain text and
+  // GitHub ones need no connection. GitLab tests override this.
+  gitlabConnectionMocks.listGitlabConnectionsAt.mockResolvedValue([]);
   // Default: GitHub App not connected and no repos granted — the inline build
   // entry shows its install CTA. Tests that exercise the connected/pick states
   // override these.
@@ -341,7 +392,7 @@ describe("ContextPage DOM behavior", () => {
     // Link identity is the SNAPSHOT's repo and head commit, never the note's:
     // a citation names those inside a chat the viewer may not be in.
     expect(nodes[0]?.querySelector("a")?.getAttribute("href")).toBe(
-      "https://github.com/agent-team-foundation/first-tree-context/blob/83c3939e90b/members/yzw/notebook.md",
+      "https://github.com/agent-team-foundation/first-tree-context/blob/83c3939e90b1a2b3c4d5e6f708192a3b4c5d6e7f/members/yzw/notebook.md",
     );
 
     await click(buttonByText(container, "Influence"));
@@ -364,6 +415,62 @@ describe("ContextPage DOM behavior", () => {
     // The read/write signal is unaffected — influence is an addition, not a
     // replacement.
     expect(container.textContent).toContain("read the tree");
+
+    await act(async () => root.unmount());
+  });
+
+  it("routes a connected legacy (11.11.3) GitLab tree through /blob/ and a current one through /-/blob/", async () => {
+    const HEAD = "83c3939e90b1a2b3c4d5e6f708192a3b4c5d6e7f";
+    const gitlabSnapshot = () =>
+      snapshot({
+        repo: "https://gitlab.example.com/group/sub/context-tree",
+        headCommit: HEAD,
+      });
+
+    // The reported legacy case: the connection's observed version must reach
+    // the link builder, or this node would get a `/-/blob/` link the 11.11.3
+    // instance cannot serve.
+    gitlabConnectionMocks.listGitlabConnectionsAt.mockResolvedValueOnce([
+      gitlabConnection({ lastObservedVersion: "11.11.3" }),
+    ]);
+    const { ContextPage } = await import("../context.js");
+    const first = await renderDom(<ContextPage previewSnapshot={gitlabSnapshot()} />);
+    const legacyLink = await waitForSelector(first.container, ".context-influence-node a");
+    expect(legacyLink.getAttribute("href")).toBe(
+      `https://gitlab.example.com/group/sub/context-tree/blob/${HEAD}/members/yzw/notebook.md`,
+    );
+    await act(async () => first.root.unmount());
+
+    gitlabConnectionMocks.listGitlabConnectionsAt.mockResolvedValueOnce([
+      gitlabConnection({ lastObservedVersion: "17.11.2-ee" }),
+    ]);
+    const second = await renderDom(<ContextPage previewSnapshot={gitlabSnapshot()} />);
+    const scopedLink = await waitForSelector(second.container, ".context-influence-node a");
+    expect(scopedLink.getAttribute("href")).toBe(
+      `https://gitlab.example.com/group/sub/context-tree/-/blob/${HEAD}/members/yzw/notebook.md`,
+    );
+    await act(async () => second.root.unmount());
+  });
+
+  it("keeps GitLab node citations as plain text while the connection has no observed version", async () => {
+    gitlabConnectionMocks.listGitlabConnectionsAt.mockResolvedValueOnce([
+      gitlabConnection({ lastObservedVersion: null }),
+    ]);
+    const { ContextPage } = await import("../context.js");
+    const { container, root } = await renderDom(
+      <ContextPage
+        previewSnapshot={snapshot({
+          repo: "https://gitlab.example.com/group/sub/context-tree",
+          headCommit: "83c3939e90b1a2b3c4d5e6f708192a3b4c5d6e7f",
+        })}
+      />,
+    );
+
+    await waitForText(container, "Notebook");
+    // Unknown version means no route can be chosen with confidence, so the
+    // citation must not become a guessed link.
+    expect(container.querySelector(".context-influence-node a")).toBeNull();
+    expect(container.querySelector(".context-influence-node span")?.textContent).toBe("Notebook");
 
     await act(async () => root.unmount());
   });

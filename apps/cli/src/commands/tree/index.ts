@@ -7,6 +7,7 @@ import { treeLocalCommand } from "./local.js";
 import { treeReadCommand } from "./read.js";
 import { treeReviewCommand } from "./review.js";
 import { treeSeedCommand } from "./seed.js";
+import { treeSourceLinkCommand } from "./source-link.js";
 import { treeTreeCommand } from "./tree.js";
 import { verifyCommand } from "./verify.js";
 import { treeWriteCommand } from "./write.js";
@@ -26,6 +27,8 @@ import { treeWriteCommand } from "./write.js";
  *   publication command bound to its current chat, runtime session, and head.
  * - `seed`, because a clean setup agent needs a stateless read of one explicit
  *   Team's current Admin authority and binding before every Seed mutation.
+ * - `source-link`, because citations need complete commits and the bound
+ *   GitLab instance's supported file route instead of a guessed URL.
  *
  * `init` was reintroduced in 2026-07 in a different shape than the deleted
  * one: instead of onboarding a local workspace root, it creates a new team
@@ -60,6 +63,7 @@ export const treeCommand: CommandModule = {
       treeTreeCommand,
       treeLocalCommand,
       treeReadCommand,
+      treeSourceLinkCommand,
       treeIoCommand,
       treeWriteCommand,
       treeReviewCommand,

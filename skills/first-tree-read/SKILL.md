@@ -1,6 +1,6 @@
 ---
 name: first-tree-read
-version: 0.8.5
+version: 0.8.6
 description: Read the applicable Context Tree before acting. In BYO sessions, route only among locally authorized Teams by reading each exact root SCOPE.md before selecting one task snapshot; in managed workspaces, use the bound Tree. Do not use for a Context Tree PR/MR review or an explicit broad audit of stored tree content.
 ---
 
@@ -400,6 +400,26 @@ Use the credential-free binding repository exactly as the activation receipt or
 managed workspace briefing declares it; never substitute a local transport URL.
 Never place a credential-bearing remote URL anywhere in the visible response.
 Source links must not contain a query or fragment.
+
+Generate each URL with `tree source-link --repo <binding-repository>
+--commit <full-commit> --path <tree-relative-file>` after the source-authority
+checks below. Prefix the command with the managed briefing's CLI invocation,
+or the verified `firstTreeInvocation` for BYO. Copy the returned URL unchanged;
+do not assemble a forge URL yourself. The commit must be the complete 40- or
+64-character value from the receipt or `git rev-parse HEAD`, never `--short`
+or an abbreviated log value.
+
+For GitLab, also pass `--gitlab-origin <verified-web-origin>` from the current
+connection, or the HTTPS binding repository's origin when that repository is
+already established as GitLab. Never infer a web port from an SSH transport.
+The command queries that host's version using local `glab api version`; if the
+same instance's version was already verified this task, pass it with
+`--gitlab-version` to reuse that evidence. GitLab before 12.7, including
+11.11.3, uses `/blob/`; 12.7 and later support `/-/blob/`. A missing,
+unparseable, or unsupported prerelease version must not be replaced with a
+guess. If the command or version evidence is unavailable, omit that source
+and continue the task; do not hand-build a fallback link. This formatter does
+not establish binding authority, file existence, or browser access.
 
 For a BYO task, use the activation receipt's binding repository and commit. Its
 detached snapshot is already exact and remote-backed. For a managed workspace,

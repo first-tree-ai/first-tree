@@ -137,6 +137,7 @@ describe("CLI command registration", () => {
       "read",
       "review",
       "seed",
+      "source-link",
       "tree",
       "verify",
       "write",

@@ -111,6 +111,18 @@ runtime, network, credential, and cross-surface behavior.
   require a provider-specific unavailable state directing the user to an
   Agent with local git/glab access. Confirm Cloud never requests, stores, logs,
   or injects a credential and never publishes an Agent snapshot.
+- On GitLab 11.11.3, have the Work Agent cite a node through `tree source-link`
+  and open the resulting source in its final reply. Require `/blob/`, the full
+  commit read by the Agent, and the correct file, including nested namespaces
+  and a path with spaces or Unicode. Confirm the Context page's cited-node
+  link also uses `/blob/` once the connection has observed the instance version.
+  Repeat on GitLab 12.7 or later and require `/-/blob/`. With no observed version,
+  the Context page must show plain text; the Agent formatter must either obtain
+  a version through local `glab` or omit the citation. A seven-character SHA
+  must fail source-link generation, and complete old/new links must yield
+  readable impact records. Capture actual browser access separately from
+  parser acceptance; no guessed link, Cloud credential, or MR mutation may be
+  introduced by citation formatting.
 - Separately exercise built-in `https://gitlab.com` with public DNS answers.
   Confirm it needs no additional origin entry. For a Self-Managed public
   origin, use the simplified string form; for a private destination, use
