@@ -1354,16 +1354,19 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
    * the initial connect loop and post-registration reconnect settle promptly.
    *
    * Freshness: ask for a token still valid past the proactive-refresh lead
-   * time, otherwise the cached token returned here would already be inside
-   * the lead window and the next proactive refresh would be a no-op — the
-   * server would push `auth:expired` instead. The +5_000 is a readability
-   * slack so the boundary check explicitly clears the lead window rather
-   * than comparing equal; any positive epsilon would do.
+   * time plus the bounded WebSocket handshake, otherwise a token that is
+   * only just long enough at prefetch can already sit inside the lead window
+   * by the time `open` fires and `scheduleProactiveAuthRefresh` silently
+   * skips arming. The +5_000 is a readability slack so the boundary check
+   * explicitly clears the lead window rather than comparing equal; any
+   * positive epsilon would do.
    */
   private attemptAccessToken(signal = this.connectAbort?.signal): Promise<string> {
     let provider: Promise<string>;
     try {
-      provider = Promise.resolve(this.getAccessToken({ minValidityMs: AUTH_REFRESH_LEAD_MS + 5_000, signal }));
+      provider = Promise.resolve(
+        this.getAccessToken({ minValidityMs: AUTH_REFRESH_LEAD_MS + WS_CONNECT_TIMEOUT_MS + 5_000, signal }),
+      );
     } catch (err) {
       provider = Promise.reject(err instanceof Error ? err : new Error(String(err)));
     }

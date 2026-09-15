@@ -172,7 +172,7 @@ describe("ClientConnection — prefetch access token before WebSocket", () => {
     await vi.advanceTimersByTimeAsync(WS_AUTH_FRAME_TIMEOUT_MS + 1_000);
     await flushMicrotasks();
     expect(FakeWebSocket.instances).toHaveLength(0);
-    expect(minValidityMs).toEqual([65_000]);
+    expect(minValidityMs).toEqual([75_000]);
 
     token.resolve(makeJwt({ exp: Math.floor(Date.now() / 1000) + 3600 }));
     const socket = await waitForLatestSocket();
@@ -188,6 +188,37 @@ describe("ClientConnection — prefetch access token before WebSocket", () => {
 
     await connection.disconnect();
     priv(connection).clearTimers();
+  });
+
+  it.each([6_000, 9_999])("keeps proactive refresh armed after a %i ms WebSocket upgrade", async (upgradeDelayMs) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-15T00:00:00Z"));
+    // Honor the requested validity exactly, as a cached token at the minimum
+    // accepted freshness boundary would. Acquisition precedes the upgrade.
+    const getAccessToken = vi.fn(async (options?: { minValidityMs?: number }) =>
+      makeJwt({ exp: Math.ceil((Date.now() + (options?.minValidityMs ?? 0)) / 1000) }),
+    );
+    const connection = await makeConnection({ getAccessToken });
+    const connecting = connection.connect();
+    const settled = connecting.catch(() => {});
+    try {
+      const socket = await waitForLatestSocket();
+      await vi.advanceTimersByTimeAsync(upgradeDelayMs);
+      completeHandshake(socket);
+      await connecting;
+      expect(connection.isConnected).toBe(true);
+      expect(getAccessToken).toHaveBeenCalledOnce();
+
+      // At 60 seconds before expiry, refresh must run even when opening the
+      // socket consumed almost the entire 10-second connect timeout.
+      await vi.advanceTimersByTimeAsync(15_000 - upgradeDelayMs);
+      expect(getAccessToken).toHaveBeenCalledTimes(2);
+      expect(getAccessToken.mock.calls[1]?.[0]?.minValidityMs).toBe(65_000);
+      expect(socket.closeCalls).toEqual([{ code: 1000, reason: "proactive auth refresh" }]);
+    } finally {
+      await connection.disconnect();
+      await settled;
+    }
   });
 
   it("disconnect during acquisition settles without a later socket even if the provider ignores abort", async () => {
