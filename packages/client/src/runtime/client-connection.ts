@@ -544,12 +544,23 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
    */
   private lastServerMessageAt = 0;
   /**
-   * AbortController consumed by {@link connect}'s backoff sleep so a caller
-   * that runs {@link disconnect} while the initial-connect loop is between
-   * attempts isn't blocked for up to RECONNECT_MAX_MS waiting for the next
-   * tick to notice `closing`.
+   * AbortController for the active connection lifecycle. The initial
+   * {@link connect} loop and post-registration {@link scheduleReconnect}
+   * both capture this identity so a superseded attempt cannot retry into
+   * its successor. {@link disconnect} and a successor {@link connect} abort
+   * the previous controller. Kept after the initial loop succeeds so
+   * reconnects share the same lifecycle; only {@link connectActive} is
+   * cleared in that loop's ownership-checked finally.
    */
   private connectAbort: AbortController | null = null;
+  /**
+   * AbortController for the in-flight {@link openWebSocket} attempt, covering
+   * token prefetch and the CONNECTING/unregistered socket. {@link disconnect}
+   * and a successor openWebSocket() abort this so a late token cannot create
+   * a socket or pause the live attempt, and so a CONNECTING socket's promise
+   * settles instead of dangling after disconnect().
+   */
+  private handshakeAttempt: AbortController | null = null;
   /**
    * True while {@link connect}'s initial-connect loop is running. Lets
    * {@link clearPaused} tell who owns the retry: the parked connect loop
@@ -1254,6 +1265,8 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
    */
   async connect(): Promise<void> {
     this.closing = false;
+    this.connectAbort?.abort(new Error("Client disconnected"));
+    this.handshakeAttempt?.abort(new Error("Client disconnected"));
     const connectAbort = new AbortController();
     this.connectAbort = connectAbort;
     this.connectActive = true;
@@ -1261,13 +1274,14 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
     let lastError: unknown = new Error("Client connection closed before ready");
     try {
       while (true) {
+        if (connectAbort.signal.aborted) throw lastError;
         if (this.pausedReason !== null) {
           this.wsLogger.debug(
             { pausedReason: this.pausedReason },
             "initial connect paused — awaiting fresh credentials",
           );
           await this.waitForPausedResume(connectAbort.signal);
-          if (this.closing) throw lastError;
+          if (connectAbort.signal.aborted) throw lastError;
           // Operator recovered — retry immediately with the fresh credentials
           // and start the transient backoff schedule fresh.
           attempt = 0;
@@ -1278,7 +1292,11 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
           return;
         } catch (err) {
           lastError = err;
-          if (this.closing) throw err;
+          // Own-controller abort covers disconnect(); connect() without awaiting
+          // the old promise: the successor has already reset closing=false.
+          // `closing` still stops this loop on register:rejected, which is
+          // unrecoverable and does not abort the lifecycle controller.
+          if (connectAbort.signal.aborted || this.closing) throw err;
           // Auth pause → park at the top of the loop. Not transient: no
           // backoff, no "error" emit (paused mode has its own events), and
           // no retry on any timer.
@@ -1291,12 +1309,13 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
           );
           this.emit("error", err instanceof Error ? err : new Error(String(err)));
           await waitWithAbort(delayMs, connectAbort.signal);
-          if (this.closing) throw err;
+          if (connectAbort.signal.aborted || this.closing) throw err;
         }
       }
     } finally {
-      this.connectActive = false;
-      this.connectAbort = null;
+      if (this.connectAbort === connectAbort) {
+        this.connectActive = false;
+      }
     }
   }
 
@@ -1325,16 +1344,14 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
 
   /**
    * Await the access-token provider for a connect attempt, but settle early
-   * when the initial-connect abort fires (disconnect()). The signal is also
-   * forwarded to the provider so its own `/auth/refresh` can be cancelled —
-   * but a provider that ignores it would otherwise leave the open handler
-   * pending past disconnect()'s removeAllListeners, dangling the connect()
-   * promise and leaving the token free to arrive late on a torn-down socket.
-   * The provider promise is consumed in BOTH branches, so nothing is left
-   * unhandled when the abort wins. On the reconnect path `connectAbort` is
-   * null — the provider promise is used directly and the call site's fence
-   * (`settled` / `closing` / socket identity / readyState) discards any late
-   * result instead.
+   * when the handshake abort fires (disconnect() or a successor openWebSocket()).
+   * The signal is also forwarded to the provider so its own `/auth/refresh`
+   * can be cancelled — but a provider that ignores it would otherwise leave
+   * the prefetch pending past disconnect(), dangling the connect()/reconnect
+   * promise and leaving a late token free to construct a socket. The provider
+   * promise is consumed in BOTH branches, so nothing is left unhandled when
+   * the abort wins. Callers pass the per-attempt handshake signal so both
+   * the initial connect loop and post-registration reconnect settle promptly.
    *
    * Freshness: ask for a token still valid past the proactive-refresh lead
    * time, otherwise the cached token returned here would already be inside
@@ -1343,9 +1360,13 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
    * slack so the boundary check explicitly clears the lead window rather
    * than comparing equal; any positive epsilon would do.
    */
-  private attemptAccessToken(): Promise<string> {
-    const signal = this.connectAbort?.signal;
-    const provider = Promise.resolve(this.getAccessToken({ minValidityMs: AUTH_REFRESH_LEAD_MS + 5_000, signal }));
+  private attemptAccessToken(signal = this.connectAbort?.signal): Promise<string> {
+    let provider: Promise<string>;
+    try {
+      provider = Promise.resolve(this.getAccessToken({ minValidityMs: AUTH_REFRESH_LEAD_MS + 5_000, signal }));
+    } catch (err) {
+      provider = Promise.reject(err instanceof Error ? err : new Error(String(err)));
+    }
     if (!signal) return provider;
     return new Promise<string>((resolve, reject) => {
       const finish = (callback: () => void) => {
@@ -1362,6 +1383,18 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
       );
       if (signal.aborted) onAbort();
     });
+  }
+
+  private beginHandshakeAttempt(): AbortController {
+    this.handshakeAttempt?.abort(new Error("Client disconnected"));
+    this.clearAuthRefreshTimer();
+    const attempt = new AbortController();
+    this.handshakeAttempt = attempt;
+    return attempt;
+  }
+
+  private isLiveHandshake(attempt: AbortController): boolean {
+    return this.handshakeAttempt === attempt && !attempt.signal.aborted && !this.closing;
   }
 
   /**
@@ -1580,7 +1613,8 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
 
   async disconnect(): Promise<void> {
     this.closing = true;
-    this.connectAbort?.abort();
+    this.connectAbort?.abort(new Error("Client disconnected"));
+    this.handshakeAttempt?.abort(new Error("Client disconnected"));
     this.clearTimers();
     this.rejectAllPendingBinds("Client disconnected");
     this.rejectAllPendingInboxAcks("Client disconnected");
@@ -1588,19 +1622,21 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
     this.rejectAllPendingInboxFenceProbes("Client disconnected");
     this.rejectAllPendingSessionEvents("Client disconnected");
     if (this.ws) {
-      this.ws.removeAllListeners();
-      if (this.ws.readyState === WebSocket.OPEN) {
-        this.ws.close(1000, "Client disconnect");
-      } else if (this.ws.readyState === WebSocket.CONNECTING) {
-        // CONNECTING socket would otherwise sit on the kernel TCP timeout
-        // (~1–2 min) before resolving. With the new connect() retry loop the
-        // odds of disconnect racing an in-flight handshake go from "rare"
-        // (old behaviour: connect failure threw immediately) to "every shut-
-        // down during backoff is one tick away from this case", so reach for
-        // terminate to abort the handshake right now.
-        this.ws.terminate();
+      const socket = this.ws;
+      if (socket.readyState === WebSocket.OPEN) {
+        // Strip handlers so the close event cannot scheduleReconnect after
+        // an intentional disconnect. Registered sockets do not emit an
+        // asynchronous error on close(1000).
+        socket.removeAllListeners();
+        socket.close(1000, "Client disconnect");
+      } else if (socket.readyState === WebSocket.CONNECTING) {
+        // Handshake abort should already have terminated with the error
+        // listener still attached. If we still see CONNECTING (tests that
+        // inject a socket, or abort racing construction), terminate without
+        // stripping listeners so ws's asynchronous abort error is consumed.
+        socket.terminate();
       }
-      this.ws = null;
+      if (this.ws === socket) this.ws = null;
     }
     this.registered = false;
     this.boundAgents.clear();
@@ -1628,7 +1664,44 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
 
   // ---- WebSocket management ----------------------------------------------
 
-  private openWebSocket(): Promise<void> {
+  private async openWebSocket(): Promise<void> {
+    const attempt = this.beginHandshakeAttempt();
+    // Snapshot the consumer's credential store BEFORE the provider runs:
+    // if the provider fails terminally (refresh rejected) no token is
+    // ever sent, and this snapshot is the failed attempt's only identity.
+    const credentialsSnapshot = this.readCredentialsSnapshot();
+    let token: string;
+    try {
+      token = await this.attemptAccessToken(attempt.signal);
+    } catch (err) {
+      // Retired-attempt fence: a late token failure belonging to a
+      // replaced or disconnected attempt must never pause or close the
+      // live successor. The current attempt still rejects so its caller
+      // (connect loop / reconnect catch) unwinds instead of dangling.
+      const e = err instanceof Error ? err : new Error(String(err));
+      if (!this.isLiveHandshake(attempt)) {
+        this.authLogger.debug({ err }, "late token failure on retired connect attempt — ignored");
+        throw e;
+      }
+      this.authLogger.error({ err }, "failed to obtain access token");
+      // `name` duck-typed instead of `instanceof` so this file doesn't pull
+      // a runtime dependency on the command package (one-way: command
+      // depends on client, not the other way around).
+      if (e.name === "AuthRefreshFailedError") {
+        this.authAttemptCredential = credentialsSnapshot;
+        this.enterPausedMode("auth_refresh_failed", e);
+      } else if (e.name === "AuthRefreshRateLimitedError") {
+        const retryAfterMs = (e as { retryAfterMs?: number }).retryAfterMs ?? 30_000;
+        this.nextReconnectMinDelayMs = Math.max(this.nextReconnectMinDelayMs, retryAfterMs);
+        this.authLogger.warn({ retryAfterMs }, "refresh rate-limited; deferring reconnect");
+      }
+      throw e;
+    }
+
+    if (!this.isLiveHandshake(attempt)) {
+      throw new Error("Client disconnected");
+    }
+
     return new Promise((resolve, reject) => {
       const wsUrl = `${this.serverUrl.replace(/^http/, "ws")}/api/v1/agent/ws/client`;
       this.wsLogger.info({ url: wsUrl }, "connecting");
@@ -1638,14 +1711,17 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
       // identifier at all. Issue #246.
       const ws = new WebSocket(wsUrl, this.userAgent ? { headers: { "User-Agent": this.userAgent } } : undefined);
       let settled = false;
+      let connectTimer: ReturnType<typeof setTimeout> | null = null;
 
       const settle = (fn: typeof resolve | typeof reject, value?: unknown) => {
         if (settled) return;
         settled = true;
-        if (this.wsConnectTimer) {
-          clearTimeout(this.wsConnectTimer);
-          this.wsConnectTimer = null;
+        attempt.signal.removeEventListener("abort", onHandshakeAbort);
+        if (connectTimer !== null) {
+          clearTimeout(connectTimer);
+          if (this.wsConnectTimer === connectTimer) this.wsConnectTimer = null;
         }
+        connectTimer = null;
         if (fn === resolve) {
           (fn as typeof resolve)();
         } else {
@@ -1653,13 +1729,23 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
         }
       };
 
-      this.wsConnectTimer = setTimeout(() => {
-        this.wsConnectTimer = null;
-        ws.terminate();
-        settle(reject, new Error("WebSocket connect timeout"));
-      }, WS_CONNECT_TIMEOUT_MS);
+      const onHandshakeAbort = () => {
+        if (settled) return;
+        const err = attempt.signal.reason instanceof Error ? attempt.signal.reason : new Error("Client disconnected");
+        settle(reject, err);
+        if (this.ws === ws) this.ws = null;
+        // Terminate with the error listener still installed so ws's
+        // asynchronous abort error is consumed rather than unhandled.
+        if (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN) {
+          ws.terminate();
+        }
+      };
 
-      ws.on("open", async () => {
+      ws.on("open", () => {
+        // Ownership first: a stale open must not overwrite the successor's
+        // socket or shared handshake state, including while the successor
+        // is still prefetching (this.ws may still be this socket or null).
+        if (settled || this.handshakeAttempt !== attempt || attempt.signal.aborted) return;
         this.ws = ws;
         this.inboxAckFailCloseStarted = false;
         // Capability negotiation is per-connection: never carry a previous
@@ -1673,79 +1759,25 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
         // backoff to attempt=1 forever. Reset on the application-layer
         // success signal — `client:registered` — instead.
         this.wsLogger.debug("socket opened, sending auth");
-
-        // Snapshot the consumer's credential store BEFORE the provider runs:
-        // if the provider fails terminally (refresh rejected) no token is
-        // ever sent, and this snapshot is the failed attempt's only identity.
-        const credentialsSnapshot = this.readCredentialsSnapshot();
-        try {
-          const token = await this.attemptAccessToken();
-          // Retired-attempt fence: the token arrived AFTER this attempt
-          // already concluded (connect timeout / server close settled the
-          // openWebSocket promise), after disconnect() tore the socket
-          // down, or after a newer attempt became the live socket. A late
-          // token must never be sent on a stale socket nor arm the
-          // proactive refresh timer for a dead attempt.
-          if (settled || this.closing || this.ws !== ws || ws.readyState !== WebSocket.OPEN) return;
-          ws.send(JSON.stringify({ type: "auth", token }));
-          // Attempt identity = the token actually sent. Deliberately NOT
-          // the pre-provider snapshot: a successful refresh may have
-          // rotated access/refresh tokens inside the provider.
-          this.authAttemptCredential = { kind: "access_token", value: token };
-          // C5: arm the proactive refresh timer as soon as we've sent the
-          // auth frame — auth:ok only confirms the token was accepted, the
-          // exp itself is already fixed on the token payload.
-          this.scheduleProactiveAuthRefresh(token);
-        } catch (err) {
-          // Retired-attempt fence: a late token failure belonging to a
-          // settled attempt (connect timeout / server close) or to a socket
-          // a newer live attempt has replaced must never reach the live
-          // connection — pausing here is exactly how a dead attempt took a
-          // healthy registered one down. While `closing`, disconnect() owns
-          // teardown — but the CURRENT attempt must still settle below so
-          // the connect loop unwinds instead of dangling.
-          if (settled || (this.ws !== ws && !this.closing)) {
-            this.authLogger.debug({ err }, "late token failure on retired connect attempt — ignored");
-            return;
-          }
-          // Refresh token expired / revoked is unrecoverable from inside the
-          // process — no amount of retrying will succeed without the
-          // operator running `<binName> login <new-token>`.
-          //
-          // `name` duck-typed instead of `instanceof` so this file doesn't
-          // pull a runtime dependency on the command package (one-way:
-          // command depends on client, not the other way around).
-          const e = err instanceof Error ? err : new Error(String(err));
-          if (!this.closing) {
-            this.authLogger.error({ err }, "failed to obtain access token");
-            if (e.name === "AuthRefreshFailedError") {
-              // Bug 2: enter paused mode; the credentials watcher will call
-              // clearPaused() to resume. The pre-provider snapshot identifies
-              // the credential authority that failed.
-              this.authAttemptCredential = credentialsSnapshot;
-              this.enterPausedMode("auth_refresh_failed", e);
-            } else if (e.name === "AuthRefreshRateLimitedError") {
-              // Pull the server-suggested wait off the typed error and stash
-              // it for the next scheduleReconnect; falls back to 30s if
-              // absent. Without this floor the WS layer's 1/2/4/8s
-              // exponential backoff hammers the rate-limit window from below
-              // and stretches the outage from "1 minute" to "however long
-              // until the bucket empties under our own load".
-              const retryAfterMs = (e as { retryAfterMs?: number }).retryAfterMs ?? 30_000;
-              this.nextReconnectMinDelayMs = Math.max(this.nextReconnectMinDelayMs, retryAfterMs);
-              this.authLogger.warn({ retryAfterMs }, "refresh rate-limited; deferring reconnect");
-            }
-          }
-          settle(reject, e);
-          if (!this.closing) ws.close();
-        }
+        // Token was acquired before constructing this socket so the server's
+        // auth-frame deadline is not consumed by HTTP refresh latency.
+        if (this.ws !== ws || ws.readyState !== WebSocket.OPEN) return;
+        ws.send(JSON.stringify({ type: "auth", token }));
+        // Attempt identity = the token actually sent. Deliberately NOT
+        // the pre-provider snapshot: a successful refresh may have
+        // rotated access/refresh tokens inside the provider.
+        this.authAttemptCredential = { kind: "access_token", value: token };
+        // C5: arm the proactive refresh timer as soon as we've sent the
+        // auth frame — auth:ok only confirms the token was accepted, the
+        // exp itself is already fixed on the token payload.
+        this.scheduleProactiveAuthRefresh(token);
       });
 
       ws.on("message", (data) => {
-        // Retired-attempt guard: frames arriving on a socket that is no
-        // longer the live one (a newer attempt already replaced it) must not
-        // touch shared state — a late `auth:rejected` on the old socket must
-        // not re-pause a healthy newer connection.
+        // Retired-attempt guard: frames on a superseded socket must not
+        // touch shared state — including while the successor is prefetching
+        // with no new socket yet (this.ws may still point here).
+        if (this.handshakeAttempt !== attempt) return;
         if (this.ws !== ws) return;
         // Any inbound frame proves the peer is alive — refresh the silence
         // watchdog before parsing so malformed frames still count.
@@ -1762,19 +1794,24 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
       // send our own pings from the heartbeat tick — those round-trips are
       // what surface a wedged socket within HEARTBEAT_TIMEOUT_MS.
       ws.on("pong", () => {
+        if (this.handshakeAttempt !== attempt) return;
         if (this.ws !== ws) return;
         this.lastServerMessageAt = Date.now();
       });
 
       ws.on("close", (code) => {
-        // Retired-attempt guard: a late close from a socket that already
-        // settled (auth failed / connect timeout) and is no longer the live
-        // socket must not tear down shared state (heartbeat, registration,
-        // pending frames) nor emit/reconnect — the newer attempt owns those
-        // now. A close that settles the in-flight attempt (`!settled`) must
-        // still be processed below even when `this.ws` was never assigned to
-        // it (pre-open handshake failure).
-        if (settled && this.ws !== ws) return;
+        // Superseded sockets must not tear down a successor's heartbeat,
+        // registration, or pending frames. Still settle THIS promise so a
+        // cancelled CONNECTING handshake cannot dangle. register:rejected
+        // sets closing=true on the CURRENT attempt — handshakeAttempt still
+        // matches, so that close continues below and settles with the typed
+        // lastHandshakeError.
+        if (this.handshakeAttempt !== attempt) {
+          if (!settled) {
+            settle(reject, new Error(`WebSocket closed before ready (code ${code})`));
+          }
+          return;
+        }
         this.stopHeartbeat();
         this.clearAuthRefreshTimer();
         this.clearPendingInboxRecoverTimers();
@@ -1812,11 +1849,29 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
       });
 
       ws.on("error", (err) => {
-        // Pre-open handshake errors belong to the in-flight attempt and stay
-        // emitted; a settled retired socket's error is noise.
-        if (settled && this.ws !== ws) return;
+        // Keep the listener so terminate()'s asynchronous error is consumed.
+        // Superseded or cancelled attempts cannot emit into a successor;
+        // errors on the current registered socket still surface normally.
+        if (this.handshakeAttempt !== attempt || attempt.signal.aborted || (settled && this.ws !== ws)) return;
         this.emit("error", err);
       });
+
+      attempt.signal.addEventListener("abort", onHandshakeAbort, { once: true });
+      if (this.handshakeAttempt !== attempt || attempt.signal.aborted) {
+        onHandshakeAbort();
+        return;
+      }
+      this.ws = ws;
+
+      connectTimer = setTimeout(() => {
+        if (this.wsConnectTimer === connectTimer) this.wsConnectTimer = null;
+        if (settled) return;
+        settle(reject, new Error("WebSocket connect timeout"));
+        if (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN) {
+          ws.terminate();
+        }
+      }, WS_CONNECT_TIMEOUT_MS);
+      this.wsConnectTimer = connectTimer;
     });
   }
 
@@ -2556,15 +2611,25 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
       { attempt: this.reconnectAttempt, delayMs, floorMs: floorMs || undefined },
       "scheduling reconnect",
     );
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      if (!this.closing) {
-        this.openWebSocket().catch((err) => {
-          this.emit("error", err instanceof Error ? err : new Error(String(err)));
-          if (!this.closing) this.scheduleReconnect();
-        });
-      }
+    const lifecycle = this.connectAbort;
+    const timer = setTimeout(() => {
+      if (this.reconnectTimer === timer) this.reconnectTimer = null;
+      if (this.closing) return;
+      if (lifecycle && (lifecycle !== this.connectAbort || lifecycle.signal.aborted)) return;
+      const promise = this.openWebSocket();
+      const handshake = this.handshakeAttempt;
+      promise.catch((err) => {
+        if (this.closing) return;
+        if (lifecycle && (lifecycle !== this.connectAbort || lifecycle.signal.aborted)) return;
+        if (handshake && this.handshakeAttempt !== handshake) return;
+        // A synchronous credentials observer may already have resumed and
+        // scheduled the next attempt while this failure was being handled.
+        if (this.reconnectTimer !== null) return;
+        this.emit("error", err instanceof Error ? err : new Error(String(err)));
+        if (!this.closing) this.scheduleReconnect();
+      });
     }, delayMs);
+    this.reconnectTimer = timer;
   }
 
   private startHeartbeat(): void {
@@ -2737,17 +2802,24 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
     if (delay <= 0) return;
     this.authLogger.debug({ delayMs: delay }, "scheduled proactive auth refresh");
     const armedSocket = this.ws;
-    this.authRefreshTimer = setTimeout(() => {
+    const armedAttempt = this.handshakeAttempt;
+    const timer = setTimeout(() => {
+      if (this.authRefreshTimer !== timer) return;
       this.authRefreshTimer = null;
       // A retired attempt must not refresh or close its successor's socket.
-      if (this.ws !== armedSocket) return;
+      if (this.ws !== armedSocket || this.handshakeAttempt !== armedAttempt || armedAttempt?.signal.aborted) return;
       void this.runProactiveAuthRefresh();
     }, delay);
+    this.authRefreshTimer = timer;
   }
 
   private async runProactiveAuthRefresh(): Promise<void> {
     this.authRefreshTimer = null;
     if (this.closing) return;
+    const socket = this.ws;
+    const attempt = this.handshakeAttempt;
+    const isCurrent = () =>
+      !this.closing && this.ws === socket && this.handshakeAttempt === attempt && !attempt?.signal.aborted;
     this.authLogger.info("triggering proactive auth refresh");
     const credentialsSnapshot = this.readCredentialsSnapshot();
     try {
@@ -2759,6 +2831,7 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
       // without a second HTTP round-trip.
       await this.getAccessToken({ minValidityMs: AUTH_REFRESH_LEAD_MS + 5_000 });
     } catch (err) {
+      if (!isCurrent()) return;
       const e = err instanceof Error ? err : new Error(String(err));
       if (e.name === "AuthRefreshRateLimitedError") {
         // Stash Retry-After for the close-handler-driven scheduleReconnect
@@ -2789,6 +2862,6 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
     // disconnect window to a single TCP/WS handshake (~1 RTT). On failure
     // it falls back to the original close-then-retry flow with the
     // 429-aware backoff floor in place.
-    this.ws?.close(1000, "proactive auth refresh");
+    if (isCurrent()) socket?.close(1000, "proactive auth refresh");
   }
 }

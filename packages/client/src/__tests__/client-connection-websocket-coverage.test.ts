@@ -121,6 +121,17 @@ async function flushMicrotasks(): Promise<void> {
   await Promise.resolve();
 }
 
+async function waitForLatestSocket(previousLength = 0): Promise<FakeWebSocket> {
+  for (let i = 0; i < 30; i++) {
+    if (FakeWebSocket.instances.length > previousLength) {
+      const socket = FakeWebSocket.instances.at(-1);
+      if (socket) return socket;
+    }
+    await Promise.resolve();
+  }
+  throw new Error("missing fake socket");
+}
+
 function parseSent(socket: FakeWebSocket, index: number): Record<string, unknown> {
   return JSON.parse(socket.sent[index] ?? "{}") as Record<string, unknown>;
 }
@@ -130,9 +141,9 @@ async function openRegisteredConnection(
   capabilities: Record<string, boolean> = {},
 ) {
   const internal = priv(connection);
+  const previousLength = FakeWebSocket.instances.length;
   const openPromise = internal.openWebSocket();
-  const socket = FakeWebSocket.instances.at(-1);
-  if (!socket) throw new Error("missing fake socket");
+  const socket = await waitForLatestSocket(previousLength);
   socket.emitOpen();
   await flushMicrotasks();
   socket.emitMessage({
@@ -159,8 +170,7 @@ describe("ClientConnection — WebSocket edge coverage", () => {
     const internal = priv(connection);
 
     const openPromise = internal.openWebSocket();
-    const socket = FakeWebSocket.instances[0];
-    if (!socket) throw new Error("missing fake socket");
+    const socket = await waitForLatestSocket();
 
     expect(socket.url).toBe("ws://ws.test/api/v1/agent/ws/client");
     expect(socket.options).toEqual({ headers: { "User-Agent": "first-tree-test" } });
@@ -183,8 +193,7 @@ describe("ClientConnection — WebSocket edge coverage", () => {
     const internal = priv(connection);
 
     const openPromise = internal.openWebSocket();
-    const socket = FakeWebSocket.instances[0];
-    if (!socket) throw new Error("missing fake socket");
+    const socket = await waitForLatestSocket();
 
     expect(socket.options).toBeUndefined();
 
@@ -208,29 +217,18 @@ describe("ClientConnection — WebSocket edge coverage", () => {
         throw rateLimited;
       },
     });
-    const rateLimitedPromise = priv(rateLimitedConnection).openWebSocket();
-    const rateLimitedRejection = expect(rateLimitedPromise).rejects.toThrow("limited");
-    const rateLimitedSocket = FakeWebSocket.instances[0];
-    if (!rateLimitedSocket) throw new Error("missing fake socket");
-    rateLimitedSocket.emitOpen();
-
-    await rateLimitedRejection;
+    await expect(priv(rateLimitedConnection).openWebSocket()).rejects.toThrow("limited");
     expect(priv(rateLimitedConnection).nextReconnectMinDelayMs).toBe(30_000);
-    expect(rateLimitedSocket.closeCalls.length).toBe(1);
+    // Token failure happens before construction, so no socket is opened or closed.
+    expect(FakeWebSocket.instances).toHaveLength(0);
 
     const plainConnection = await makeConnection({
       getAccessToken: async () => {
         throw "plain auth failure";
       },
     });
-    const plainPromise = priv(plainConnection).openWebSocket();
-    const plainRejection = expect(plainPromise).rejects.toThrow("plain auth failure");
-    const plainSocket = FakeWebSocket.instances[0];
-    if (!plainSocket) throw new Error("missing fake socket");
-    plainSocket.emitOpen();
-
-    await plainRejection;
-    expect(plainSocket.closeCalls.length).toBe(1);
+    await expect(priv(plainConnection).openWebSocket()).rejects.toThrow("plain auth failure");
+    expect(FakeWebSocket.instances).toHaveLength(0);
   });
 
   it("does not send post-auth frames before the auth frame during open", async () => {
@@ -244,11 +242,9 @@ describe("ClientConnection — WebSocket edge coverage", () => {
     const internal = priv(connection);
 
     const openPromise = internal.openWebSocket();
-    const socket = FakeWebSocket.instances[0];
-    if (!socket) throw new Error("missing fake socket");
-
-    socket.emitOpen();
     await flushMicrotasks();
+    // Token is acquired before construction: no socket exists to send on.
+    expect(FakeWebSocket.instances).toHaveLength(0);
 
     connection.reportSessionState("agent-1", "chat-1", "active");
     connection.reportRuntimeState("agent-1", "working");
@@ -260,11 +256,11 @@ describe("ClientConnection — WebSocket edge coverage", () => {
     connection.sendSessionReconcile("agent-1", ["chat-1"]);
     await connection.unbindAgent("agent-1");
     await expect(connection.sendInboxAck(50, "agent-1")).resolves.toBeUndefined();
-
-    expect(socket.sent).toEqual([]);
+    expect(FakeWebSocket.instances).toHaveLength(0);
 
     resolveToken(makeJwt({ exp: Math.floor(Date.now() / 1000) + 3600 }));
-    await flushMicrotasks();
+    const socket = await waitForLatestSocket();
+    socket.emitOpen();
     expect(parseSent(socket, 0)).toMatchObject({ type: "auth" });
 
     socket.emitMessage({ type: "auth:ok" });
@@ -894,8 +890,7 @@ describe("ClientConnection — WebSocket edge coverage", () => {
     connection.on("error", () => {});
     const internal = priv(connection);
     const firstAttempt = internal.openWebSocket();
-    const first = FakeWebSocket.instances[0];
-    if (!first) throw new Error("missing first socket");
+    const first = await waitForLatestSocket();
     const firstFailure = expect(firstAttempt).rejects.toThrow("WebSocket connect timeout");
     first.emitOpen();
     await flushMicrotasks();
@@ -903,18 +898,18 @@ describe("ClientConnection — WebSocket edge coverage", () => {
     await vi.advanceTimersByTimeAsync(10_000);
     await firstFailure;
     const secondAttempt = internal.openWebSocket().catch(() => {});
-    const second = FakeWebSocket.instances[1];
-    if (!second) throw new Error("missing second socket");
-    second.emitOpen();
     await flushMicrotasks();
+    // Successor is still waiting for its token, so no second socket exists yet.
+    expect(FakeWebSocket.instances).toHaveLength(1);
     first.emit("close", 1006);
     try {
       await vi.advanceTimersByTimeAsync(5_000);
       expect(getAccessToken).toHaveBeenCalledTimes(2);
-      expect(second.closeCalls).toHaveLength(0);
+      expect(FakeWebSocket.instances).toHaveLength(1);
     } finally {
-      second.close(1000, "test cleanup");
       releaseSecond("synthetic-late-token");
+      const second = await waitForLatestSocket(1);
+      second.close(1000, "test cleanup");
       await secondAttempt;
       await connection.disconnect();
       internal.clearTimers();

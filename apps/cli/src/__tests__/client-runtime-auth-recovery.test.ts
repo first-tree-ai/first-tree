@@ -336,7 +336,7 @@ describe("ClientRuntime — paused-mode credential recovery", () => {
       // authority from re-hitting the network.
       await sleep(700);
       expect(runtime.isPaused()).toBe(true);
-      expect(counts).toEqual({ refresh401: 1, refresh200: 0, sockets: 1, registrations: 0 });
+      expect(counts).toEqual({ refresh401: 1, refresh200: 0, sockets: 0, registrations: 0 });
 
       // Formatting, field order, and unrelated metadata do not change auth identity.
       writeFileSync(
@@ -345,7 +345,7 @@ describe("ClientRuntime — paused-mode credential recovery", () => {
       );
       await sleep(700);
       expect(runtime.isPaused()).toBe(true);
-      expect(counts).toEqual({ refresh401: 1, refresh200: 0, sockets: 1, registrations: 0 });
+      expect(counts).toEqual({ refresh401: 1, refresh200: 0, sockets: 0, registrations: 0 });
 
       saveCredentials({ serverUrl, accessToken: staleToken, refreshToken: "synthetic-recovered" });
       const outcome = await Promise.race([starting, sleep(5_000).then(() => "still-pending")]);
@@ -354,7 +354,7 @@ describe("ClientRuntime — paused-mode credential recovery", () => {
       // the refresh itself rotated and persisted the credentials first.
       expect(counts.refresh200).toBe(1);
       expect(counts.registrations).toBe(1);
-      expect(counts.sockets).toBe(2);
+      expect(counts.sockets).toBe(1);
       expect(pauses).toBe(1);
     } finally {
       await runtime.stop("synthetic test complete");

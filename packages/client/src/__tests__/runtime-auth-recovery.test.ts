@@ -119,7 +119,7 @@ describe("AgentRuntime authentication recovery through its public API", () => {
       runtime.resumeAfterCredentialsChange();
       await vi.waitFor(() => expect(shutdown).toBeDefined(), { timeout: 3_000 });
       expect(runtime.getPausedReason()).toBeNull();
-      expect(harness.counts).toEqual({ connections: 2, registrations: 1 });
+      expect(harness.counts).toEqual({ connections: failure === "refresh" ? 1 : 2, registrations: 1 });
       expect(provider).toHaveBeenCalledTimes(2);
       expect(slots.start).toHaveBeenCalledOnce();
       await shutdown?.();
@@ -160,7 +160,7 @@ describe("AgentRuntime authentication recovery through its public API", () => {
       runtime.resumeAfterCredentialsChange();
       await new Promise((resolve) => setTimeout(resolve, 100));
       expect(provider).toHaveBeenCalledOnce();
-      expect(harness.counts).toEqual({ connections: 1, registrations: 0 });
+      expect(harness.counts).toEqual({ connections: 0, registrations: 0 });
       expect(slots.start).not.toHaveBeenCalled();
     } finally {
       await runtime.stop();

@@ -96,10 +96,9 @@ describe("ClientConnection — auth-fatal + reconnect backoff regressions", () =
     expect(connection.isPaused()).toBe(true);
     expect(events).toContain("auth:fatal");
     expect(events).not.toContain("reconnecting");
-    // The pre-fix bug spammed sockets at 1Hz; assert we opened **one** and
-    // stopped. Anything > 1 means the close handler still scheduled a
-    // reconnect after an unrecoverable auth error.
-    expect(socketCount).toBeLessThanOrEqual(1);
+    // Token failure now happens before construction, so a terminal refresh
+    // error must not open a socket at all. Anything > 0 means prefetch lost.
+    expect(socketCount).toBe(0);
 
     // disconnect() aborts the park promptly; the pending connect rejects
     // with the original auth error.

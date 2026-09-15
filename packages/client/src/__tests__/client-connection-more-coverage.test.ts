@@ -129,6 +129,17 @@ async function flushMicrotasks(): Promise<void> {
   await Promise.resolve();
 }
 
+async function waitForLatestSocket(previousLength = 0): Promise<FakeWebSocket> {
+  for (let i = 0; i < 30; i++) {
+    if (FakeWebSocket.instances.length > previousLength) {
+      const socket = FakeWebSocket.instances.at(-1);
+      if (socket) return socket;
+    }
+    await Promise.resolve();
+  }
+  throw new Error("missing fake socket");
+}
+
 function parseSent(socket: FakeWebSocket, index: number): Record<string, unknown> {
   return JSON.parse(socket.sent[index] ?? "{}") as Record<string, unknown>;
 }
@@ -138,9 +149,9 @@ async function openRegisteredConnection(
   capabilities: Record<string, boolean> = {},
 ): Promise<FakeWebSocket> {
   const internal = priv(connection);
+  const previousLength = FakeWebSocket.instances.length;
   const openPromise = internal.openWebSocket();
-  const socket = FakeWebSocket.instances.at(-1);
-  if (!socket) throw new Error("missing fake socket");
+  const socket = await waitForLatestSocket(previousLength);
   socket.emitOpen();
   await flushMicrotasks();
   socket.emitMessage({ type: "auth:ok" });
@@ -790,8 +801,7 @@ describe("ClientConnection — additional branch coverage", () => {
     const connection = await makeConnection();
     const internal = priv(connection);
     const openPromise = internal.openWebSocket();
-    const socket = FakeWebSocket.instances.at(-1);
-    if (!socket) throw new Error("missing fake socket");
+    const socket = await waitForLatestSocket();
     socket.emitOpen();
     await flushMicrotasks();
     // New server ordering: welcome first, so `client:register` can answer it.
@@ -870,8 +880,8 @@ describe("ClientConnection — additional branch coverage", () => {
     // A new socket must re-learn support rather than trust the last server —
     // the next connection may land on a rolled-back replica.
     void internal.openWebSocket().catch(() => {});
-    const reconnected = FakeWebSocket.instances.at(-1);
-    if (!reconnected || reconnected === socket) throw new Error("missing reconnect socket");
+    const reconnected = await waitForLatestSocket(1);
+    if (reconnected === socket) throw new Error("missing reconnect socket");
     reconnected.emitOpen();
     await flushMicrotasks();
     expect(connection.supportsSessionResetV1).toBe(false);
@@ -883,8 +893,7 @@ describe("ClientConnection — additional branch coverage", () => {
     const connection = await makeConnection();
     const internal = priv(connection);
     const openPromise = internal.openWebSocket();
-    const socket = FakeWebSocket.instances.at(-1);
-    if (!socket) throw new Error("missing fake socket");
+    const socket = await waitForLatestSocket();
     socket.emitOpen();
     await flushMicrotasks();
     // Mixed fleet: a server build that only knows the pre-v1 finalize flag.

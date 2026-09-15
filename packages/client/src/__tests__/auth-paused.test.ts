@@ -149,7 +149,7 @@ describe("ClientConnection — auth paused mode (Bug 2, D1)", () => {
     expect(events).not.toContain("error");
     expect(pausedReasons).toEqual(["auth_refresh_failed"]);
     expect(tokenCalls).toBe(1);
-    expect(counters.sockets).toBe(1);
+    expect(counters.sockets).toBe(0);
 
     // Operator recovery: fresh credentials + clearPaused → exactly one
     // successful registration, then connect() resolves.
@@ -161,13 +161,13 @@ describe("ClientConnection — auth paused mode (Bug 2, D1)", () => {
     expect(connection.isConnected).toBe(true);
     expect(counters.registrations).toBe(1);
     expect(tokenCalls).toBe(2);
-    expect(counters.sockets).toBe(2);
+    expect(counters.sockets).toBe(1);
 
     // No duplicate owner: clearPaused must not have armed its own reconnect
     // timer while the connect loop is alive (a second socket would show up
     // within one base backoff interval).
     await sleep(1_500);
-    expect(counters.sockets).toBe(2);
+    expect(counters.sockets).toBe(1);
     expect(counters.registrations).toBe(1);
 
     await connection.disconnect();
@@ -293,7 +293,7 @@ describe("ClientConnection — auth paused mode (Bug 2, D1)", () => {
 
     // No reconnect timer survived the abort: nothing else happens.
     await sleep(1_500);
-    expect(socketCount).toBe(1);
+    expect(socketCount).toBe(0);
     expect(tokenCalls).toBe(1);
   }, 10_000);
 
@@ -321,10 +321,10 @@ describe("ClientConnection — auth paused mode (Bug 2, D1)", () => {
     expect(connection.isConnected).toBe(true);
     expect(counters.registrations).toBe(1);
     expect(tokenCalls).toBe(2);
-    expect(counters.sockets).toBe(2);
+    expect(counters.sockets).toBe(1);
 
     await sleep(1_500);
-    expect(counters.sockets).toBe(2);
+    expect(counters.sockets).toBe(1);
     expect(counters.registrations).toBe(1);
 
     await connection.disconnect();
@@ -350,20 +350,26 @@ describe("ClientConnection — auth paused mode (Bug 2, D1)", () => {
       throw new Error("parked connect must never emit reconnecting");
     });
 
-    const tracked = track(connection.connect());
     const nextPaused = () => new Promise<void>((resolve) => connection.once("auth:paused", () => resolve()));
+    // Prefetch makes terminal token failure synchronous, so the next pause
+    // listener must be attached before connect()/clearPaused() or we miss it.
+    let pausePromise = nextPaused();
+    const tracked = track(connection.connect());
 
     for (let cycle = 1; cycle <= 3; cycle++) {
-      await nextPaused();
+      await pausePromise;
       // The parked waiter attaches a few microtasks after the auth:paused
       // emit (the openWebSocket rejection has to unwind first) — wait for it,
       // and assert exactly one: listeners never accumulate across cycles.
       await waitFor(() => connection.listenerCount("auth:resumed") === 1);
       expect(tokenCalls).toBe(cycle);
-      expect(counters.sockets).toBe(cycle);
-      connection.clearPaused();
-      // clearPaused consumed the waiter; the next cycle parks exactly one.
-      await waitFor(() => connection.listenerCount("auth:resumed") <= 1);
+      expect(counters.sockets).toBe(0);
+      if (cycle < 3) {
+        pausePromise = nextPaused();
+        connection.clearPaused();
+        // clearPaused consumed the waiter; the next cycle parks exactly one.
+        await waitFor(() => connection.listenerCount("auth:resumed") <= 1);
+      }
     }
 
     allowToken = true;
@@ -371,7 +377,7 @@ describe("ClientConnection — auth paused mode (Bug 2, D1)", () => {
     await tracked.promise;
     expect(counters.registrations).toBe(1);
     expect(tokenCalls).toBe(4);
-    expect(counters.sockets).toBe(4);
+    expect(counters.sockets).toBe(1);
 
     await connection.disconnect();
   }, 10_000);
@@ -403,7 +409,7 @@ describe("ClientConnection — auth paused mode (Bug 2, D1)", () => {
     while (Date.now() < deadline) {
       expect(tracked.settled()).toBe(false);
       expect(tokenCalls).toBe(1);
-      expect(counters.sockets).toBe(1);
+      expect(counters.sockets).toBe(0);
       await sleep(250);
     }
 
@@ -416,16 +422,13 @@ describe("ClientConnection — auth paused mode (Bug 2, D1)", () => {
   }, 20_000);
 
   it("a late token rejection from a settled attempt cannot pause its registered successor", async () => {
-    // Mirrors the independent reproduction (repair-1711
-    // client-retired-token-after.test.ts): attempt A's token is deferred,
-    // the server retires A's socket mid-acquisition, successor B registers —
-    // then A's token rejects AuthRefreshFailedError. Pre-fix, A's open
-    // handler catch ran enterPausedMode on B's healthy connection.
-    let firstSocket: WebSocket | null = null;
+    // Token is acquired before the socket exists, so a successor is created by
+    // disconnecting the hung first connect and starting a new one. A's later
+    // AuthRefreshFailedError must not pause B.
     let sockets = 0;
     let registrations = 0;
     wss.on("connection", (ws: WebSocket) => {
-      if (++sockets === 1) firstSocket = ws;
+      sockets++;
       ws.on("message", (raw) => {
         const msg = JSON.parse(String(raw)) as { type: string };
         if (msg.type === "auth") {
@@ -458,18 +461,19 @@ describe("ClientConnection — auth paused mode (Bug 2, D1)", () => {
     const events: string[] = [];
     connection.on("auth:paused", () => events.push("auth:paused"));
 
+    const firstConnect = connection.connect();
+    await waitFor(() => tokenCalls === 1);
+    expect(sockets).toBe(0);
+    await connection.disconnect();
+    await expect(firstConnect).rejects.toBeDefined();
+
     const tracked = track(connection.connect());
-    await waitFor(() => tokenCalls === 1 && firstSocket !== null);
-    // Server retires attempt A mid-token-acquisition — a transient failure,
-    // so the connect loop retries and B registers.
-    (firstSocket as WebSocket | null)?.close(1000, "synthetic retirement");
     await tracked.promise;
     expect(connection.isConnected).toBe(true);
     expect(registrations).toBe(1);
     expect(tokenCalls).toBe(2);
+    expect(sockets).toBe(1);
 
-    // NOW A's token rejects terminally — a dead attempt's failure must not
-    // reach the live connection.
     rejectOld(new AuthRefreshFailedError());
     await sleep(300);
     expect(connection.isPaused()).toBe(false);
@@ -477,23 +481,21 @@ describe("ClientConnection — auth paused mode (Bug 2, D1)", () => {
     expect(events).not.toContain("auth:paused");
     expect(tokenCalls).toBe(2);
     expect(registrations).toBe(1);
-    expect(sockets).toBe(2);
+    expect(sockets).toBe(1);
 
     await connection.disconnect();
   }, 10_000);
 
   it("a late token resolution on a settled attempt sends nothing and arms no proactive timer", async () => {
-    let firstSocket: WebSocket | null = null;
     let sockets = 0;
     let registrations = 0;
-    let framesOnFirstSocket = 0;
+    const tokensSeen: string[] = [];
     wss.on("connection", (ws: WebSocket) => {
-      const isFirst = ++sockets === 1;
-      if (isFirst) firstSocket = ws;
+      sockets++;
       ws.on("message", (raw) => {
-        if (isFirst) framesOnFirstSocket++;
-        const msg = JSON.parse(String(raw)) as { type: string };
+        const msg = JSON.parse(String(raw)) as { type: string; token?: string };
         if (msg.type === "auth") {
+          if (msg.token) tokensSeen.push(msg.token);
           ws.send(JSON.stringify({ type: "auth:ok" }));
           return;
         }
@@ -524,30 +526,34 @@ describe("ClientConnection — auth paused mode (Bug 2, D1)", () => {
       throw new Error("late token resolution must not pause");
     });
 
+    const firstConnect = connection.connect();
+    await waitFor(() => tokenCalls === 1);
+    expect(sockets).toBe(0);
+    await connection.disconnect();
+    await expect(firstConnect).rejects.toBeDefined();
+
     const tracked = track(connection.connect());
-    await waitFor(() => tokenCalls === 1 && firstSocket !== null);
-    (firstSocket as WebSocket | null)?.close(1000, "synthetic retirement");
     await tracked.promise;
     expect(connection.isConnected).toBe(true);
     expect(registrations).toBe(1);
+    expect(sockets).toBe(1);
+    expect(tokensSeen).toEqual(["good-token"]);
 
-    // A's token finally arrives — it must not be sent on the retired socket
-    // (no frame, no crash) and must not disturb B.
     resolveOld("stale-token");
     await sleep(300);
-    expect(framesOnFirstSocket).toBe(0);
+    expect(tokensSeen).toEqual(["good-token"]);
     expect(connection.isPaused()).toBe(false);
     expect(connection.isConnected).toBe(true);
     expect(registrations).toBe(1);
-    expect(sockets).toBe(2);
+    expect(sockets).toBe(1);
 
     await connection.disconnect();
   }, 10_000);
 
   it("disconnect() during token acquisition settles connect promptly and ignores the late token", async () => {
-    let firstSocket: WebSocket | null = null;
-    wss.on("connection", (ws: WebSocket) => {
-      if (!firstSocket) firstSocket = ws;
+    let sockets = 0;
+    wss.on("connection", () => {
+      sockets++;
     });
 
     let rejectOld: (err: Error) => void = () => {};
@@ -569,23 +575,25 @@ describe("ClientConnection — auth paused mode (Bug 2, D1)", () => {
 
     const connectPromise = connection.connect();
     const tracked = track(connectPromise);
-    await waitFor(() => tokenCalls === 1 && firstSocket !== null);
+    await waitFor(() => tokenCalls === 1);
+    expect(sockets).toBe(0);
 
-    // The abort ownership (connectAbort) settles the token wait — connect
-    // must reject promptly even though the provider never answers.
+    // The handshake abort settles the token wait — connect must reject
+    // promptly even though the provider never answers, and must not open
+    // a socket later.
     const t0 = Date.now();
     const disconnectPromise = connection.disconnect();
     await expect(connectPromise).rejects.toBeDefined();
     await disconnectPromise;
     expect(Date.now() - t0).toBeLessThan(700);
     expect(tracked.settled()).toBe(true);
+    expect(sockets).toBe(0);
 
-    // The late terminal token failure is consumed silently: no pause, no
-    // unhandled rejection, no further activity.
     rejectOld(new AuthRefreshFailedError());
     await sleep(200);
     expect(connection.isPaused()).toBe(false);
     expect(connection.isConnected).toBe(false);
+    expect(sockets).toBe(0);
   }, 10_000);
 
   it("anchors a terminal refresh failure to the pre-provider credentials snapshot", async () => {
