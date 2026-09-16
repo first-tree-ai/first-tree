@@ -75,6 +75,30 @@ describe("runtime notice formatting", () => {
     }
   });
 
+  it.each([
+    ["managed_skills_state_invalid", "matching backup"],
+    ["managed_skills_state_unsupported", "supports the saved Skills state version"],
+    ["managed_skills_state_untrusted", "regular file"],
+  ])("gives local recovery guidance for %s without blaming the provider", (reasonCode, recovery) => {
+    const notice = formatProviderFailureRuntimeNotice(
+      payload({
+        provider: "claude-code",
+        scope: "session_resume",
+        category: "configuration",
+        reasonCode,
+        messagePreview: "Saved Skills state could not be verified",
+      }),
+    );
+    expect(notice).toContain("First Tree could not resume this chat session");
+    expect(notice).toContain("Automatic retries have stopped");
+    expect(notice).toContain("existing workspace files were preserved");
+    expect(notice).toContain(recovery);
+    expect(notice).toContain("send your request again in this chat");
+    expect(notice).toContain("Details: Saved Skills state could not be verified");
+    expect(notice).not.toContain("Original provider message");
+    expect(notice).not.toContain("sign in");
+  });
+
   it("formats Pi credential notices with host-local pi /login recovery", () => {
     const notice = formatProviderFailureRuntimeNotice(
       payload({

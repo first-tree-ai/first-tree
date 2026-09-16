@@ -21,9 +21,35 @@ export function isRuntimeSessionProofFailure(payload: ProviderRetryEventPayload)
 }
 
 export function formatProviderFailureRuntimeNotice(payload: ProviderRetryEventPayload): string {
-  const lead = noticeLead(payload);
+  const managedStateNotice = managedSkillsStateNotice(payload);
+  const lead = managedStateNotice ?? noticeLead(payload);
   const detail = redactErrorPreview((payload.messagePreview ?? "").trim(), 500);
-  return detail.length > 0 ? `${lead} Original provider message: ${detail}` : lead;
+  return detail.length > 0
+    ? `${lead} ${managedStateNotice ? "Details" : "Original provider message"}: ${detail}`
+    : lead;
+}
+
+function managedSkillsStateNotice(payload: ProviderRetryEventPayload): string | null {
+  if (payload.category !== "configuration") return null;
+  let recovery: string;
+  switch (payload.reasonCode) {
+    case "managed_skills_state_invalid":
+      recovery = "Have the machine operator check and restore the local Skills state from a matching backup.";
+      break;
+    case "managed_skills_state_unsupported":
+      recovery = "Use a First Tree client that supports the saved Skills state version.";
+      break;
+    case "managed_skills_state_untrusted":
+      recovery = "Have the machine operator repair the local Skills state path so it is a regular file.";
+      break;
+    default:
+      return null;
+  }
+  return (
+    `First Tree could not ${actionLabel(payload.scope)} because the local Skills state needs attention. ` +
+    "Automatic retries have stopped and existing workspace files were preserved. " +
+    `${recovery} After repair, send your request again in this chat.`
+  );
 }
 
 export async function postProviderFailureRuntimeNotice(

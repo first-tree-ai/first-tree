@@ -57,7 +57,8 @@ vi.mock("../runtime/source-repos.js", () => ({
     currentSourceRepoNamesFromPayload(payload, resolved),
 }));
 
-vi.mock("../runtime/managed-skills.js", () => ({
+vi.mock("../runtime/managed-skills.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../runtime/managed-skills.js")>()),
   allowedTargetRootsFromProjection: (roots: Record<string, string>) => new Set(Object.values(roots)),
   providerSkillRoot: (provider: keyof typeof TEST_PROVIDER_SKILL_ROOTS, roots: typeof TEST_PROVIDER_SKILL_ROOTS) =>
     roots[provider],
@@ -1115,7 +1116,7 @@ describe("prepareManagedSession", () => {
           branch: "main",
         },
       }),
-    ).rejects.toThrow(/unreadable or from an unsupported version/);
+    ).rejects.toThrow(/unsupported schema v3/);
 
     expect(callOrder).not.toContain("skills");
     expect(reconcileManagedSkillsForConfig).not.toHaveBeenCalled();

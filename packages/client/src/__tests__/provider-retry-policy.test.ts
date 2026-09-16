@@ -1,7 +1,11 @@
 import type { ProviderRetryScope, ReplaySafety, RuntimeProvider } from "@first-tree/shared";
 import { describe, expect, it } from "vitest";
 import { SdkError } from "../cloud/sdk.js";
-import { ManagedSkillsUnsafeDiscoveryError } from "../runtime/managed-skills.js";
+import {
+  isManagedSkillsUnsafeDiscoveryError,
+  ManagedSkillsStateError,
+  ManagedSkillsUnsafeDiscoveryError,
+} from "../runtime/managed-skills.js";
 import {
   buildProviderRetryEvent,
   classifyProviderFailure,
@@ -564,6 +568,47 @@ describe("classifyProviderFailure", () => {
       reasonCode: "unsafe_replay",
       terminalKind: "unsafe_replay",
     });
+  });
+
+  it.each([
+    "session_start",
+    "session_resume",
+  ] as const)("classifies deterministic managed-state failures as terminal configuration for %s (no automatic retries)", (scope) => {
+    for (const [reason, reasonCode] of [
+      ["invalid", "managed_skills_state_invalid"],
+      ["unsupported", "managed_skills_state_unsupported"],
+      ["untrusted", "managed_skills_state_untrusted"],
+    ] as const) {
+      const error = new ManagedSkillsStateError(reason, "local Skills state needs repair");
+      // A narrow subtype of unsafe discovery: provider safety handling still
+      // recognizes it, but it must NOT take the indefinite transient retry
+      // path — a human has to repair the local state first.
+      expect(isManagedSkillsUnsafeDiscoveryError(error)).toBe(true);
+      const classified = classifyProviderFailure(error, { provider: "codex", scope, source: "session" });
+      expect(classified).toMatchObject({ category: "configuration", reasonCode });
+      for (const attempt of [1, 20] as const) {
+        expect(
+          decideProviderRetry({ classification: classified, scope, attempt, replaySafety: "pre_provider" }),
+        ).toMatchObject({ action: "stop", reasonCode, terminalKind: "needs_operator" });
+      }
+    }
+  });
+
+  it("keeps the replay-safety guard when a deterministic managed-state failure surfaces on a user-visible turn", () => {
+    const classified = classifyProviderFailure(new ManagedSkillsStateError("invalid", "ledger corrupt"), {
+      provider: "codex",
+      scope: "provider_turn",
+      source: "session",
+    });
+    expect(classified.category).toBe("configuration");
+    expect(
+      decideProviderRetry({
+        classification: classified,
+        scope: "provider_turn",
+        attempt: 1,
+        replaySafety: "user_visible",
+      }),
+    ).toMatchObject({ action: "stop", reasonCode: "unsafe_replay", terminalKind: "unsafe_replay" });
   });
 
   it("a genuinely missing codex binary stays terminal needs_operator (no false retry)", () => {

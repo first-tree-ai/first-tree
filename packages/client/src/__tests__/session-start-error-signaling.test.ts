@@ -8,6 +8,7 @@ import type {
   SessionContext,
   SessionMessage,
 } from "../runtime/handler.js";
+import { ManagedSkillsStateError } from "../runtime/managed-skills.js";
 import { SessionRuntime } from "../runtime/session-runtime.js";
 import { silentLogger } from "./_logger-helpers.js";
 import { mockEntry } from "./test-helpers.js";
@@ -145,6 +146,90 @@ function deferred<T = void>(): {
 }
 
 describe("SessionRuntime: session-start failure signalling (F2)", () => {
+  it.each([
+    "start",
+    "resume",
+  ] as const)("stops a managed-state %s failure after one notice and accepts a new request after repair", async (phase) => {
+    vi.useFakeTimers();
+    let sm: SessionRuntime | undefined;
+    try {
+      const error = new ManagedSkillsStateError("invalid", "The local Skills ledger is invalid");
+      let initialCtx: SessionContext | undefined;
+      let initialMessage: SessionMessage | undefined;
+      const broken = workingHandler("managed-state-session");
+      broken.start = vi.fn(async (message, ctx) => {
+        if (phase === "start") throw error;
+        initialCtx = ctx;
+        initialMessage = message;
+        return { sessionId: "managed-state-session", route: { kind: "owned" as const, mode: "queued" as const } };
+      });
+      broken.resume = vi.fn().mockRejectedValue(error);
+      const repaired = workingHandler("managed-state-repaired");
+      const { sdk, sendMessage } = mockSdk();
+      const events: SessionEvent[] = [];
+      const ackEntry = vi.fn<(entryId: number) => Promise<void>>().mockResolvedValue(undefined);
+      const recoverChat = vi.fn().mockResolvedValue(undefined);
+      sm = makeSessionRuntime({
+        handlers: [broken, repaired],
+        sdk,
+        ackEntry,
+        recoverChat,
+        onSessionEvent: (_chatId, event) => events.push(event),
+        confirmSessionEvent: async (_chatId, event) => {
+          events.push(event);
+        },
+      });
+      const chatId = `chat-managed-state-${phase}`;
+      await sm.dispatch(mockEntry({ id: 1, chatId, messageId: "initial-request" }));
+      if (phase === "resume") {
+        if (!initialCtx || !initialMessage) throw new Error("initial session was not captured");
+        await initialCtx.finishTurn(initialMessage, { status: "success", terminal: true });
+        await sm.handleCommand(chatId, "session:suspend");
+        await sm.dispatch(mockEntry({ id: 2, chatId, messageId: "failed-resume-request" }));
+      }
+
+      const failures = events
+        .filter((event): event is Extract<SessionEvent, { kind: "error" }> => event.kind === "error")
+        .map((event) => parseProviderRetryEventMessage(event.payload.message));
+      expect(failures).toEqual([
+        expect.objectContaining({
+          event: "provider_failure_terminal",
+          scope: phase === "start" ? "session_start" : "session_resume",
+          category: "configuration",
+          reasonCode: "managed_skills_state_invalid",
+        }),
+      ]);
+      expect(sendMessage).toHaveBeenCalledTimes(1);
+      expect(sendMessage).toHaveBeenCalledWith(
+        chatId,
+        expect.objectContaining({ content: expect.stringContaining("Automatic retries have stopped") }),
+      );
+      expect(ackEntry).toHaveBeenCalledWith(phase === "start" ? 1 : 2);
+      expect(recoverChat).not.toHaveBeenCalled();
+      expect(sm.totalCount).toBe(0);
+
+      const eventCount = events.length;
+      await vi.advanceTimersByTimeAsync(180_000);
+      expect(events).toHaveLength(eventCount);
+      expect(sendMessage).toHaveBeenCalledTimes(1);
+      expect(broken.start).toHaveBeenCalledTimes(1);
+      expect(broken.resume).toHaveBeenCalledTimes(phase === "resume" ? 1 : 0);
+      expect(repaired.start).not.toHaveBeenCalled();
+
+      await sm.dispatch(mockEntry({ id: 3, chatId, messageId: "request-after-repair" }));
+      expect(repaired.start).toHaveBeenCalledTimes(1);
+      expect(repaired.start).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "request-after-repair" }),
+        expect.anything(),
+        expect.anything(),
+      );
+      expect(sendMessage).toHaveBeenCalledTimes(1);
+    } finally {
+      await sm?.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
   it("emits onStateChange('errored') when handler.start throws", async () => {
     const stateChanges: Array<{ chatId: string; state: SessionState }> = [];
     const sm = makeSessionRuntime({

@@ -92,6 +92,21 @@ Malformed state and future schema versions fail closed: the reconciler reports
 the problem and performs no managed target mutation. A missing state file is a
 first run. Schema v1 enters the conservative migration described below.
 
+The runtime-config publication preflight admits a valid v1 ledger so that this
+migration can run. A v1 ledger contributes Team Resource version 0; any v2
+ledger in either the target workspace or source-authority root still enforces
+its higher fence. An existing v1 ledger still requires runtime configuration
+unless the handler has a captured payload. Admission also requires a resolved
+Context source and verified Skill ownership. Successful legacy migration does
+not emit a chat failure notice.
+
+An invalid, unreadable, unsupported, or non-regular existing ledger requires
+operator recovery. Session start/resume reports that configuration failure once
+and stops automatic retries while preserving the existing projection. After
+repairing the local state or installing a compatible client, send the request
+again. Transient source/configuration availability failures retain their normal
+retry policy.
+
 ### Transaction journal
 
 The journal records `beforeState`, `afterState`, the target, optional staging

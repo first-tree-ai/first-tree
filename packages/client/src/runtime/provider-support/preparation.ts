@@ -34,6 +34,7 @@ import {
 import type { SessionContext } from "../handler.js";
 import {
   allowedTargetRootsFromProjection,
+  ManagedSkillsStateError,
   ManagedSkillsUnsafeDiscoveryError,
   type ProviderSkillRootProjection,
   providerSkillRoot,
@@ -278,22 +279,38 @@ function assertRuntimeConfigCanPublish(
     const stateStat = lstatOrNull(statePath);
     if (!stateStat) continue;
     if (stateStat.isSymbolicLink() || !stateStat.isFile()) {
-      throw new ManagedSkillsUnsafeDiscoveryError(
-        "Managed Skills state is not a trusted regular file; preserving the existing projection",
+      throw new ManagedSkillsStateError(
+        "untrusted",
+        `Managed Skills state at ${statePath} is not a trusted regular file; preserving the existing projection`,
       );
     }
     const state = readManagedStateResult(root);
     // Schema v1 state predates the Team Resource fence, so it publishes at
     // version 0; reconcile migrates it in place once the session is admitted.
-    // Only future/invalid state is unsafe to mutate.
     const publishedVersion =
       state.kind === "current" ? state.state.resourceConfigVersion : state.kind === "legacy" ? 0 : null;
-    if (publishedVersion === null) {
+    if (publishedVersion !== null) {
+      highestPublishedVersion = Math.max(highestPublishedVersion ?? 0, publishedVersion);
+      continue;
+    }
+    if (state.kind === "missing") {
+      // The file existed at lstat and vanished before the read: retry the race.
       throw new ManagedSkillsUnsafeDiscoveryError(
-        "Managed Skills state is unreadable or from an unsupported version; preserving the existing projection",
+        "Managed Skills state vanished while it was being inspected; preserving the existing projection",
       );
     }
-    highestPublishedVersion = Math.max(highestPublishedVersion ?? 0, publishedVersion);
+    if (state.kind === "future") {
+      throw new ManagedSkillsStateError(
+        "unsupported",
+        `Managed Skills state at ${statePath} uses unsupported schema v${state.schemaVersion}; preserving the existing projection`,
+      );
+    }
+    if (state.kind === "invalid") {
+      throw new ManagedSkillsStateError(
+        "invalid",
+        `Managed Skills state at ${statePath} is invalid (${state.reason}); preserving the existing projection`,
+      );
+    }
   }
   if (highestPublishedVersion === null) return;
   if (runtimeConfig === null && !hasCapturedPayload) {

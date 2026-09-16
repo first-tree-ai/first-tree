@@ -471,12 +471,28 @@ type SkillTreeModePolicy = "enforce-safe" | "normalize-bundled";
 
 class ManagedSkillsFatalError extends Error {}
 export class ManagedSkillsUnsafeDiscoveryError extends Error {
-  override readonly name = "ManagedSkillsUnsafeDiscoveryError";
+  override readonly name: string = "ManagedSkillsUnsafeDiscoveryError";
 }
 class ManagedSkillsSimulatedCrash extends Error {}
 
 export function isManagedSkillsUnsafeDiscoveryError(error: unknown): error is ManagedSkillsUnsafeDiscoveryError {
   return error instanceof ManagedSkillsUnsafeDiscoveryError;
+}
+
+export type ManagedSkillsStateErrorReason = "invalid" | "unsupported" | "untrusted";
+
+/** Stops retries for local state repair while retaining provider fail-closed handling. */
+export class ManagedSkillsStateError extends ManagedSkillsUnsafeDiscoveryError {
+  override readonly name = "ManagedSkillsStateError";
+  readonly reason: ManagedSkillsStateErrorReason;
+  constructor(reason: ManagedSkillsStateErrorReason, message: string) {
+    super(message);
+    this.reason = reason;
+  }
+}
+
+export function isManagedSkillsStateError(error: unknown): error is ManagedSkillsStateError {
+  return error instanceof ManagedSkillsStateError;
 }
 
 function assertLocalSkillPublicationAuthorized(options: ReconcileManagedSkillsOptions): void {

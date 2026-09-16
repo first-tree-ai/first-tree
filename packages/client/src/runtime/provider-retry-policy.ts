@@ -8,7 +8,7 @@ import type {
 } from "@first-tree/shared";
 import { AGENT_RUNTIME_SESSION_ERROR_CODES } from "@first-tree/shared";
 import { type Classification, classify, ERROR_KINDS } from "./error-taxonomy.js";
-import { isManagedSkillsUnsafeDiscoveryError } from "./managed-skills.js";
+import { isManagedSkillsStateError, isManagedSkillsUnsafeDiscoveryError } from "./managed-skills.js";
 import { redactErrorPreview } from "./redact-error-preview.js";
 
 export type ProviderFailureClassification = {
@@ -91,6 +91,16 @@ export function classifyProviderFailure(
       category: "runtime_transport",
       reasonCode: runtimeSessionReason,
       message: base.message,
+      sourceKind: base.kind,
+    };
+  }
+  if (isManagedSkillsStateError(err)) {
+    // Check before the unsafe-discovery base class: retries cannot repair local state.
+    return {
+      category: "configuration",
+      reasonCode: `managed_skills_state_${err.reason}`,
+      message: base.message,
+      retryAfterMs,
       sourceKind: base.kind,
     };
   }

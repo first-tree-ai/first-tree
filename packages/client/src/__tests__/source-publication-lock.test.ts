@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentRuntimeConfig } from "@first-tree/shared";
+import { type AgentRuntimeConfig, agentRuntimeConfigSchema } from "@first-tree/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.unmock("../runtime/managed-skills.js");
@@ -27,8 +27,17 @@ import {
 } from "../runtime/context-source.js";
 import { CORE_SKILL_NAMES } from "../runtime/first-tree-skills/installer.js";
 import type { SessionContext } from "../runtime/handler.js";
-import { ManagedSkillsUnsafeDiscoveryError, providerSkillRoot } from "../runtime/managed-skills.js";
-import { MANAGED_SKILLS_JOURNAL_REL, MANAGED_SKILLS_LOCK_REL, MANAGED_STATE_REL } from "../runtime/managed-state.js";
+import {
+  ManagedSkillsStateError,
+  ManagedSkillsUnsafeDiscoveryError,
+  providerSkillRoot,
+} from "../runtime/managed-skills.js";
+import {
+  MANAGED_SKILLS_JOURNAL_REL,
+  MANAGED_SKILLS_LOCK_REL,
+  MANAGED_STATE_REL,
+  readManagedStateResult,
+} from "../runtime/managed-state.js";
 import { ContextSourceTransitionError, projectManagedWorkspace } from "../runtime/provider-support/preparation.js";
 import { INIT_COMPLETE_SENTINEL_REL } from "../runtime/workspace.js";
 import { mockCtxPlumbing } from "./test-helpers.js";
@@ -153,6 +162,20 @@ describe("source-publication lock", () => {
     };
     visit(root, "");
     return result;
+  }
+
+  /** A pre-redesign schema-v1 ledger: no resourceConfigVersion fence. */
+  function writeLegacyManagedState(root: string, skills: string[]): void {
+    mkdirSync(join(root, ".first-tree-workspace"), { recursive: true });
+    writeFileSync(
+      join(root, MANAGED_STATE_REL),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        cliVersion: "0.5.17",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        skills,
+      })}\n`,
+    );
   }
 
   it("does not let stale Local publication downgrade remote Skill, manifest, identity, briefing, or sentinel", async () => {
@@ -1017,6 +1040,223 @@ describe("source-publication lock", () => {
       "runtime config is unavailable",
     );
     expect(workspaceEntrySnapshot()).toEqual(before);
+  });
+
+  it.each([
+    "ledger",
+    "legacy-symlink",
+  ] as const)("migrates v1 with %s ownership through the real reconcile while protecting unowned Skills", async (proof) => {
+    const provenSkill = join(workspace, ".agents", "skills", "first-tree-read");
+    mkdirSync(provenSkill, { recursive: true });
+    writeFileSync(join(provenSkill, "SKILL.md"), "# legacy first-tree-read bytes\n");
+    const unownedSkill = join(workspace, ".agents", "skills", "acme-notes");
+    mkdirSync(unownedSkill, { recursive: true });
+    writeFileSync(join(unownedSkill, "SKILL.md"), "# acme-notes\n");
+    writeLegacyManagedState(workspace, proof === "ledger" ? ["first-tree-read"] : []);
+    if (proof === "legacy-symlink") {
+      mkdirSync(join(workspace, ".claude", "skills"), { recursive: true });
+      symlinkSync("../../.agents/skills/first-tree-read", join(workspace, ".claude", "skills", "first-tree-read"));
+    }
+
+    const projected = await projectManagedWorkspace({
+      sessionCtx: sessionCtx(),
+      workspace,
+      agentName: "slot-agent",
+      runtimeProvider: "codex",
+      providerSkillRoots: TEST_PROVIDER_SKILL_ROOTS,
+      runtimeConfig: agentRuntimeConfigSchema.parse({
+        agentId: sessionCtx().agent.agentId,
+        version: 1,
+        payload,
+        updatedAt: "2026-09-16T00:00:00.000Z",
+        updatedBy: "test",
+      }),
+      payload,
+      payloadResolved: true,
+      bundledSkillsRoot,
+      contextTree: {
+        kind: "remote",
+        path: join(workspace, "context-tree"),
+        repoUrl: "git@github.com:acme/tree.git",
+        branch: "main",
+      },
+      markInitComplete: true,
+    });
+
+    expect(projected.briefing).toEqual(expect.any(String));
+    const parsed = readManagedStateResult(workspace);
+    if (parsed.kind !== "current") throw new Error(`Expected migrated current state, got ${parsed.kind}`);
+    const migrated = parsed.state;
+    expect(migrated.schemaVersion).toBe(2);
+    const targets = migrated.skills.map((entry) => entry.target);
+    expect(targets).toContain(".agents/skills/first-tree-read");
+    expect(targets).not.toContain(".agents/skills/acme-notes");
+    // The proven legacy Skill was refreshed to the bundled current revision…
+    const provenReadme = readFileSync(join(provenSkill, "SKILL.md"), "utf8");
+    expect(provenReadme).toContain("# first-tree-read\n");
+    expect(provenReadme).not.toContain("legacy first-tree-read bytes");
+    expect(JSON.parse(readFileSync(join(provenSkill, ".first-tree-managed.json"), "utf8"))).toMatchObject({
+      revision: "1.0.0",
+    });
+    // …while the unowned Skill keeps its exact bytes and stays out of the ledger.
+    expect(readFileSync(join(unownedSkill, "SKILL.md"), "utf8")).toBe("# acme-notes\n");
+    expect(existsSync(join(unownedSkill, ".first-tree-managed.json"))).toBe(false);
+  });
+
+  it("keeps the current-v2 config fence when the other root only holds a legacy v1 state", async () => {
+    const legacyWorkspace = join(sandbox, "legacy-fence-chat");
+    mkdirSync(legacyWorkspace);
+    const contextTree = {
+      kind: "remote" as const,
+      path: join(workspace, "context-tree"),
+      repoUrl: "git@github.com:acme/tree.git",
+      branch: "main",
+    };
+    const common = {
+      sessionCtx: sessionCtx(),
+      agentName: "slot-agent",
+      runtimeProvider: "codex" as const,
+      providerSkillRoots: TEST_PROVIDER_SKILL_ROOTS,
+      payload,
+      payloadResolved: true,
+      bundledSkillsRoot,
+      contextTree,
+      markInitComplete: true,
+    };
+
+    // Position A: the Agent authority root holds a current v2 state at fence
+    // v2; the legacy chat cwd only carries a pre-fence v1 ledger. A stale v1
+    // config must still be refused — the fenceless legacy ledger may not
+    // erase the v2 fence.
+    await projectManagedWorkspace({
+      ...common,
+      workspace,
+      runtimeConfig: { version: 2, payload } as unknown as AgentRuntimeConfig,
+    });
+    writeLegacyManagedState(legacyWorkspace, []);
+    let authorityBefore = workspaceEntrySnapshot(workspace);
+    let legacyBefore = workspaceEntrySnapshot(legacyWorkspace);
+
+    await expect(
+      projectManagedWorkspace({
+        ...common,
+        workspace: legacyWorkspace,
+        sourceAuthorityRoot: workspace,
+        runtimeConfig: { version: 1, payload } as unknown as AgentRuntimeConfig,
+      }),
+    ).rejects.toThrow("older than managed projection v2");
+    expect(workspaceEntrySnapshot(workspace)).toEqual(authorityBefore);
+    expect(workspaceEntrySnapshot(legacyWorkspace)).toEqual(legacyBefore);
+
+    // Position B (mirror): the legacy chat cwd publishes a current v2 state
+    // at fence v2 while the authority root's ledger is the pre-fence v1 one.
+    await projectManagedWorkspace({
+      ...common,
+      workspace: legacyWorkspace,
+      runtimeConfig: { version: 2, payload } as unknown as AgentRuntimeConfig,
+    });
+    writeLegacyManagedState(workspace, []);
+    authorityBefore = workspaceEntrySnapshot(workspace);
+    legacyBefore = workspaceEntrySnapshot(legacyWorkspace);
+
+    await expect(
+      projectManagedWorkspace({
+        ...common,
+        workspace: legacyWorkspace,
+        sourceAuthorityRoot: workspace,
+        runtimeConfig: { version: 1, payload } as unknown as AgentRuntimeConfig,
+      }),
+    ).rejects.toThrow("older than managed projection v2");
+    expect(workspaceEntrySnapshot(workspace)).toEqual(authorityBefore);
+    expect(workspaceEntrySnapshot(legacyWorkspace)).toEqual(legacyBefore);
+  });
+
+  it.each([
+    {
+      name: "an unsupported future schema",
+      reason: "unsupported",
+      setup: (root: string) => {
+        writeFileSync(
+          join(root, MANAGED_STATE_REL),
+          `${JSON.stringify({
+            schemaVersion: 3,
+            resourceConfigVersion: 0,
+            updatedAt: "2026-01-01T00:00:00.000Z",
+            skills: [],
+          })}\n`,
+        );
+      },
+    },
+    {
+      name: "an invalid v2 shape",
+      reason: "invalid",
+      setup: (root: string) => writeFileSync(join(root, MANAGED_STATE_REL), '{"schemaVersion":2}\n'),
+    },
+    {
+      name: "unparseable state bytes",
+      reason: "invalid",
+      setup: (root: string) => writeFileSync(join(root, MANAGED_STATE_REL), "not managed state\n"),
+    },
+    {
+      name: "a symlinked state file",
+      reason: "untrusted",
+      setup: (root: string) => {
+        const external = join(sandbox, "external-managed.json");
+        writeFileSync(external, "untouched\n");
+        symlinkSync(external, join(root, MANAGED_STATE_REL));
+      },
+    },
+    {
+      name: "a state directory",
+      reason: "untrusted",
+      setup: (root: string) => mkdirSync(join(root, MANAGED_STATE_REL)),
+    },
+  ])("stops deterministically on $name and leaves the state unmodified", async ({ reason, setup }) => {
+    mkdirSync(join(workspace, ".first-tree-workspace"), { recursive: true });
+    setup(workspace);
+    const before = workspaceEntrySnapshot();
+
+    const failure = await projectManagedWorkspace({
+      sessionCtx: sessionCtx(),
+      workspace,
+      agentName: "slot-agent",
+      runtimeProvider: "codex",
+      providerSkillRoots: TEST_PROVIDER_SKILL_ROOTS,
+      runtimeConfig: null,
+      payload,
+      payloadResolved: true,
+      bundledSkillsRoot,
+      contextTree: {
+        kind: "remote",
+        path: join(workspace, "context-tree"),
+        repoUrl: "git@github.com:acme/tree.git",
+        branch: "main",
+      },
+      markInitComplete: true,
+    }).then(
+      () => {
+        throw new Error("projection unexpectedly published over a deterministic bad managed state");
+      },
+      (error: unknown) => error,
+    );
+
+    // One typed deterministic failure that every existing unsafe-discovery
+    // catch still recognizes.
+    expect(failure).toBeInstanceOf(ManagedSkillsStateError);
+    expect(failure).toBeInstanceOf(ManagedSkillsUnsafeDiscoveryError);
+    if (!(failure instanceof ManagedSkillsStateError)) throw new Error("Expected managed-state failure");
+    expect(failure.reason).toBe(reason);
+
+    // Nothing was published or mutated; the only tolerated newcomer is the
+    // source-publication lock the projection itself takes.
+    const after = workspaceEntrySnapshot();
+    delete after[".first-tree-workspace/context-source.lock"];
+    expect(after).toEqual(before);
+    expect(existsSync(join(workspace, ".agents"))).toBe(false);
+    expect(existsSync(join(workspace, IDENTITY_JSON_REL))).toBe(false);
+    expect(existsSync(join(workspace, "AGENTS.md"))).toBe(false);
+    expect(existsSync(join(workspace, ".first-tree", "workspace.json"))).toBe(false);
+    expect(existsSync(join(workspace, INIT_COMPLETE_SENTINEL_REL))).toBe(false);
   });
 
   it("keeps Local LKG bytes unchanged when later admission is network unknown", async () => {
