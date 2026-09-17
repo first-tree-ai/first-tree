@@ -54,8 +54,7 @@ describe("runtimeProviderSchema", () => {
     expect(isRuntimeProviderEnabled("codex")).toBe(true);
     expect(isRuntimeProviderEnabled("cursor")).toBe(true);
     expect(isRuntimeProviderEnabled("grok")).toBe(true);
-    // Pending isolated provider-owned live QA and human acceptance.
-    expect(isRuntimeProviderEnabled("antigravity")).toBe(false);
+    expect(isRuntimeProviderEnabled("antigravity")).toBe(true);
     expect(isRuntimeProviderEnabled("kimi-code")).toBe(true);
     expect(isRuntimeProviderEnabled("opencode")).toBe(true);
     expect(isRuntimeProviderEnabled("pi")).toBe(true);

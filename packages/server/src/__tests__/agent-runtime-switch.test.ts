@@ -895,7 +895,7 @@ describe("agent runtime switch service preconditions", () => {
   it.each([
     ["absent", undefined],
     ["empty", { capabilities: {} }],
-  ] as const)("rejects Antigravity switch with %s capability metadata", async (_shape, metadata) => {
+  ] as const)("rejects disabled provider switch with %s capability metadata", async (_shape, metadata) => {
     const app = getApp();
     const { ctx, agent } = await createSwitchFixture(app);
     const targetClientId = `cli-gated-${crypto.randomUUID().slice(0, 8)}`;
@@ -912,7 +912,7 @@ describe("agent runtime switch service preconditions", () => {
       switchAgentRuntime(
         app.db,
         agent.uuid,
-        { clientId: targetClientId, runtimeProvider: "antigravity" },
+        { clientId: targetClientId, runtimeProvider: "claude-code-tui" },
         { userId: ctx.userId, memberId: ctx.memberId },
       ),
     ).rejects.toThrow(/disabled for new selection/);

@@ -74,8 +74,7 @@ describe("hasNonOkProvider", () => {
   });
 
   it("all enabled built-in providers ok → not degraded (stops the poll)", () => {
-    // claude-code-tui and gated Antigravity are disabled, so every other
-    // enabled built-in must be ok.
+    // claude-code-tui is disabled; every enabled built-in must be ok.
     expect(
       hasNonOkProvider({
         amp: okEntry(),
@@ -84,6 +83,7 @@ describe("hasNonOkProvider", () => {
         cursor: okEntry(),
         "deepseek-harness": okEntry(),
         grok: okEntry(),
+        antigravity: okEntry(),
         "kimi-code": okEntry(),
         opencode: okEntry(),
         pi: okEntry(),
@@ -100,6 +100,7 @@ describe("hasNonOkProvider", () => {
         codex: okEntry(),
         cursor: okEntry(),
         grok: okEntry(),
+        antigravity: okEntry(),
         "kimi-code": okEntry(),
         opencode: okEntry(),
         pi: okEntry(),
@@ -216,13 +217,13 @@ describe("revalidateCapabilities / reprobeOnReconnect (probe modules mocked)", (
     expect(calls.codex).toBe(1);
     expect(calls.amp).toBe(1);
     expect(calls["deepseek-harness"]).toBe(1);
-    expect(calls.antigravity).toBeUndefined();
+    expect(calls.antigravity).toBe(1);
     expect(out["claude-code"]?.state).toBe("ok");
     expect(out.codex?.state).toBe("ok");
-    // claude-code-tui and gated Antigravity are disabled → never probed, no entry.
+    // claude-code-tui is disabled → never probed, no entry.
     expect(calls["claude-code-tui"]).toBeUndefined();
     expect(out["claude-code-tui"]).toBeUndefined();
-    expect(out.antigravity).toBeUndefined();
+    expect(out.antigravity?.state).toBe("ok");
   });
 
   it("revalidateCapabilities returns the fresh entry even when a provider regresses", async () => {

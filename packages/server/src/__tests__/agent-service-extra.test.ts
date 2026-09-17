@@ -163,7 +163,7 @@ describe("agent service extra coverage", () => {
       type: "agent" as const,
       managerId: admin.memberId,
       clientId: admin.clientId,
-      runtimeProvider: "antigravity" as RuntimeProvider,
+      runtimeProvider: "claude-code-tui" as RuntimeProvider,
     } as unknown as Parameters<typeof createAgent>[1];
     await expect(createAgent(app.db, absentCapabilityInput)).rejects.toThrow(/disabled for new selection/);
     await expect(

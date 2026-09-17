@@ -926,6 +926,7 @@ describe("probeCapabilities (aggregator)", () => {
     // their probes are never called (no binary spawn).
     expect(Object.keys(caps).sort()).toEqual([
       "amp",
+      "antigravity",
       "claude-code",
       "codex",
       "cursor",
@@ -937,9 +938,9 @@ describe("probeCapabilities (aggregator)", () => {
     ]);
     expect(caps["claude-code"]?.state).toBe("ok");
     expect(caps["claude-code-tui"]).toBeUndefined();
-    expect(caps.antigravity).toBeUndefined();
+    expect(caps.antigravity).toMatchObject({ state: "missing", available: false });
     expect(tuiProbe).not.toHaveBeenCalled();
-    expect(antigravityProbe).not.toHaveBeenCalled();
+    expect(antigravityProbe).toHaveBeenCalledTimes(1);
     expect(okProbe).toHaveBeenCalledTimes(9);
   }, 15_000);
 
@@ -988,9 +989,9 @@ describe("probeCapabilities (aggregator)", () => {
     expect(caps.pi).toMatchObject({ state: "error", error: "pi probe failed" });
     // Disabled providers are never probed, so no entry (not even an error one).
     expect(caps["claude-code-tui"]).toBeUndefined();
-    expect(caps.antigravity).toBeUndefined();
+    expect(caps.antigravity).toMatchObject({ state: "error", error: "antigravity probe failed" });
     expect(probes["claude-code-tui"]).not.toHaveBeenCalled();
-    expect(probes.antigravity).not.toHaveBeenCalled();
+    expect(probes.antigravity).toHaveBeenCalledTimes(1);
   });
 
   it("publishes stable provider order when probes settle in reverse", async () => {
@@ -1030,6 +1031,7 @@ describe("probeCapabilities (aggregator)", () => {
       "deepseek-harness",
       "cursor",
       "grok",
+      "antigravity",
       "kimi-code",
       "opencode",
       "pi",

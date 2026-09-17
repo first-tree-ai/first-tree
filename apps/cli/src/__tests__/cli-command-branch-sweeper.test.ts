@@ -191,7 +191,8 @@ describe("CLI command branch sweeper", () => {
     const createCommand = agentCommand?.commands.find((command) => command.name() === "create");
     const help = createCommand?.helpInformation() ?? "";
     expect(help).toContain("codex");
-    expect(help).not.toContain("antigravity");
+    expect(help).toContain("antigravity");
+    expect(help).not.toContain("claude-code-tui");
 
     await expect(
       runWith(registerAgentCommands, [
@@ -203,12 +204,12 @@ describe("CLI command branch sweeper", () => {
         "--client-id",
         "client-a",
         "--runtime",
-        "antigravity",
+        "claude-code-tui",
       ]),
     ).rejects.toMatchObject({ code: "CREATE_ERROR" });
     expect(outputMocks.fail).toHaveBeenCalledWith(
       "INVALID_RUNTIME",
-      expect.stringContaining('Runtime "antigravity" is not selectable'),
+      expect.stringContaining('Runtime "claude-code-tui" is not selectable'),
       1,
     );
     expect(fetchMock).not.toHaveBeenCalled();

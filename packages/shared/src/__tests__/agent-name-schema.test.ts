@@ -132,13 +132,23 @@ describe("createAgentSchema", () => {
     expect(res.success).toBe(false);
   });
 
-  it("rejects disabled providers at public create and switch edges", () => {
-    expect(createAgentSchema.safeParse({ type: "agent", runtimeProvider: "antigravity" }).success).toBe(false);
-    expect(createAgentSchema.safeParse({ type: "agent", runtimeProvider: "claude-code-tui" }).success).toBe(false);
+  it("accepts enabled providers and rejects disabled providers at public create and switch edges", () => {
+    // Antigravity is enabled: accepted at both create and switch edges.
+    expect(createAgentSchema.safeParse({ type: "agent", runtimeProvider: "antigravity" }).success).toBe(true);
     expect(
       switchAgentRuntimeSchema.safeParse({
         clientId: "client-1",
         runtimeProvider: "antigravity",
+        confirmLocalDataLoss: true,
+      }).success,
+    ).toBe(true);
+
+    // claude-code-tui remains disabled: rejected at both create and switch edges.
+    expect(createAgentSchema.safeParse({ type: "agent", runtimeProvider: "claude-code-tui" }).success).toBe(false);
+    expect(
+      switchAgentRuntimeSchema.safeParse({
+        clientId: "client-1",
+        runtimeProvider: "claude-code-tui",
         confirmLocalDataLoss: true,
       }).success,
     ).toBe(false);
