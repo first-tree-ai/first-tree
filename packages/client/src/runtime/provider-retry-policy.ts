@@ -289,6 +289,13 @@ export function decideProviderRetry(input: {
     return stop(input.classification.reasonCode, "runtime_rebind_required", input.replaySafety, "warning");
   }
 
+  // Cursor already abandoned the poisoned session. Preserve that stop
+  // reason even after a tool effect so the notice tells the operator to
+  // continue in this chat with a fresh session, not a generic unsafe replay.
+  if (input.classification.reasonCode === "cursor_resume_stuck") {
+    return stop(input.classification.reasonCode, "needs_operator", input.replaySafety, "error");
+  }
+
   if (
     input.scope === "provider_turn" &&
     isUnsafeReplay(input.replaySafety) &&
@@ -680,6 +687,11 @@ function isConfiguration(text: string, base: Classification, provider: RuntimePr
   ) {
     return true;
   }
+  // Cursor CLI already exhausted in-turn resume. Retrying the same session is
+  // not a configuration edit the operator can make; it is still a hard stop
+  // (kept in sync with providers/cursor/resume-stuck.ts) so unknown retries
+  // cannot re-enter `--resume` of the poisoned id. Gated to cursor.
+  if (provider === "cursor" && /repeated resume attempts made no progress/i.test(text)) return true;
   // Cursor CLI literal invalid-model / explicit-deny / trust-wall phrasings
   // (captured in Phase 0). Gated to the cursor provider: this classifier is
   // shared and configuration wins over capacity in the classify chain, so an
@@ -701,6 +713,9 @@ function configurationReason(text: string, base: Classification, provider: Runti
     )
   ) {
     return "antigravity_protocol_error";
+  }
+  if (provider === "cursor" && /repeated resume attempts made no progress/i.test(text)) {
+    return "cursor_resume_stuck";
   }
   return base.reasonCode === "unknown" ? "provider_configuration_error" : base.reasonCode;
 }

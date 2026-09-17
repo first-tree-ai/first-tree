@@ -59,6 +59,7 @@ import {
   resolveCursorRuntimeBinary,
 } from "./binary.js";
 import { type CursorStreamEvent, CursorStreamParser, type CursorToolCall, type CursorUsage } from "./parser.js";
+import { cursorResumeStuckRecoveryMessage, isCursorResumeStuckError } from "./resume-stuck.js";
 
 /**
  * Cursor handler — drives the EXTERNAL Cursor Agent CLI, one process per
@@ -85,6 +86,10 @@ import { type CursorStreamEvent, CursorStreamParser, type CursorToolCall, type C
  *     per-server approval keeps unrelated operator MCP approval unchanged;
  *   - `--resume` only ever carries a stream-confirmed provider session id;
  *     synthetic pending ids stay runtime-local;
+ *   - when Cursor reports that resume made no progress, the handler abandons
+ *     that provider session. A replay-safe attempt retries the same delivery
+ *     without `--resume`; an unsafe attempt stops and the next turn starts
+ *     fresh rather than unknown-retrying the poisoned id;
  *   - settlement waits for child close + stdout/stderr drain (auth, invalid
  *     model, and quota failures often produce NO `result` event — non-zero
  *     exit + stderr is a first-class failure input, not an afterthought).
@@ -96,6 +101,8 @@ export const CURSOR_PENDING_SESSION_PREFIX = "cursor-pending-";
 export function isCursorPendingSessionId(sessionId: string): boolean {
   return sessionId.startsWith(CURSOR_PENDING_SESSION_PREFIX);
 }
+
+export { cursorResumeStuckRecoveryMessage, isCursorResumeStuckError } from "./resume-stuck.js";
 
 type CursorMcpServerConfig =
   | { command: string; args?: string[] }
@@ -867,6 +874,23 @@ export const createCursorHandler: HandlerFactory = (config) => {
     }
   }
 
+  /**
+   * Cursor has already exhausted resume of this conversation. Drop the
+   * stream-confirmed id so the next spawn is start-shaped, and rebind the
+   * runtime mapping onto a synthetic pending id until a new session confirms.
+   */
+  function abandonCursorProviderSession(sessionCtx: SessionContext, staleSessionId: string | null): string {
+    if (!pendingSyntheticId) {
+      pendingSyntheticId = `${CURSOR_PENDING_SESSION_PREFIX}${randomUUID()}`;
+    }
+    providerSessionId = null;
+    sessionCtx.replaceSessionId?.(pendingSyntheticId, "cursor_resume_stuck_abandoned");
+    const message = cursorResumeStuckRecoveryMessage(staleSessionId);
+    sessionCtx.log(message);
+    sessionCtx.emitEvent({ kind: "error", payload: { source: "runtime", message } });
+    return pendingSyntheticId;
+  }
+
   function handleStreamEvent(event: CursorStreamEvent, state: TurnStreamState, sessionCtx: SessionContext): void {
     sessionCtx.recordProviderActivity();
     switch (event.kind) {
@@ -946,7 +970,10 @@ export const createCursorHandler: HandlerFactory = (config) => {
         state.resultText = event.text;
         state.usage = event.usage;
         adoptProviderSessionId(sessionCtx, event.sessionId);
-        if (event.text.trim()) state.userVisibleEmitted = true;
+        // Successful result text is the canonical assistant output. Error
+        // result text is a failure message, not user-visible turn output, so
+        // it must not poison replay-safety or resume-stuck recovery.
+        if (!event.isError && event.text.trim()) state.userVisibleEmitted = true;
         break;
       }
       case "unknown": {
@@ -1289,6 +1316,7 @@ export const createCursorHandler: HandlerFactory = (config) => {
     let anyUserVisible = false;
 
     const promise = (async () => {
+      let resumeStuckRecovered = false;
       for (let attempt = 0; ; attempt++) {
         const state: TurnStreamState = {
           // Fresh parser per attempt — retries must not inherit partial-line state.
@@ -1386,6 +1414,42 @@ export const createCursorHandler: HandlerFactory = (config) => {
           outcome.spawnError && (outcome.spawnError as NodeJS.ErrnoException).code === "ENOENT"
             ? new Error(formatCursorBinaryMissingMessage(`the bound cursor binary disappeared: ${activeBinary}`))
             : new Error(failureText);
+        // Cursor already exhausted its in-turn resume loop. Retrying the same
+        // `--resume` id cannot make progress. A replay-safe attempt (no
+        // user-visible output or unproven side effect) starts a fresh
+        // conversation for this delivery; otherwise stop and leave the mapping
+        // on a pending id so the next turn is start-shaped.
+        if (isCursorResumeStuckError(failureError)) {
+          const staleSessionId = providerSessionId;
+          abandonCursorProviderSession(sessionCtx, staleSessionId);
+          if (!resumeStuckRecovered && !state.toolEffectStarted && !state.userVisibleEmitted) {
+            try {
+              await assertContextSourceCurrent({
+                sessionCtx,
+                sourceAuthorityRoot: workspaceRoot,
+                contextTree: {
+                  kind: contextTree.kind,
+                  path: contextTree.path,
+                  repoUrl: contextTree.repoUrl,
+                  branch: contextTree.branch,
+                },
+              });
+            } catch (sourceError) {
+              if (!isContextSourceTransitionError(sourceError)) throw sourceError;
+              retryReason = "cursor_context_source_changed";
+              sessionCtx.failSessionForRecovery?.(
+                "cursor_context_source_changed",
+                pendingSyntheticId ?? providerSessionId ?? undefined,
+              );
+              return;
+            }
+            resumeStuckRecovered = true;
+            sessionCtx.log(
+              `cursor resume-stuck recovery: retrying without --resume (stale ${staleSessionId ?? "none"})`,
+            );
+            continue;
+          }
+        }
         state.attempt.recordSignal({
           kind: outcome.spawnError ? "local_error" : "provider_error",
           error: failureError,
