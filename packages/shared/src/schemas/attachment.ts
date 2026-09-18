@@ -12,6 +12,51 @@ import { z } from "zod";
 export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 
 /**
+ * Maximum UTF-8 byte length of a stored filename.
+ *
+ * Download responses percent-encode the complete filename for the quoted
+ * `Content-Disposition` parameter. A 255-byte filename expands to at most
+ * 765 ASCII characters, leaving ample room for the other response headers
+ * under Node's default 16 KiB header limit.
+ */
+export const MAX_ATTACHMENT_FILENAME_BYTES = 255;
+
+/** Normalize the filename value shared by every upload ingress. */
+export function normalizeAttachmentFilename(value: string): string {
+  return value.trim();
+}
+
+/** Truncate a string without splitting a Unicode code point. */
+export function truncateUtf8ByBytes(value: string, maxBytes: number): string {
+  const encoder = new TextEncoder();
+  if (encoder.encode(value).byteLength <= maxBytes) return value;
+  let result = "";
+  let bytes = 0;
+  for (const character of value) {
+    const characterBytes = encoder.encode(character).byteLength;
+    if (bytes + characterBytes > maxBytes) break;
+    result += character;
+    bytes += characterBytes;
+  }
+  return result;
+}
+
+/** Return the canonical filename validation error shared by every ingress. */
+export function getAttachmentFilenameError(value: string): string | null {
+  const filename = normalizeAttachmentFilename(value);
+  if (filename.length === 0) return "Attachment filename is required";
+  try {
+    encodeURIComponent(filename);
+  } catch {
+    return "Attachment filename must contain valid Unicode characters";
+  }
+  if (new TextEncoder().encode(filename).byteLength > MAX_ATTACHMENT_FILENAME_BYTES) {
+    return `Attachment filename exceeds maximum length of ${MAX_ATTACHMENT_FILENAME_BYTES} UTF-8 bytes`;
+  }
+  return null;
+}
+
+/**
  * Cloud message-class attachment retention window, in days.
  *
  * Single numeric owner for the policy: Server derives the millisecond cutoff

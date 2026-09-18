@@ -1,14 +1,14 @@
 import crypto from "node:crypto";
 import { eq } from "drizzle-orm";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { WebSocket } from "ws";
 import { clients } from "../db/schema/clients.js";
 import * as clientService from "../services/runtime/client.js";
 import {
+  cancelClientReply,
   removeClientConnection,
   resolveClientReply,
   setClientConnection,
-  setClientReplyTimeoutMsForTests,
   waitForClientReply,
 } from "../services/runtime/connection-manager.js";
 import {
@@ -46,10 +46,6 @@ function sampleCatalog(
  */
 describe("GET /clients/:clientId/providers/:provider/models", () => {
   const getApp = useTestApp();
-
-  afterEach(() => {
-    setClientReplyTimeoutMsForTests(null);
-  });
 
   async function markClientOnInstance(app: ReturnType<typeof getApp>, clientId: string, instanceId: string) {
     await app.db.update(clients).set({ status: "connected", instanceId }).where(eq(clients.id, clientId));
@@ -248,7 +244,6 @@ describe("GET /clients/:clientId/providers/:provider/models", () => {
     const app = getApp();
     const admin = await createAdminContext(app, { username: `pm-${crypto.randomUUID().slice(0, 6)}` });
     await markClientOnInstance(app, admin.clientId, app.config.instanceId);
-    setClientReplyTimeoutMsForTests(80);
 
     const ws = { readyState: 1, send: vi.fn(), close: vi.fn() };
     setClientConnection(admin.clientId, ws as unknown as WebSocket);
@@ -268,6 +263,9 @@ describe("GET /clients/:clientId/providers/:provider/models", () => {
       expect(await storeModelCatalogRpcResult(app.db, admin.clientId, frame.ref, catalog, app.config.instanceId)).toBe(
         true,
       );
+      // Expire the waiter only after the write commits so the fallback is
+      // deterministic even when the full suite puts the database under load.
+      cancelClientReply(admin.clientId, frame.ref, new Error("Timed out waiting for the computer to reply"));
 
       const res = await pending;
       expect(res.statusCode).toBe(200);
