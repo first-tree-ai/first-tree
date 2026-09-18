@@ -81,3 +81,27 @@ describe("discoverProviderModels — grok", () => {
     expect(catalog.error).toContain("no model state");
   });
 });
+
+describe("discoverProviderModels — antigravity", () => {
+  it("returns the provider-cli catalog from agy models", async () => {
+    const catalog = await discoverProviderModels("antigravity", {
+      now: () => new Date("2026-09-18T00:00:00Z"),
+      resolveAntigravityBinary: () => ({ ok: true, binary: "/fake/bin/agy" }),
+      runAntigravityModels: async () => ({
+        ok: true,
+        stdout: "gemini-3.8-flash-high     Gemini 3.8 Flash (High)\n",
+        stderr: "",
+      }),
+    });
+    expect(catalog.source).toBe("provider-cli");
+    expect(catalog.models).toEqual([{ id: "gemini-3.8-flash-high", label: "Gemini 3.8 Flash (High)" }]);
+  });
+
+  it("degrades to unavailable when the binary is missing", async () => {
+    const catalog = await discoverProviderModels("antigravity", {
+      resolveAntigravityBinary: () => ({ ok: false, error: "no agy binary resolved on this host" }),
+    });
+    expect(catalog.source).toBe("unavailable");
+    expect(catalog.models).toEqual([]);
+  });
+});
