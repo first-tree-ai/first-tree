@@ -1,0 +1,36 @@
+# escape=`
+FROM mcr.microsoft.com/windows/servercore:ltsc2022@sha256:b841bb042e13a079f68fc82461f15abcefe8063fb9a3072120348252f13a6ce3
+
+SHELL ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue';"]
+
+RUN Invoke-WebRequest `
+      -UseBasicParsing `
+      -Uri 'https://nodejs.org/dist/v24.18.0/node-v24.18.0-win-x64.zip' `
+      -OutFile 'C:\node.zip'; `
+    if ((Get-FileHash -Algorithm SHA256 'C:\node.zip').Hash.ToLowerInvariant() -ne '0ae68406b42d7725661da979b1403ec9926da205c6770827f33aac9d8f26e821') { `
+      throw 'Node archive checksum mismatch' `
+    }; `
+    Expand-Archive -LiteralPath 'C:\node.zip' -DestinationPath 'C:\node-dist'; `
+    Move-Item -LiteralPath 'C:\node-dist\node-v24.18.0-win-x64' -Destination 'C:\node'; `
+    Remove-Item -LiteralPath 'C:\node.zip', 'C:\node-dist' -Recurse -Force
+
+ENV PATH="C:\node;C:\Windows\System32\WindowsPowerShell\v1.0;C:\Windows\System32;C:\Windows"
+
+WORKDIR C:/ftqa
+
+COPY package.json package-lock.json ./
+RUN npm.cmd ci --omit=dev --no-audit --no-fund; `
+    $version = (& 'C:\ftqa\node_modules\opencode-ai\bin\opencode.exe' --version).Trim(); `
+    if ($version -ne '1.18.7') { throw "Unexpected OpenCode version: $version" }
+
+COPY qa-provider.mjs ./
+COPY project ./project
+COPY windows ./windows
+COPY Dockerfile.windows compose.windows.yaml ./
+
+RUN node.exe --check C:\ftqa\qa-provider.mjs; `
+    node.exe --check C:\ftqa\windows\job-launch-wrapper.mjs; `
+    node.exe --check C:\ftqa\windows\windows-harness.mjs; `
+    node.exe C:\ftqa\windows\static-check.mjs
+
+ENTRYPOINT ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "C:\\ftqa\\windows\\job-supervisor.ps1"]
