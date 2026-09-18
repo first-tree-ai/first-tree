@@ -138,7 +138,9 @@ describe("AgentSlot/SessionRuntime shutdown settlement authority", () => {
 
     const { server, baseUrl } = await listen(async (req, res) => {
       const runtimeSessionToken = req.headers[AGENT_RUNTIME_SESSION_HEADER.toLowerCase()] as string | undefined;
-      if (req.method === "POST" && req.url?.includes("/messages")) {
+      // Runtime notices have their own route; the server authors the delivery
+      // profile and the stored marker, so only the text is posted here.
+      if (req.method === "POST" && req.url?.includes("/runtime-notices")) {
         await readBody(req);
         const record = { runtimeSessionToken, path: req.url ?? "" };
         if (runtimeSessionToken !== CURRENT) {
@@ -275,7 +277,9 @@ describe("AgentSlot/SessionRuntime shutdown settlement authority", () => {
 
     const { server, baseUrl } = await listen(async (req, res) => {
       const runtimeSessionToken = req.headers[AGENT_RUNTIME_SESSION_HEADER.toLowerCase()] as string | undefined;
-      if (req.method === "POST" && req.url?.includes("/messages")) {
+      // Runtime notices have their own route; the server authors the delivery
+      // profile and the stored marker, so only the text is posted here.
+      if (req.method === "POST" && req.url?.includes("/runtime-notices")) {
         await readBody(req);
         const record = { runtimeSessionToken, path: req.url ?? "" };
         if (runtimeSessionToken !== CURRENT) {
