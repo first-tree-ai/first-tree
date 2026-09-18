@@ -10,6 +10,7 @@ import { sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { describe, expect, it, vi } from "vitest";
 import { createAgent } from "../services/agents/identity.js";
+import { upsertSessionState } from "../services/chat/sessions/activity.js";
 import {
   computeErrored,
   computeWorking,
@@ -575,6 +576,37 @@ describe("agent-chat-status", () => {
       await setRuntime(peer.agent.uuid, chatId, "working", -(RUNTIME_STALE_MS + 5_000));
       const s = (await getChatAgentStatuses(app.db, chatId)).find((x) => x.agentId === peer.agent.uuid);
       expect(s?.working).toBe(false);
+      expect(s?.errored).toBe(true);
+      expect(s?.main).toBe("failed");
+    });
+
+    it("an active wake clears stale in-flight so a mention is not Failed", async () => {
+      const { app, admin, peer, chatId } = await newChatWithAgent();
+      await bindPresence(peer.agent.uuid, peer.clientId);
+      await setSession(peer.agent.uuid, chatId, "active");
+      await setRuntime(peer.agent.uuid, chatId, "working", -(RUNTIME_STALE_MS + 5_000));
+      await upsertSessionState(app.db, peer.agent.uuid, chatId, "active", admin.organizationId);
+      const s = (await getChatAgentStatuses(app.db, chatId)).find((x) => x.agentId === peer.agent.uuid);
+      expect(s?.errored).toBe(false);
+      expect(s?.working).toBe(false);
+      expect(s?.main).toBe("ready");
+    });
+
+    it("predictive active write keeps NULL stamp so old-client activity still reads working", async () => {
+      const { app, admin, peer, chatId } = await newChatWithAgent();
+      await bindPresence(peer.agent.uuid, peer.clientId);
+      await upsertSessionState(app.db, peer.agent.uuid, chatId, "active", admin.organizationId);
+      await insertEvent(peer.agent.uuid, chatId, 1, "tool_call", { name: "Bash", args: { command: "ls" } });
+      const s = (await getChatAgentStatuses(app.db, chatId)).find((x) => x.agentId === peer.agent.uuid);
+      expect(s?.working).toBe(true);
+      expect(s?.main).toBe("working");
+    });
+
+    it("predictive active write keeps NULL stamp so old-client presence error still reads failed", async () => {
+      const { app, admin, peer, chatId } = await newChatWithAgent();
+      await bindPresence(peer.agent.uuid, peer.clientId, "error");
+      await upsertSessionState(app.db, peer.agent.uuid, chatId, "active", admin.organizationId);
+      const s = (await getChatAgentStatuses(app.db, chatId)).find((x) => x.agentId === peer.agent.uuid);
       expect(s?.errored).toBe(true);
       expect(s?.main).toBe("failed");
     });

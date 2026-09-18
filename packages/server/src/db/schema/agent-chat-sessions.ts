@@ -25,13 +25,15 @@ export const agentChatSessions = pgTable(
     runtimeState: text("runtime_state").notNull().default("idle"),
     /**
      * Freshness stamp for `runtime_state`, bumped on every per-chat runtime
-     * report (transition + ~30s re-affirm). NULLABLE on purpose: a NULL
+     * report (transition + ~20s re-affirm). NULLABLE on purpose: a NULL
      * means "client is bound but hasn't sent its first session:runtime
      * frame for this chat yet" (transient sentinel between session:state
      * active and the first runtime report). The composite reads NULL as
-     * fail-closed (not working / not errored). Never default it to `now()`:
-     * a fresh default would be indistinguishable from a real report and
-     * would let the producer light up agents that never reported anything.
+     * fail-closed for working and falls back to legacy activity / presence
+     * error. Never stamp it from a predictive active write: a non-null
+     * value is the discriminator that the client has reported per-chat
+     * runtime. Lifecycle inactivation and a wake that clears an already-
+     * stamped in-flight D-axis may write idle + now.
      */
     runtimeStateAt: timestamp("runtime_state_at", { withTimezone: true }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

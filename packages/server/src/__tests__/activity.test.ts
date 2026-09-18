@@ -211,8 +211,93 @@ describe("upsertSessionState — touchPresenceLastSeen option", () => {
     await upsertSessionState(app.db, agent.uuid, chat.id, "active", admin.organizationId, notifier);
 
     expect(notifier.notifySessionStateChange).not.toHaveBeenCalled();
+    expect(notifier.notifySessionRuntime).not.toHaveBeenCalled();
     const secondSeen = (await readPresence(app, agent.uuid))?.lastSeenAt?.getTime();
     expect(secondSeen).toBe(firstSeen);
+  });
+
+  it("leaves runtime_state_at NULL on first active write so old-client fallback stays live", async () => {
+    const { app, admin, agent, chat } = await setup();
+    await upsertSessionState(app.db, agent.uuid, chat.id, "active", admin.organizationId);
+    const [row] = await app.db
+      .select({
+        state: agentChatSessions.state,
+        runtimeState: agentChatSessions.runtimeState,
+        runtimeStateAt: agentChatSessions.runtimeStateAt,
+      })
+      .from(agentChatSessions)
+      .where(and(eq(agentChatSessions.agentId, agent.uuid), eq(agentChatSessions.chatId, chat.id)));
+    expect(row).toMatchObject({ state: "active", runtimeState: "idle" });
+    expect(row?.runtimeStateAt).toBeNull();
+  });
+
+  it("does not stamp a NULL runtime_state_at on a later active wake", async () => {
+    const { app, admin, agent, chat } = await setup();
+    await upsertSessionState(app.db, agent.uuid, chat.id, "active", admin.organizationId);
+    const notifier = makeNotifier();
+    await upsertSessionState(app.db, agent.uuid, chat.id, "active", admin.organizationId, notifier);
+    const [row] = await app.db
+      .select({ runtimeStateAt: agentChatSessions.runtimeStateAt })
+      .from(agentChatSessions)
+      .where(and(eq(agentChatSessions.agentId, agent.uuid), eq(agentChatSessions.chatId, chat.id)));
+    expect(row?.runtimeStateAt).toBeNull();
+    expect(notifier.notifySessionStateChange).not.toHaveBeenCalled();
+    expect(notifier.notifySessionRuntime).not.toHaveBeenCalled();
+  });
+
+  it("keeps a fresh working turn across a same-session wake", async () => {
+    const { app, admin, agent, chat } = await setup();
+    await upsertSessionState(app.db, agent.uuid, chat.id, "active", admin.organizationId);
+    await setSessionRuntime(app.db, agent.uuid, chat.id, "working", admin.organizationId);
+    const notifier = makeNotifier();
+
+    await upsertSessionState(app.db, agent.uuid, chat.id, "active", admin.organizationId, notifier);
+
+    const [row] = await app.db
+      .select({ runtimeState: agentChatSessions.runtimeState })
+      .from(agentChatSessions)
+      .where(and(eq(agentChatSessions.agentId, agent.uuid), eq(agentChatSessions.chatId, chat.id)));
+    expect(row?.runtimeState).toBe("working");
+    expect(notifier.notifySessionStateChange).not.toHaveBeenCalled();
+    expect(notifier.notifySessionRuntime).not.toHaveBeenCalled();
+  });
+
+  it("clears stale in-flight working on the next active wake so the chip is not Failed", async () => {
+    const { app, admin, agent, chat } = await setup();
+    await upsertSessionState(app.db, agent.uuid, chat.id, "active", admin.organizationId);
+    const oldAt = new Date(Date.now() - RUNTIME_STALE_MS - 5_000);
+    await app.db
+      .update(agentChatSessions)
+      .set({ runtimeState: "working", runtimeStateAt: oldAt })
+      .where(and(eq(agentChatSessions.agentId, agent.uuid), eq(agentChatSessions.chatId, chat.id)));
+    const notifier = makeNotifier();
+
+    await upsertSessionState(app.db, agent.uuid, chat.id, "active", admin.organizationId, notifier);
+
+    const [row] = await app.db
+      .select({ runtimeState: agentChatSessions.runtimeState, runtimeStateAt: agentChatSessions.runtimeStateAt })
+      .from(agentChatSessions)
+      .where(and(eq(agentChatSessions.agentId, agent.uuid), eq(agentChatSessions.chatId, chat.id)));
+    expect(row?.runtimeState).toBe("idle");
+    expect(row?.runtimeStateAt?.getTime()).toBeGreaterThan(oldAt.getTime());
+    expect(notifier.notifySessionStateChange).toHaveBeenCalledTimes(1);
+    expect(notifier.notifySessionRuntime).toHaveBeenCalledWith(agent.uuid, chat.id, "idle", admin.organizationId);
+  });
+
+  it("clears leftover error runtime on the next active wake", async () => {
+    const { app, admin, agent, chat } = await setup();
+    await upsertSessionState(app.db, agent.uuid, chat.id, "active", admin.organizationId);
+    await setSessionRuntime(app.db, agent.uuid, chat.id, "error", admin.organizationId);
+    const notifier = makeNotifier();
+
+    await upsertSessionState(app.db, agent.uuid, chat.id, "active", admin.organizationId, notifier);
+
+    const [row] = await app.db
+      .select({ runtimeState: agentChatSessions.runtimeState })
+      .from(agentChatSessions)
+      .where(and(eq(agentChatSessions.agentId, agent.uuid), eq(agentChatSessions.chatId, chat.id)));
+    expect(row?.runtimeState).toBe("idle");
+    expect(notifier.notifySessionRuntime).toHaveBeenCalledWith(agent.uuid, chat.id, "idle", admin.organizationId);
   });
 
   // The complement of the previous test: a real state transition (active →
