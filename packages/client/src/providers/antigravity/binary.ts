@@ -26,18 +26,13 @@ export function buildAntigravityTurnArgs(input: {
   model: string;
   reasoningEffort: string;
   resumeSessionId: string | null;
-  turnTimeoutMs: number;
+  turnTimeoutMs?: number;
 }): string[] {
-  const timeoutMinutes = Math.max(1, Math.ceil(input.turnTimeoutMs / 60_000));
-  const args = [
-    "--input-format",
-    "stream-json",
-    "--output-format",
-    "stream-json",
-    "--dangerously-skip-permissions",
-    "--print-timeout",
-    `${timeoutMinutes}m`,
-  ];
+  const args = ["--input-format", "stream-json", "--output-format", "stream-json", "--dangerously-skip-permissions"];
+  if (typeof input.turnTimeoutMs === "number" && input.turnTimeoutMs > 0) {
+    const timeoutMinutes = Math.max(1, Math.ceil(input.turnTimeoutMs / 60_000));
+    args.push("--print-timeout", `${timeoutMinutes}m`);
+  }
   if (input.model) args.push("--model", input.model);
   if (input.reasoningEffort) args.push("--effort", input.reasoningEffort);
   if (input.resumeSessionId) args.push("--conversation", input.resumeSessionId);

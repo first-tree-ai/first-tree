@@ -872,4 +872,29 @@ process.stdin.on("end", () => {
     ]);
     await activeHandler.shutdown();
   });
+
+  it("omits --print-timeout and process timeout by default to align with other runtimes", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-no-timeout-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createSupervisor(specs, inputs),
+    });
+
+    const outcome = await handler.start(message("m1", "run indefinitely"), sessionCtx, deliveryToken());
+    expect(outcome.sessionId).toBe("conversation-1");
+    expect(specs[0]?.args).not.toContain("--print-timeout");
+    expect(specs[0]?.timeoutMs).toBeUndefined();
+    expect(forwarded).toEqual(["hello"]);
+    await handler.shutdown();
+  });
 });

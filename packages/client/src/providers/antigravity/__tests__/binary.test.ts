@@ -64,6 +64,25 @@ describe("Antigravity binary helpers", () => {
       "--print-timeout",
       "1m",
     ]);
+    expect(
+      buildAntigravityTurnArgs({
+        model: "gemini-3-pro",
+        reasoningEffort: "high",
+        resumeSessionId: "conversation-1",
+      }),
+    ).toEqual([
+      "--input-format",
+      "stream-json",
+      "--output-format",
+      "stream-json",
+      "--dangerously-skip-permissions",
+      "--model",
+      "gemini-3-pro",
+      "--effort",
+      "high",
+      "--conversation",
+      "conversation-1",
+    ]);
   });
 
   it("resolves agy from PATH before the official user install directory", () => {
