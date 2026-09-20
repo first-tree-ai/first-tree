@@ -4,10 +4,32 @@ import type { Database } from "../../../db/connection.js";
 import { agentChatSessions } from "../../../db/schema/agent-chat-sessions.js";
 import { agentPresence } from "../../../db/schema/agent-presence.js";
 import { agents } from "../../../db/schema/agents.js";
+import { chats } from "../../../db/schema/chats.js";
 import { clients } from "../../../db/schema/clients.js";
 import type { OrgScope } from "../../../scope/types.js";
 import { agentVisibilityCondition } from "../../agents/access-control.js";
 import type { Notifier } from "../../notifier.js";
+
+const DEADLOCK_DETECTED_SQLSTATE = "40P01";
+const SESSION_TX_MAX_ATTEMPTS = 3;
+
+// Drizzle wraps postgres-js errors in `cause`; guard against cyclic wrappers.
+function isDeadlockDetectedError(error: unknown): boolean {
+  const visited = new Set<object>();
+  let current: unknown = error;
+  while (current !== null && typeof current === "object" && !visited.has(current)) {
+    visited.add(current);
+    if (Reflect.get(current, "code") === DEADLOCK_DETECTED_SQLSTATE) return true;
+    current = Reflect.get(current, "cause");
+  }
+  return false;
+}
+
+// Jitter separates concurrent retries: 10–19ms, then 20–29ms.
+function waitForDeadlockRetry(attempt: number): Promise<void> {
+  const delayMs = 10 * attempt + Math.floor(Math.random() * 10);
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
 
 /**
  * Upsert session state + refresh presence aggregates + NOTIFY.
@@ -35,93 +57,121 @@ export async function upsertSessionState(
   organizationId: string,
   notifier?: Notifier,
   options?: { touchPresenceLastSeen?: boolean },
-) {
-  const now = new Date();
+): Promise<void> {
   const revokesRuntime = state !== "active";
-  let projectionChanged = false;
-  await db.transaction(async (tx) => {
-    // Short-circuit when the row is already at the target state: skip the
-    // updatedAt refresh so steady-state messaging doesn't churn the row.
-    // Insertions, lifecycle transitions (evicted → active, active →
-    // suspended, etc.), and one-time repair of a non-idle runtime retained by
-    // an already-inactive row still take the UPDATE branch.
-    //
-    // We use `.returning()` to detect whether INSERT/UPDATE actually fired —
-    // PostgreSQL omits returning rows when the ON CONFLICT DO UPDATE's
-    // `setWhere` predicate is false (same-state, already-revoked no-op). Zero rows back ⇒
-    // skip the downstream presence refresh + NOTIFY. This keeps
-    // `session:state` frames off the wire when an already-active session
-    // receives a burst of steady-state messages (e.g. an agent emitting
-    // many intermediate chat results into the same chat) — without this
-    // short-circuit, the predictive Step 1b in services/chat/message.ts would
-    // NOTIFY once per message and the admin WS would invalidate
-    // `["activity"]` / `["sessions"]` dozens of times per second. The
-    // client's `heartbeat` frame is the canonical lastSeenAt refresh
-    // path (see presence.ts:touchAgent), so dropping the lastSeenAt
-    // side-effect here is safe.
-    const rows = await tx
-      .insert(agentChatSessions)
-      .values(
-        revokesRuntime
-          ? { agentId, chatId, state, runtimeState: "idle", runtimeStateAt: now, updatedAt: now }
-          : { agentId, chatId, state, updatedAt: now },
-      )
-      .onConflictDoUpdate({
-        target: [agentChatSessions.agentId, agentChatSessions.chatId],
-        set: revokesRuntime
-          ? { state, runtimeState: "idle", runtimeStateAt: now, updatedAt: now }
-          : { state, updatedAt: now },
-        // An inactive row retaining a non-idle runtime is also a real
-        // projection change even when its lifecycle value is already equal.
-        // Repair it once, then keep duplicate inactive frames as no-ops.
-        setWhere: revokesRuntime
-          ? or(ne(agentChatSessions.state, state), ne(agentChatSessions.runtimeState, "idle"))
-          : ne(agentChatSessions.state, state),
-      })
-      .returning({ agentId: agentChatSessions.agentId });
+  // Retry the complete session/presence transaction after a deadlock rollback.
+  // Message and webhook writes belong to the caller and must never be replayed.
+  for (let attempt = 1; ; attempt++) {
+    // Fresh clock per attempt: a rolled-back attempt's timestamps must not
+    // leak into the replayed commit.
+    const now = new Date();
+    // Attempt-local: a rolled-back attempt must never emit notifications,
+    // even if it observed a projection change before the abort.
+    let projectionChanged = false;
+    try {
+      await db.transaction(async (tx) => {
+        // Match membership snapshots' chat → agent order before FK checks can
+        // acquire the agent first. Lock the agent before session writes, too,
+        // matching runtime-switch archive's agent → session order. KEY SHARE
+        // parent locks remain compatible with other session writers. Missing
+        // parents still produce the INSERT's original foreign-key violation.
+        await tx.select({ id: chats.id }).from(chats).where(eq(chats.id, chatId)).for("key share");
+        await tx.select({ uuid: agents.uuid }).from(agents).where(eq(agents.uuid, agentId)).for("key share");
 
-    if (rows.length === 0) return;
-    projectionChanged = true;
+        // Short-circuit when the row is already at the target state: skip the
+        // updatedAt refresh so steady-state messaging doesn't churn the row.
+        // Insertions, lifecycle transitions (evicted → active, active →
+        // suspended, etc.), and one-time repair of a non-idle runtime retained by
+        // an already-inactive row still take the UPDATE branch.
+        //
+        // We use `.returning()` to detect whether INSERT/UPDATE actually fired —
+        // PostgreSQL omits returning rows when the ON CONFLICT DO UPDATE's
+        // `setWhere` predicate is false (same-state, already-revoked no-op). Zero rows back ⇒
+        // skip the downstream presence refresh + NOTIFY. This keeps
+        // `session:state` frames off the wire when an already-active session
+        // receives a burst of steady-state messages (e.g. an agent emitting
+        // many intermediate chat results into the same chat) — without this
+        // short-circuit, the predictive Step 1b in services/chat/message.ts would
+        // NOTIFY once per message and the admin WS would invalidate
+        // `["activity"]` / `["sessions"]` dozens of times per second. The
+        // client's `heartbeat` frame is the canonical lastSeenAt refresh
+        // path (see presence.ts:touchAgent), so dropping the lastSeenAt
+        // side-effect here is safe.
+        const rows = await tx
+          .insert(agentChatSessions)
+          .values(
+            revokesRuntime
+              ? { agentId, chatId, state, runtimeState: "idle", runtimeStateAt: now, updatedAt: now }
+              : { agentId, chatId, state, updatedAt: now },
+          )
+          .onConflictDoUpdate({
+            target: [agentChatSessions.agentId, agentChatSessions.chatId],
+            set: revokesRuntime
+              ? { state, runtimeState: "idle", runtimeStateAt: now, updatedAt: now }
+              : { state, updatedAt: now },
+            // An inactive row retaining a non-idle runtime is also a real
+            // projection change even when its lifecycle value is already equal.
+            // Repair it once, then keep duplicate inactive frames as no-ops.
+            setWhere: revokesRuntime
+              ? or(ne(agentChatSessions.state, state), ne(agentChatSessions.runtimeState, "idle"))
+              : ne(agentChatSessions.state, state),
+          })
+          .returning({ agentId: agentChatSessions.agentId });
 
-    // Active runtime values are owned by `session:runtime`. Lifecycle
-    // inactivation is the revocation authority and atomically writes idle so
-    // a dropped/reordered client edge cannot leave working behind.
-    const [counts] = await tx
-      .select({
-        active: sql<number>`count(*) FILTER (WHERE ${agentChatSessions.state} = 'active')::int`,
-        total: sql<number>`count(*) FILTER (WHERE ${agentChatSessions.state} != 'evicted')::int`,
-      })
-      .from(agentChatSessions)
-      .where(eq(agentChatSessions.agentId, agentId));
+        if (rows.length === 0) return;
+        projectionChanged = true;
 
-    const activeSessions = counts?.active ?? 0;
-    const totalSessions = counts?.total ?? 0;
+        // Active runtime values are owned by `session:runtime`. Lifecycle
+        // inactivation is the revocation authority and atomically writes idle so
+        // a dropped/reordered client edge cannot leave working behind.
+        const [counts] = await tx
+          .select({
+            active: sql<number>`count(*) FILTER (WHERE ${agentChatSessions.state} = 'active')::int`,
+            total: sql<number>`count(*) FILTER (WHERE ${agentChatSessions.state} != 'evicted')::int`,
+          })
+          .from(agentChatSessions)
+          .where(eq(agentChatSessions.agentId, agentId));
 
-    // `lastSeenAt` is owned by the client's bind/heartbeat. Skip it on
-    // server-predictive writes (e.g. sendMessage upserting active on first
-    // message); default-true preserves the WS `session:state` path's behavior.
-    // Note: when the row is being inserted (no prior presence), the schema's
-    // `lastSeenAt` default (now()) populates it regardless — touchLastSeen
-    // only governs subsequent UPDATE behavior.
-    const touchLastSeen = options?.touchPresenceLastSeen ?? true;
-    const presenceSet = touchLastSeen
-      ? { activeSessions, totalSessions, lastSeenAt: now }
-      : { activeSessions, totalSessions };
+        const activeSessions = counts?.active ?? 0;
+        const totalSessions = counts?.total ?? 0;
 
-    await tx
-      .insert(agentPresence)
-      .values({ agentId, activeSessions, totalSessions })
-      .onConflictDoUpdate({
-        target: [agentPresence.agentId],
-        set: presenceSet,
+        // `lastSeenAt` is owned by the client's bind/heartbeat. Skip it on
+        // server-predictive writes (e.g. sendMessage upserting active on first
+        // message); default-true preserves the WS `session:state` path's behavior.
+        // Note: when the row is being inserted (no prior presence), the schema's
+        // `lastSeenAt` default (now()) populates it regardless — touchLastSeen
+        // only governs subsequent UPDATE behavior.
+        const touchLastSeen = options?.touchPresenceLastSeen ?? true;
+        const presenceSet = touchLastSeen
+          ? { activeSessions, totalSessions, lastSeenAt: now }
+          : { activeSessions, totalSessions };
+
+        await tx
+          .insert(agentPresence)
+          .values({ agentId, activeSessions, totalSessions })
+          .onConflictDoUpdate({
+            target: [agentPresence.agentId],
+            set: presenceSet,
+          });
       });
-  });
-
-  if (projectionChanged && notifier) {
-    notifier.notifySessionStateChange(agentId, chatId, state, organizationId).catch(() => {});
-    if (revokesRuntime) {
-      notifier.notifySessionRuntime(agentId, chatId, "idle", organizationId).catch(() => {});
+    } catch (error) {
+      if (attempt < SESSION_TX_MAX_ATTEMPTS && isDeadlockDetectedError(error)) {
+        await waitForDeadlockRetry(attempt);
+        continue;
+      }
+      throw error;
     }
+
+    // Notify only after a successful commit that actually changed the
+    // projection — never for a rolled-back attempt, and at most once per
+    // call. Notification failure remains best-effort (`.catch`), unchanged.
+    if (projectionChanged && notifier) {
+      notifier.notifySessionStateChange(agentId, chatId, state, organizationId).catch(() => {});
+      if (revokesRuntime) {
+        notifier.notifySessionRuntime(agentId, chatId, "idle", organizationId).catch(() => {});
+      }
+    }
+    return;
   }
 }
 

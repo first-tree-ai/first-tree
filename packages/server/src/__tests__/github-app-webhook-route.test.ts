@@ -1,7 +1,8 @@
 import { createHmac, generateKeyPairSync, randomUUID } from "node:crypto";
 import type { GithubAppInstallationPermissions } from "@first-tree/shared";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { agentChatSessions } from "../db/schema/agent-chat-sessions.js";
 import { agents } from "../db/schema/agents.js";
 import { chatMembership } from "../db/schema/chat-membership.js";
 import { chatUserState } from "../db/schema/chat-user-state.js";
@@ -1929,6 +1930,107 @@ describe("POST /webhooks/github-app", () => {
           row.metadata.teamAgentTask.agentUuid === teamAgent,
       ),
     ).toBe(true);
+  });
+
+  it.each([
+    false,
+    true,
+  ])("retries predictive activation without duplicating Issue cards or inbox entries (concurrent assigned: %s)", async (concurrentAssigned) => {
+    const app = getApp();
+    const admin = await createTestAdmin(app);
+    const installationId = 100060;
+    await seedInstallation(app, { installationId, orgId: admin.organizationId });
+    const delegate = await seedAgent(app, {
+      orgId: admin.organizationId,
+      memberId: admin.memberId,
+      name: `retry-dlg-${randomUUID().slice(0, 6)}`,
+    });
+    const assigneeName = `retry-human-${randomUUID().slice(0, 6)}`;
+    await seedAgent(app, {
+      orgId: admin.organizationId,
+      memberId: admin.memberId,
+      name: assigneeName,
+      delegateMention: delegate,
+      type: "human",
+    });
+    const payload = {
+      issue: {
+        number: 46,
+        title: "Concurrent Issue activation",
+        html_url: "https://github.com/owner/repo/issues/46",
+        body: "body",
+        assignees: [{ login: assigneeName, type: "User" }],
+        author_association: "NONE",
+      },
+      assignee: { login: assigneeName, type: "User" },
+      repository: { full_name: "owner/repo" },
+      sender: { login: "external-contributor", type: "User" },
+      installation: { id: installationId },
+    };
+    const deliveries = (concurrentAssigned ? ["opened", "assigned"] : ["opened"]).map((action) => ({
+      action,
+      deliveryId: randomUUID(),
+    }));
+
+    try {
+      // A sequence survives transaction rollback. Fail the first presence
+      // write after the session INSERT, then allow a fresh transaction to
+      // complete. The real lock inversion is covered by session-state tests.
+      await app.db.execute(sql`CREATE SEQUENCE test_webhook_session_retry`);
+      await app.db.execute(sql`
+          CREATE FUNCTION test_webhook_session_retry() RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN
+            IF nextval('test_webhook_session_retry') = 1 THEN
+              RAISE EXCEPTION 'injected session deadlock' USING ERRCODE = '40P01';
+            END IF;
+            RETURN NEW;
+          END $$
+        `);
+      await app.db.execute(sql`
+          CREATE TRIGGER test_webhook_session_retry BEFORE INSERT ON agent_presence
+          FOR EACH ROW EXECUTE FUNCTION test_webhook_session_retry()
+        `);
+
+      const responses = await Promise.all(
+        deliveries.map(({ action, deliveryId }) => postWebhook(app, "issues", { ...payload, action }, { deliveryId })),
+      );
+      for (const response of responses) {
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toMatchObject({ ok: true, delivered: 1, failed: 0 });
+      }
+      const mappings = await app.db.select().from(githubEntityChatMappings);
+      expect(mappings).toHaveLength(1);
+      const mapping = mappings[0];
+      if (!mapping) throw new Error("Expected the Issue attention line");
+      expect(mapping).toMatchObject({ delegateAgentId: delegate, entityKey: "owner/repo#46" });
+      const sessions = await app.db.select().from(agentChatSessions).where(eq(agentChatSessions.agentId, delegate));
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0]).toMatchObject({ chatId: mapping.chatId, state: "active", runtimeState: "idle" });
+      const attempts = await app.db.execute<{ last_value: string }>(
+        sql`SELECT last_value FROM test_webhook_session_retry`,
+      );
+      expect(Number(attempts[0]?.last_value)).toBeGreaterThanOrEqual(2);
+
+      // Redelivering each webhook must remain idempotent after the internal
+      // retry. Only the session transaction may repeat, never message send.
+      for (const { action, deliveryId } of deliveries) {
+        const repeated = await postWebhook(app, "issues", { ...payload, action }, { deliveryId });
+        expect(repeated.statusCode).toBe(200);
+      }
+      const cards = await app.db.select().from(messages).where(eq(messages.chatId, mapping.chatId));
+      expect(cards).toHaveLength(deliveries.length);
+      const inbox = await app.db
+        .select()
+        .from(inboxEntries)
+        .where(and(eq(inboxEntries.chatId, mapping.chatId), eq(inboxEntries.inboxId, `inbox_${delegate}`)));
+      expect(inbox).toHaveLength(deliveries.length);
+      expect(new Set(inbox.map((entry) => entry.messageId)).size).toBe(deliveries.length);
+      expect(inbox.every((entry) => entry.notify)).toBe(true);
+    } finally {
+      await app.db.execute(sql`DROP TRIGGER IF EXISTS test_webhook_session_retry ON agent_presence`);
+      await app.db.execute(sql`DROP FUNCTION IF EXISTS test_webhook_session_retry()`);
+      await app.db.execute(sql`DROP SEQUENCE IF EXISTS test_webhook_session_retry`);
+    }
   });
 
   it("does not create a Task Agent chat on issues.opened, but still creates an assignee line", async () => {
