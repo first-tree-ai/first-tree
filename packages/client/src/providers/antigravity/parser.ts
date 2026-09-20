@@ -137,7 +137,7 @@ export function parseAntigravityStreamLine(line: string): AntigravityStreamEvent
       });
       return events;
     }
-    if (stepType === "user_input" || stepType === "checkpoint") return events;
+    if (stepType === "user_input" || stepType === "checkpoint" || stepType === "system_message") return events;
     return [...events, unknown(`unknown step type ${String(step.step_type)}`, raw)];
   }
 

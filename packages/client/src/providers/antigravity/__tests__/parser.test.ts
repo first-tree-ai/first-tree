@@ -104,4 +104,33 @@ describe("Antigravity stream-json parser", () => {
     expect(parseAntigravityStreamLine("not-json")).toMatchObject([{ kind: "unknown" }]);
     expect(parseAntigravityStreamLine(JSON.stringify({ event: "future_event" }))).toMatchObject([{ kind: "unknown" }]);
   });
+
+  it("accepts system_message, user_input, and checkpoint step updates without diagnostic errors", () => {
+    expect(
+      parseAntigravityStreamLine(
+        JSON.stringify({
+          event: "step_update",
+          step_update: { conversation_id: "c", step_type: "system_message" },
+        }),
+      ),
+    ).toEqual([{ kind: "init", sessionId: "c" }]);
+
+    expect(
+      parseAntigravityStreamLine(
+        JSON.stringify({
+          event: "step_update",
+          step_update: { conversation_id: "c", step_type: "user_input" },
+        }),
+      ),
+    ).toEqual([{ kind: "init", sessionId: "c" }]);
+
+    expect(
+      parseAntigravityStreamLine(
+        JSON.stringify({
+          event: "step_update",
+          step_update: { conversation_id: "c", step_type: "checkpoint" },
+        }),
+      ),
+    ).toEqual([{ kind: "init", sessionId: "c" }]);
+  });
 });
