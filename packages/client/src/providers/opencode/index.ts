@@ -12,6 +12,7 @@ import type {
   AgentHandler,
   DeliveryToken,
   HandlerFactory,
+  HandlerShutdownOptions,
   SessionContext,
   SessionMessage,
   TurnConsumedErrorReason,
@@ -57,11 +58,16 @@ import {
 } from "./binary.js";
 import { type OpenCodeStreamEvent, OpenCodeStreamParser, type OpenCodeUsage } from "./parser.js";
 import { acquireOpenCodePrivateConfigLease, type OpenCodePrivateConfigLease } from "./private-config.js";
+import {
+  describeOpenCodeTurnAbortFailure,
+  inferOpenCodeTurnAbortRecord,
+  type OpenCodeTurnAbortRecord,
+  settlementPolicyForOpenCodeTurnAbort,
+} from "./turn-abort.js";
 
 export const OPENCODE_PENDING_SESSION_PREFIX = "opencode-pending-";
 
 const STDERR_TAIL_LIMIT = 8_000;
-const DEFAULT_TURN_TIMEOUT_MS = 20 * 60_000;
 const KILL_GRACE_MS = 5_000;
 const FINAL_CLOSE_WAIT_MS = 2_000;
 const DB_GATE_TIMEOUT_MS = 30_000;
@@ -320,7 +326,7 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
   const turnTimeoutMs =
     typeof config.opencodeTurnTimeoutMs === "number" && config.opencodeTurnTimeoutMs > 0
       ? config.opencodeTurnTimeoutMs
-      : DEFAULT_TURN_TIMEOUT_MS;
+      : undefined;
   const retrySleep = (config.opencodeRetrySleep as OpenCodeRetrySleep | undefined) ?? defaultOpenCodeRetrySleep;
   const unsafeDiscoverySleep =
     (config.opencodeUnsafeDiscoverySleep as OpenCodeRetrySleep | undefined) ?? defaultOpenCodeRetrySleep;
@@ -345,12 +351,32 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
   let unsafeDiscoveryParkedBatch: QueuedDelivery[] | null = null;
   let unsafeDiscoveryWaitAbort: AbortController | null = null;
   let drainCancellationReason: string | null = null;
+  /**
+   * Explicit settlement from SessionRuntime — not inferred from reason text.
+   * Operator suspend and graceful drain set this so the provider-entered
+   * prefix can settle once; concurrency preemption and route retirement leave
+   * it unset so that prefix stays recoverable (ACK-none).
+   */
+  let settleProviderEntered = false;
   let pendingChatContextPrompt: string | null = null;
   let projectionScope: string | null = null;
   let managedAgentName: string | null = null;
   const handlerGenerationId = randomUUID().replaceAll("-", "");
   let privateConfigLease: OpenCodePrivateConfigLease | null = null;
   const queue: QueuedDelivery[] = [];
+  const turnAbortRecords = new Map<number, OpenCodeTurnAbortRecord>();
+
+  function markTurnAborted(turnGeneration: number, record: OpenCodeTurnAbortRecord): void {
+    if (!turnAbortRecords.has(turnGeneration)) {
+      turnAbortRecords.set(turnGeneration, record);
+    }
+  }
+
+  function takeTurnAbortRecord(turnGeneration: number): OpenCodeTurnAbortRecord | null {
+    const record = turnAbortRecords.get(turnGeneration) ?? null;
+    turnAbortRecords.delete(turnGeneration);
+    return record;
+  }
 
   function deliveryAttemptKey(sessionCtx: SessionContext, messages: readonly SessionMessage[]): string {
     const deliveryHead = messages[0];
@@ -469,18 +495,29 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
     state?: TurnState;
     sessionCtx: SessionContext;
     abortSignal: AbortSignal;
-    timeoutMs: number;
+    timeoutMs?: number;
     turnGeneration: number;
     label: string;
   }): Promise<ProcessOutcome> {
     return new Promise((resolveOutcome) => {
+      const abortedBeforeSpawn = input.abortSignal.aborted || generation !== input.turnGeneration || !sessionActive;
+      if (abortedBeforeSpawn) {
+        resolveOutcome({
+          exitCode: null,
+          signal: "SIGTERM",
+          stdoutTail: "",
+          stderrTail: "",
+        });
+        return;
+      }
+
       let supervised: ReturnType<ProviderProcessSupervisor["spawn"]>;
       try {
         supervised = processSupervisor.spawn({
           command: input.command,
           args: input.args,
           label: input.label,
-          timeoutMs: input.timeoutMs,
+          ...(typeof input.timeoutMs === "number" && input.timeoutMs > 0 ? { timeoutMs: input.timeoutMs } : {}),
           options: {
             cwd: input.workspaceCwd,
             env: input.env,
@@ -586,6 +623,16 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
       child.stdin?.on("error", () => {
         // EPIPE is classified from close + stderr.
       });
+      // Abort that won during spawn (before this listener) does not replay — close that race.
+      if (input.abortSignal.aborted || generation !== input.turnGeneration || !sessionActive) {
+        terminate();
+        try {
+          child.stdin?.end();
+        } catch {
+          // stdin may already be closed.
+        }
+        return;
+      }
       if (input.prompt !== undefined) child.stdin?.write(input.prompt);
       child.stdin?.end();
     });
@@ -828,6 +875,7 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
 
   async function settleFailure(input: {
     failure: string;
+    classificationError?: string;
     spawnError?: Error;
     state: Pick<TurnState, "sawProviderActivity" | "sawUnsafeTool" | "text">;
     sessionCtx: SessionContext;
@@ -843,6 +891,7 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
         : input.state.sawProviderActivity
           ? "pre_visible"
           : "pre_provider";
+    const classificationError = input.classificationError ?? input.failure;
     const displayMessage = isOpenCodeAuthError(input.failure)
       ? formatAuthHint("opencode", input.failure)
       : input.failure;
@@ -854,9 +903,16 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
     });
     attempt.recordSignal({
       kind: input.spawnError ? "local_error" : "provider_error",
-      error: input.spawnError ?? input.failure,
-      messagePreview: displayMessage,
+      error: input.spawnError ?? new Error(classificationError),
+      messagePreview: classificationError,
     });
+    if (displayMessage !== classificationError) {
+      attempt.recordSignal({
+        kind: "diagnostic",
+        error: new Error(displayMessage),
+        messagePreview: displayMessage,
+      });
+    }
     const attemptNumber = nextProviderAttempt(
       attemptKey,
       () => input.sessionCtx.hasPendingDelivery?.(input.messages) ?? true,
@@ -903,6 +959,32 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
     return true;
   }
 
+  /**
+   * Lifecycle cancellation of a provider-entered turn. Consume the delivery so
+   * the interrupted prompt is not replayed, but do not classify the
+   * cancellation as an unknown provider crash.
+   */
+  async function settleLifecycleConsumedTurn(input: {
+    state: Pick<TurnState, "sawProviderActivity" | "sawUnsafeTool" | "sessionIds">;
+    sessionCtx: SessionContext;
+    messages: readonly SessionMessage[];
+    token: DeliveryToken;
+  }): Promise<boolean> {
+    const ids = [...input.state.sessionIds];
+    if (ids[0]) {
+      adoptSessionId(input.sessionCtx, ids[0]);
+    }
+    input.sessionCtx.log("OpenCode turn cancelled by session lifecycle after provider entry");
+    input.sessionCtx.emitEvent({ kind: "turn_end", payload: { status: "error" } });
+    const completion = await input.token.complete(input.messages, consumedErrorOutcome("unsafe_replay"));
+    if (completion === "retry") {
+      return false;
+    }
+    providerTurnFailureAttempts.delete(deliveryAttemptKey(input.sessionCtx, input.messages));
+    pendingChatContextPrompt = null;
+    return true;
+  }
+
   async function runTurn(
     prompt: string,
     sessionCtx: SessionContext,
@@ -927,6 +1009,11 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
       return false;
     }
     const turnGeneration = ++generation;
+    const previousAbort = currentAbort;
+    if (previousAbort) {
+      markTurnAborted(generation - 1, { cause: "superseded", disposition: "silent" });
+      previousAbort.abort();
+    }
     const abort = new AbortController();
     currentAbort = abort;
     let observedState: TurnState | null = null;
@@ -978,8 +1065,14 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
       };
       observedState = state;
       token.processingStarted(messages);
-      const timeout = setTimeout(() => abort.abort(), turnTimeoutMs);
-      timeout.unref?.();
+      const timeout =
+        typeof turnTimeoutMs === "number" && turnTimeoutMs > 0
+          ? setTimeout(() => {
+              markTurnAborted(turnGeneration, { cause: "timeout", disposition: "settle" });
+              abort.abort();
+            }, turnTimeoutMs)
+          : null;
+      timeout?.unref?.();
       let outcome: ProcessOutcome;
       try {
         const configProjection = configProjector(
@@ -1014,13 +1107,45 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
           configProjection.cleanup();
         }
       } finally {
-        clearTimeout(timeout);
+        if (timeout) clearTimeout(timeout);
       }
 
       if (abort.signal.aborted || generation !== turnGeneration || !sessionActive) {
+        const record =
+          takeTurnAbortRecord(turnGeneration) ??
+          inferOpenCodeTurnAbortRecord({
+            turnGeneration,
+            currentGeneration: generation,
+            sessionActive,
+            timedOut: false,
+            abortSignal: abort.signal,
+          });
+        if (record.disposition === "silent") {
+          return false;
+        }
+        if (record.cause === "lifecycle" || record.cause === "session_inactive") {
+          if (state.sawUnsafeTool || (state.sawProviderActivity && settleProviderEntered)) {
+            return settleLifecycleConsumedTurn({
+              state,
+              sessionCtx,
+              messages,
+              token,
+            });
+          }
+          const lifecycleRecoveryReason = drainCancellationReason ?? "opencode_turn_aborted_by_lifecycle";
+          token.retry(messages, lifecycleRecoveryReason);
+          return false;
+        }
+        const failure = describeOpenCodeTurnAbortFailure({
+          cause: record.cause,
+          turnTimeoutMs,
+          state,
+        });
+        const { classificationError } = settlementPolicyForOpenCodeTurnAbort(record.cause);
         return settleFailure({
-          failure: "OpenCode turn aborted or timed out before a safe terminal event",
-          spawnError: new Error("OpenCode turn aborted or timed out"),
+          failure,
+          classificationError,
+          spawnError: new Error(classificationError),
           state,
           sessionCtx,
           messages,
@@ -1138,17 +1263,43 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
         sessionCtx.log(`blocked provider turn: ${error.message}`);
         return false;
       }
+      if (abort.signal.aborted || generation !== turnGeneration || !sessionActive) {
+        const record =
+          takeTurnAbortRecord(turnGeneration) ??
+          inferOpenCodeTurnAbortRecord({
+            turnGeneration,
+            currentGeneration: generation,
+            sessionActive,
+            timedOut: false,
+            abortSignal: abort.signal,
+          });
+        if (record.disposition === "silent") {
+          return false;
+        }
+        const captured = observedState as TurnState | null;
+        if (captured && (captured.sawUnsafeTool || (captured.sawProviderActivity && settleProviderEntered))) {
+          return settleLifecycleConsumedTurn({
+            state: captured,
+            sessionCtx,
+            messages,
+            token,
+          });
+        }
+        token.retry(messages, drainCancellationReason ?? "opencode_turn_aborted_by_lifecycle");
+        return false;
+      }
       const failure = redactErrorPreview(error instanceof Error ? error.message : String(error), 2000);
       return await settleFailure({
         failure,
         spawnError: error instanceof Error ? error : new Error(String(error)),
-        state: observedState ?? { sawProviderActivity: false, sawUnsafeTool: false, text: [] },
+        state: (observedState as TurnState | null) ?? { sawProviderActivity: false, sawUnsafeTool: false, text: [] },
         sessionCtx,
         messages,
         token,
         turnGeneration,
       });
     } finally {
+      turnAbortRecords.delete(turnGeneration);
       if (generation === turnGeneration) {
         currentAbort = null;
         currentTurnPromise = null;
@@ -1427,10 +1578,14 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
       return { kind: "owned", mode: "queued" };
     },
 
-    async suspend(reason) {
+    async suspend(reason?: string, opts?: HandlerShutdownOptions) {
       const recoveryReason = reason ?? "opencode_suspend_before_terminal";
+      settleProviderEntered = opts?.settleProviderEntered === true;
       sessionActive = false;
       drainCancellationReason = recoveryReason;
+      if (currentAbort) {
+        markTurnAborted(generation, { cause: "lifecycle", disposition: "settle" });
+      }
       generation++;
       currentAbort?.abort();
       unsafeDiscoveryWaitAbort?.abort();
@@ -1438,16 +1593,21 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
       if (drainingBatch) retryDrainingBatch(drainingBatch, recoveryReason);
       retryQueue(recoveryReason);
       drainCancellationReason = null;
+      settleProviderEntered = false;
       unsafeDiscoveryWaitAbort = null;
       currentAbort = null;
       currentTurnPromise = null;
       initialTurnPreparing = false;
     },
 
-    async shutdown(reason) {
+    async shutdown(reason?: string, opts?: HandlerShutdownOptions) {
       const recoveryReason = reason ?? "opencode_shutdown_before_terminal";
+      settleProviderEntered = opts?.settleProviderEntered === true;
       sessionActive = false;
       drainCancellationReason = recoveryReason;
+      if (currentAbort) {
+        markTurnAborted(generation, { cause: "lifecycle", disposition: "settle" });
+      }
       generation++;
       currentAbort?.abort();
       unsafeDiscoveryWaitAbort?.abort();
@@ -1455,6 +1615,7 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
       if (drainingBatch) retryDrainingBatch(drainingBatch, recoveryReason);
       retryQueue(recoveryReason);
       drainCancellationReason = null;
+      settleProviderEntered = false;
       unsafeDiscoveryWaitAbort = null;
       currentAbort = null;
       currentTurnPromise = null;
