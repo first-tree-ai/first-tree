@@ -34,6 +34,7 @@ import {
   runtimeProviderPreferredCredentialProse,
   runtimeProviderSchema,
   runtimeProviderShowsHostLoginOnSetup,
+  ZCODE_INSTALL_COMMAND,
 } from "../index.js";
 
 describe("runtime provider identity + catalog completeness", () => {
@@ -81,6 +82,7 @@ describe("runtime provider identity + catalog completeness", () => {
       "kimi-code",
       "opencode",
       "pi",
+      "zcode",
     ]);
     expect(PREFERRED_RUNTIME_PROVIDER).toBe("codex");
     expect(orderRuntimeProvidersByPreference(["pi", "opencode", "claude-code", "kimi-code", "codex"])).toEqual([
@@ -126,6 +128,7 @@ describe("runtime provider identity + catalog completeness", () => {
           expect(install).toContain(arg);
         }
       } else {
+        expect(entry.install.kind).toBe("script");
         expect(install).toBe(entry.install.command);
       }
       if (runtimeProviderShowsHostLoginOnSetup(id)) {
@@ -143,6 +146,7 @@ describe("runtime provider identity + catalog completeness", () => {
     expect(runtimeProviderShowsHostLoginOnSetup("pi")).toBe(true);
     expect(runtimeProviderShowsHostLoginOnSetup("amp")).toBe(true);
     expect(runtimeProviderShowsHostLoginOnSetup("deepseek-harness")).toBe(true);
+    expect(runtimeProviderShowsHostLoginOnSetup("zcode")).toBe(true);
     expect(runtimeProviderShowsHostLoginOnSetup("codex")).toBe(false);
     expect(runtimeProviderShowsHostLoginOnSetup("claude-code")).toBe(false);
     expect(runtimeProviderShowsHostLoginOnSetup("claude-code-tui")).toBe(false);
@@ -207,6 +211,8 @@ describe("runtime provider identity + catalog completeness", () => {
     expect(runtimeProviderPreferredCredentialProse("deepseek-harness")).toContain("Mark as sensitive");
     expect(runtimeProviderPreferredCredentialProse("amp")).toBeNull();
     expect(runtimeProviderLoginCommand("amp")).toBe("amp login");
+    expect(runtimeProviderInstallCommand("zcode")).toBe(ZCODE_INSTALL_COMMAND);
+    expect(runtimeProviderLoginCommand("zcode")).toBe("zcode login");
     expect(KIMI_NPM_PACKAGE).toBe("@moonshot-ai/kimi-code");
     expect(RUNTIME_PROVIDER_CATALOG["kimi-code"].install).toEqual({
       kind: "npm",

@@ -13,6 +13,7 @@ export const AMP_INSTALL_COMMAND = "curl -fsSL https://ampcode.com/install.sh | 
 export const CURSOR_INSTALL_COMMAND = "curl https://cursor.com/install -fsS | bash";
 export const GROK_INSTALL_COMMAND = "curl -fsSL https://x.ai/cli/install.sh | bash";
 export const ANTIGRAVITY_INSTALL_COMMAND = "curl -fsSL https://antigravity.google/cli/install.sh | bash";
+export const ZCODE_INSTALL_COMMAND = "curl -fsSL https://zcode.z.ai/install.sh | bash";
 
 /**
  * OpenCode CLI minimum supported version. Catalog npm package and client
@@ -234,6 +235,16 @@ export const RUNTIME_PROVIDER_CATALOG = {
     loginSteps: ["pi", "/login"],
     authRecovery: { kind: "host" },
     authOwnerLabel: "Pi",
+  },
+  zcode: {
+    id: "zcode",
+    label: "ZCode",
+    displayOrder: 85,
+    selectionPriority: null,
+    install: { kind: "script", command: ZCODE_INSTALL_COMMAND },
+    loginSteps: ["zcode login"],
+    authRecovery: { kind: "host" },
+    authOwnerLabel: "Z.AI",
   },
 } as const satisfies Record<RuntimeProvider, RuntimeProviderCatalogEntry>;
 

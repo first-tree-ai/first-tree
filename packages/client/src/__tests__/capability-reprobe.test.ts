@@ -87,6 +87,7 @@ describe("hasNonOkProvider", () => {
         "kimi-code": okEntry(),
         opencode: okEntry(),
         pi: okEntry(),
+        zcode: okEntry(),
         [LARK_CLI_CAPABILITY_KEY]: okEntry(),
       }),
     ).toBe(false);
@@ -167,6 +168,7 @@ describe("revalidateCapabilities / reprobeOnReconnect (probe modules mocked)", (
     vi.doUnmock("../providers/kimi-code/capability.js");
     vi.doUnmock("../providers/opencode/capability.js");
     vi.doUnmock("../providers/pi/capability.js");
+    vi.doUnmock("../providers/zcode/capability.js");
     vi.resetModules();
   });
 
@@ -199,6 +201,7 @@ describe("revalidateCapabilities / reprobeOnReconnect (probe modules mocked)", (
     vi.doMock("../providers/kimi-code/capability.js", () => ({ probeKimiCodeCapability: mk("kimi-code") }));
     vi.doMock("../providers/opencode/capability.js", () => ({ probeOpenCodeCapability: mk("opencode") }));
     vi.doMock("../providers/pi/capability.js", () => ({ probePiCapability: mk("pi") }));
+    vi.doMock("../providers/zcode/capability.js", () => ({ probeZcodeCapability: mk("zcode") }));
     const mod = await import("../providers/capabilities/index.js");
     return { mod, calls };
   }
@@ -217,6 +220,7 @@ describe("revalidateCapabilities / reprobeOnReconnect (probe modules mocked)", (
     expect(calls.codex).toBe(1);
     expect(calls.amp).toBe(1);
     expect(calls["deepseek-harness"]).toBe(1);
+    expect(calls.zcode).toBe(1);
     expect(calls.antigravity).toBe(1);
     expect(out["claude-code"]?.state).toBe("ok");
     expect(out.codex?.state).toBe("ok");

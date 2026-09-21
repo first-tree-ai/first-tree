@@ -44,6 +44,7 @@ const allOk = (): ClientCapabilities => ({
   "lark-cli": ok(),
   opencode: ok(),
   pi: ok(),
+  zcode: ok(),
 });
 
 const codexMissing = (): ClientCapabilities => ({
@@ -59,6 +60,7 @@ const codexMissing = (): ClientCapabilities => ({
   "lark-cli": ok(),
   opencode: ok(),
   pi: ok(),
+  zcode: ok(),
 });
 
 // Detection is install-only, so a provider mid-login is one whose binary is not
@@ -94,6 +96,7 @@ const codexPendingSnapshot = (): ClientCapabilities => ({
   "lark-cli": ok(),
   opencode: ok(),
   pi: ok(),
+  zcode: ok(),
 });
 
 /** What a re-probe sees while the login is still in flight: still not installed. */
@@ -110,6 +113,7 @@ const codexUnauthSnapshot = (): ClientCapabilities => ({
   "lark-cli": ok(),
   opencode: ok(),
   pi: ok(),
+  zcode: ok(),
 });
 
 const BASE = 100;

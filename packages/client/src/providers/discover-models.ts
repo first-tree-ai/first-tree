@@ -89,6 +89,12 @@ export async function discoverProviderModels(
         "Pi model discovery is not enabled in V1; enter the provider-native provider/model id",
         deps,
       );
+    case "zcode":
+      return unavailableCatalog(
+        provider,
+        "ZCode model selection is not enabled in V1; configure the model in provider-owned ZCode configuration",
+        deps,
+      );
     case "claude-code":
     case "claude-code-tui":
     case "codex":
