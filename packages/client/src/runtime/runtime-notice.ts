@@ -108,6 +108,9 @@ function noticeLead(payload: ProviderRetryEventPayload): string {
     case "capability":
       return `${provider} could not ${action}: the runtime is unavailable on this machine. Install or repair the runtime, then retry.`;
     case "configuration":
+      if (payload.provider === "cursor" && payload.reasonCode === "cursor_resume_stuck") {
+        return `${provider} could not ${action}: the previous Cursor conversation could not be resumed. Send your message again in this chat to continue with a fresh Cursor session.`;
+      }
       return `${provider} could not ${action}: runtime configuration needs attention. Fix the configuration and retry.`;
     case "deterministic_input":
       return `${provider} could not ${action}: this input cannot be processed as-is. Adjust the request or start a new thread, then retry.`;
