@@ -17,7 +17,6 @@ import type { FastifyInstance } from "fastify";
 import { agents } from "../db/schema/agents.js";
 import { chatMembership } from "../db/schema/chat-membership.js";
 import { chatUserState } from "../db/schema/chat-user-state.js";
-import { imChatBindings } from "../db/schema/im-chat-bindings.js";
 import { inboxEntries } from "../db/schema/inbox-entries.js";
 import { members } from "../db/schema/members.js";
 import { messages } from "../db/schema/messages.js";
@@ -49,6 +48,7 @@ import {
   setChatEngagement,
 } from "../services/chat/workspace/me-chat.js";
 import { listRequestThread } from "../services/chat/workspace/need-you.js";
+import { isFeishuBridgedChat } from "../services/integrations/feishu/chat-binding.js";
 import {
   hasRemainingLandingCampaignTrialBudget,
   normalizeLandingCampaignTrialChatMetadataForRead,
@@ -78,13 +78,31 @@ import { sendFollowResult } from "./github-entity-reply.js";
  * and gates participation/supervision.
  */
 export async function chatRoutes(app: FastifyInstance): Promise<void> {
+  /**
+   * Web-scope Feishu boundary. Shares `isFeishuBridgedChat` with the agent
+   * scope so both answer "is this chat mirrored to Feishu right now?" the same
+   * way; see that module for why the answer is active-bindings-only.
+   *
+   * BEHAVIOR CHANGE: this used to match ANY binding row, including detached
+   * ones, which left a detached chat permanently blocked in Web while the agent
+   * scope had already let go of it.
+   *
+   * WORDING: not "read-only". The signed-in user's own view state —
+   * read/unread, pin, archive — deliberately keeps working, so "read-only"
+   * describes a stricter product than the one we ship and sends people hunting
+   * for a workaround they do not need. Name the blocked class instead. (The
+   * Web scope blocks more than the agent scope does: a rename is a structural
+   * write here, while an agent is required to keep topic/description current.)
+   */
   async function assertWebMutableChat(chatId: string): Promise<void> {
-    const [binding] = await app.db
-      .select({ id: imChatBindings.id })
-      .from(imChatBindings)
-      .where(eq(imChatBindings.chatId, chatId))
-      .limit(1);
-    if (binding) throw new ForbiddenError("Feishu chats are read-only in the Web app");
+    if (await isFeishuBridgedChat(app.db, chatId)) {
+      throw new ForbiddenError(
+        "This chat is bridged to a Feishu conversation, so structural changes are blocked in the Web app: " +
+          "messages, membership, rename and entity follows all land where the humans in this chat — who only ever " +
+          "see the Feishu group — cannot see them. Reply in the Feishu conversation instead. Reading the chat, and " +
+          "your own read/pin/archive state, keep working normally.",
+      );
+    }
   }
 
   async function requireDirectHumanChatMembership(chatId: string, humanAgentId: string): Promise<void> {

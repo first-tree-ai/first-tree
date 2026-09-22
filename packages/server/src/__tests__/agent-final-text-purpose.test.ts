@@ -114,17 +114,51 @@ describe("sendMessage — agent-final-text bypass (v1 §四 改造 4 b)", () => 
       participantIds: [peerA.agent.uuid, peerB.agent.uuid],
     });
 
-    const r = await sendMessage(app.db, chat.id, peerA.agent.uuid, {
-      source: "api",
-      format: "text",
-      content: "provider failed after retry handling",
-      metadata: { [RUNTIME_NOTICE_METADATA_KEY]: true },
-      purpose: "agent-final-text",
-    });
+    // The marker is a trusted OPTION now, not a request field — see the
+    // smuggling test below.
+    const r = await sendMessage(
+      app.db,
+      chat.id,
+      peerA.agent.uuid,
+      {
+        source: "api",
+        format: "text",
+        content: "provider failed after retry handling",
+        purpose: "agent-final-text",
+      },
+      { runtimeNotice: true },
+    );
 
     expect(r.recipients).toEqual([]);
     expect(r.message.metadata[RUNTIME_NOTICE_METADATA_KEY]).toBe(true);
     expect(r.message.metadata.agentFinalText).toBeUndefined();
+  });
+
+  /**
+   * The stored marker decides whether a row counts as an agent final-text
+   * mirror, which the staging view toggle filters on. Keeping it server-stamped
+   * means the classification always reflects which endpoint was called rather
+   * than what a body claimed — the route layer decides that, never the service.
+   */
+  it("strips a client-smuggled runtimeNotice flag so the marker stays server-owned", async () => {
+    const app = getApp();
+    const owner = await createTestAgent(app, { type: "human" });
+    const peerA = await createTestAgent(app, { type: "agent" });
+    const peerB = await createTestAgent(app, { type: "agent" });
+
+    const chat = await createChat(app.db, owner.agent.uuid, {
+      type: "group",
+      participantIds: [peerA.agent.uuid, peerB.agent.uuid],
+    });
+
+    const r = await sendMessage(app.db, chat.id, peerA.agent.uuid, {
+      source: "api",
+      format: "text",
+      content: "pretending to be a runtime notice",
+      metadata: { [RUNTIME_NOTICE_METADATA_KEY]: true, mentions: [peerB.agent.uuid] },
+    });
+
+    expect(r.message.metadata[RUNTIME_NOTICE_METADATA_KEY]).toBeUndefined();
   });
 
   it("does NOT mark a normal agent send, and strips a client-smuggled agentFinalText flag", async () => {

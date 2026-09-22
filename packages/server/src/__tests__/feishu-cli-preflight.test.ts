@@ -1,5 +1,6 @@
 import { eq } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { FEISHU_AGENT_CHAT_WRITE_CODE } from "../api/agent/feishu-chat-guard.js";
 import { imBotBindings } from "../db/schema/im-bot-bindings.js";
 import { imChatBindings } from "../db/schema/im-chat-bindings.js";
 import { inboxEntries } from "../db/schema/inbox-entries.js";
@@ -111,10 +112,26 @@ describe("controlled Feishu CLI preflight", () => {
     });
     expect((stored?.metadata as { mentions?: unknown } | undefined)?.mentions).toEqual([]);
 
+    // Two independent rules refuse this edit; while the binding is active the
+    // chat-level boundary is the one that answers.
     const edit = await a.request("PATCH", `/api/v1/agent/chats/${chat.id}/messages/${grant.canonicalMessageId}`, {
       content: "edited after provider delivery",
     });
     expect(edit.statusCode).toBe(403);
+    expect(edit.json<{ code?: string }>().code).toBe(FEISHU_AGENT_CHAT_WRITE_CODE);
+
+    // Detaching releases the chat-level boundary, and the delivered provider
+    // row must STILL be immutable — First Tree cannot retract what Feishu has
+    // already shown, whatever the binding's current state.
+    await app.db.update(imChatBindings).set({ status: "detached" }).where(eq(imChatBindings.chatId, chat.id));
+    const editAfterDetach = await a.request(
+      "PATCH",
+      `/api/v1/agent/chats/${chat.id}/messages/${grant.canonicalMessageId}`,
+      { content: "edited after the binding detached" },
+    );
+    expect(editAfterDetach.statusCode).toBe(403);
+    expect(editAfterDetach.json<{ error: string }>().error).toContain("Feishu message history cannot be edited");
+    await app.db.update(imChatBindings).set({ status: "active" }).where(eq(imChatBindings.chatId, chat.id));
 
     const inbox = await app.db.select().from(inboxEntries).where(eq(inboxEntries.messageId, grant.canonicalMessageId));
     expect(inbox).toHaveLength(1);
@@ -246,6 +263,45 @@ describe("controlled Feishu CLI preflight", () => {
       canonicalMessageId,
     });
     expect(changed.statusCode).toBe(403);
+  });
+
+  /**
+   * The bridge's own delivery reuses `messageService.sendMessage` with the same
+   * `source: "cli"` and the same agent `senderId` that `chat send` uses, so a
+   * Feishu boundary placed in the service layer would silence the bot itself.
+   * This pins the discriminator that keeps them apart: the intent route stays
+   * open while the agent chat route on the very same chat is refused.
+   */
+  it("still delivers through the bridge while the agent chat tools are blocked on the same chat", async () => {
+    const { app, a, b, chat } = await setup();
+
+    const blocked = await a.request("POST", `/api/v1/agent/chats/${chat.id}/messages`, {
+      format: "text",
+      content: "chat send must not reach the Feishu group",
+      source: "cli",
+      metadata: { mentions: [b.agent.uuid] },
+    });
+    expect(blocked.statusCode).toBe(403);
+    expect(blocked.json<{ code?: string }>().code).toBe(FEISHU_AGENT_CHAT_WRITE_CODE);
+
+    const delivered = await a.request("POST", "/api/v1/agent/feishu/intents", {
+      chatId: chat.id,
+      operation: "send",
+      targetChatId: "oc_feishu",
+      replyInThread: false,
+      format: "markdown",
+      content: "**the bridge still works**",
+    });
+    expect(delivered.statusCode).toBe(200);
+    const canonicalMessageId = delivered.json<{ canonicalMessageId: string }>().canonicalMessageId;
+
+    const [stored] = await app.db.select().from(messages).where(eq(messages.id, canonicalMessageId));
+    expect(stored).toMatchObject({ chatId: chat.id, senderId: a.agent.uuid, content: "**the bridge still works**" });
+
+    // …and the silent context fan-out to other speakers is unaffected.
+    const inbox = await app.db.select().from(inboxEntries).where(eq(inboxEntries.messageId, canonicalMessageId));
+    expect(inbox).toHaveLength(1);
+    expect(inbox[0]).toMatchObject({ inboxId: b.agent.inboxId, notify: false });
   });
 
   it("returns Bot credentials only to the bound primary Agent", async () => {

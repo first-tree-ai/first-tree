@@ -33,6 +33,7 @@ import {
 } from "../../services/scm/gitlab/entity-follow.js";
 import { resolveAgentScmBindingPair } from "../../services/scm/shared/attention-line.js";
 import { sendFollowResult } from "../github-entity-reply.js";
+import { assertAgentMutableChat, isFeishuBridgedChat } from "./feishu-chat-guard.js";
 
 const log = createLogger("AgentChatsRoute");
 
@@ -170,6 +171,10 @@ export async function agentChatRoutes(app: FastifyInstance): Promise<void> {
     const detail = await chatService.getChatDetail(app.db, request.params.chatId, identity.uuid);
     return {
       ...serializeChat(detail),
+      // Live bridge state, so an agent-side precondition (`chat create` /
+      // `chat open`) can consult the same authority the write boundary uses
+      // instead of the stale `metadata.source` label.
+      externalChannel: (await isFeishuBridgedChat(app.db, request.params.chatId)) ? "feishu" : null,
       participants: detail.participants.map((p) => ({
         ...p,
         joinedAt: p.joinedAt.toISOString(),
@@ -253,6 +258,18 @@ export async function agentChatRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
+    // Authorize BEFORE the Feishu boundary. `addParticipant` below re-checks
+    // membership inside the invite service, but that is too late for this
+    // route: running the bridged-chat guard first would answer "is this chat
+    // bound to Feishu?" to a caller who is not even a participant, turning the
+    // 403 into an oracle over guessed chat UUIDs. Checking membership here
+    // makes the two failures indistinguishable to an outsider.
+    await chatService.assertParticipant(app.db, request.params.chatId, identity.uuid);
+
+    // Feishu boundary for `chat invite`: pulling another agent into a bridged
+    // chat only widens a room the Feishu humans cannot see.
+    await assertAgentMutableChat(app.db, request.params.chatId);
+
     const body = addParticipantSchema.parse(request.body);
     const participants = await chatService.addParticipant(app.db, request.params.chatId, identity.uuid, body);
     return reply.status(201).send(
@@ -267,6 +284,17 @@ export async function agentChatRoutes(app: FastifyInstance): Promise<void> {
     "/:chatId/participants/:agentId",
     async (request, reply) => {
       const identity = requireAgent(request);
+
+      // Same two-step as the invite route above, and for the same two reasons.
+      // `removeParticipant` re-checks membership inside its transaction, but a
+      // removal mutates SHARED membership of a chat the Feishu humans cannot
+      // see, so the boundary has to apply here too — adding a participant and
+      // dropping one are the same class of change. Membership is authorized
+      // FIRST so the 403 cannot be used to probe which guessed chat UUIDs are
+      // Feishu-bound.
+      await chatService.assertParticipant(app.db, request.params.chatId, identity.uuid);
+      await assertAgentMutableChat(app.db, request.params.chatId);
+
       await chatService.removeParticipant(app.db, request.params.chatId, identity.uuid, request.params.agentId);
       return reply.status(204).send();
     },

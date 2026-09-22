@@ -11,7 +11,7 @@ import type { SessionMessage } from "../runtime/handler.js";
  * chat — it only closes the turn trigger. The agent's text is captured via
  * `assistant_text` events, not this hook. A handler test that needs to assert
  * an EXPLICIT chat write (e.g. the codex usage-limit runtime notice) mocks
- * `sdk.sendMessage` on the ctx directly, not through here.
+ * `sdk.postRuntimeNotice` on the ctx directly, not through here.
  *
  * The stubbed name-resolution path returns the raw senderId — the production
  * `[From: <name>]` path is covered separately in `agent-io.test.ts`.
