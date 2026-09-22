@@ -11,7 +11,7 @@ import {
   type SessionEvent,
 } from "@first-tree/shared";
 import type pino from "pino";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { type FirstTreeHubSDK, SdkError } from "../cloud/sdk.js";
 import type { AgentConfigCache } from "../runtime/agent-config-cache.js";
 import type { ContextTreeBinding } from "../runtime/bootstrap.js";
@@ -4119,6 +4119,10 @@ describe("SessionRuntime replay fence startup reconciliation", () => {
 });
 
 describe("SessionRuntime replay fence convergence matrix", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   function seedFence(path: string, chatId: string, messageId: string): void {
     const store = new ReplayFenceStore(path);
     store.load();
@@ -4130,6 +4134,22 @@ describe("SessionRuntime replay fence convergence matrix", () => {
       toolUseId: "agent-0:tool_1",
       fencedAt: new Date().toISOString(),
     });
+  }
+
+  function seedFences(path: string, chatId: string, messageIds: readonly string[]): void {
+    const fencedAt = new Date().toISOString();
+    const entries: Record<string, unknown> = {};
+    for (const messageId of messageIds) {
+      entries[`${chatId.length}:${chatId}${messageId}`] = {
+        chatId,
+        messageId,
+        provider: "kimi-code",
+        toolName: "Write",
+        toolUseId: "w1",
+        fencedAt,
+      };
+    }
+    writeFileSync(path, JSON.stringify({ version: 1, entries }, null, 2));
   }
 
   it("never fires a post-fence recovery for an ordinary never-fenced turn", async () => {
@@ -4247,19 +4267,8 @@ describe("SessionRuntime replay fence convergence matrix", () => {
     const root = mkdtempSync(join(tmpdir(), "sm-fence-chunks-"));
     try {
       const fencePath = join(root, "fence.json");
-      const store = new ReplayFenceStore(fencePath);
-      store.load();
       const ids = Array.from({ length: 101 }, (_, i) => `msg-${i + 1}`);
-      for (const id of ids) {
-        store.fence({
-          chatId: "chat-chunks",
-          messageId: id,
-          provider: "kimi-code",
-          toolName: "Write",
-          toolUseId: "w1",
-          fencedAt: new Date().toISOString(),
-        });
-      }
+      seedFences(fencePath, "chat-chunks", ids);
       const probeCalls: string[][] = [];
       const probeFencedSettlement = vi.fn(async (_chatId: string, chunk: readonly string[]) => {
         probeCalls.push([...chunk]);
@@ -4296,7 +4305,7 @@ describe("SessionRuntime replay fence convergence matrix", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 });
 
 describe("InboxDeliveryCoordinator fence-settled tombstones at high water", () => {

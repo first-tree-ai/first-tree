@@ -136,6 +136,11 @@ describe("isAntigravityAuthError", () => {
     expect(isAntigravityAuthError("authentication required — run agy once to sign in")).toBe(true);
     expect(isAntigravityAuthError("Gemini API credential is missing")).toBe(true);
     expect(isAntigravityAuthError("HTTP 429 resource exhausted")).toBe(false);
+    expect(
+      isAntigravityAuthError(
+        "Reviewed successor head on PR #3881. Previous Finding Resolved: Listing bed feature promotion now strictly keeps the sign in CTA.",
+      ),
+    ).toBe(false);
     expect(isAntigravityAuthError("")).toBe(false);
   });
 });

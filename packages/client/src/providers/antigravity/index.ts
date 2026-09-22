@@ -29,6 +29,7 @@ import type {
 import {
   assertContextSourceCurrent,
   buildBriefingUpdateNotice,
+  classifyProviderFailure,
   computeBriefingFingerprint,
   contextSourceFromHandlerConfig,
   createDefaultProviderProcessSupervisor,
@@ -63,9 +64,19 @@ export function isAntigravityPendingSessionId(sessionId: string): boolean {
 }
 
 const STDERR_TAIL_LIMIT = 8_000;
-const DEFAULT_TURN_TIMEOUT_MS = 20 * 60_000;
 const KILL_GRACE_MS = 5_000;
 const FINAL_CLOSE_WAIT_MS = 2_000;
+const ANTIGRAVITY_CAPACITY_RE = /no capacity available|resource_exhausted|individual quota reached/i;
+
+function antigravityCapacityDiagnostic(text: string): string | null {
+  if (!ANTIGRAVITY_CAPACITY_RE.test(text)) return null;
+  const line = text
+    .split(/\r?\n/)
+    .map((entry) => entry.trim())
+    .find((entry) => ANTIGRAVITY_CAPACITY_RE.test(entry));
+  return line || text.trim().slice(0, 500);
+}
+
 const PROVIDER_ATTEMPT_WINDOW_TTL_MS = 30 * 60_000;
 const MAX_PROVIDER_ATTEMPT_WINDOWS = 512;
 
@@ -84,13 +95,14 @@ type ProcessOutcome = {
 type TurnState = {
   parser: AntigravityStreamParser;
   sessionIds: Set<string>;
-  results: Array<{ isError: boolean; text: string }>;
+  results: Array<{ isError: boolean; text: string; sessionId: string | null }>;
   errors: string[];
   text: string[];
   usage: AntigravityUsage | null;
   sawProviderActivity: boolean;
   sawUnsafeTool: boolean;
   protocolDiagnostics: string[];
+  noiseLines: number;
   toolsByCallId: Map<string, { name: string; args: unknown }>;
 };
 
@@ -248,7 +260,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
   const turnTimeoutMs =
     typeof config.antigravityTurnTimeoutMs === "number" && config.antigravityTurnTimeoutMs > 0
       ? config.antigravityTurnTimeoutMs
-      : DEFAULT_TURN_TIMEOUT_MS;
+      : undefined;
   const retrySleep =
     (config.antigravityRetrySleep as AntigravityRetrySleep | undefined) ?? defaultAntigravityRetrySleep;
 
@@ -258,6 +270,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
   let binary: string | null = null;
   let providerSessionId: string | null = null;
   let pendingSyntheticId: string | null = null;
+  let droppedSessionId: string | null = null;
   // A lifecycle fence can finish an in-flight first turn after shutdown has
   // cleared the live handler state. Keep an exact provider ID just long
   // enough for start()/resume() to return it to SessionRuntime.
@@ -281,6 +294,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
   // custody identity so even an explicit same-row recovery cannot serialize
   // the original prompt into that conversation.
   const ambiguousProviderTurnKeys = new Set<string>();
+  let pendingTurnContinuation: ProviderContinuation | null = null;
 
   function ambiguousProviderTurnKey(sessionId: string | null, messages: readonly SessionMessage[]): string | null {
     if (!sessionId || messages.length !== 1) return null;
@@ -290,6 +304,15 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
   function rememberAmbiguousProviderTurn(sessionId: string | null, messages: readonly SessionMessage[]): void {
     const key = ambiguousProviderTurnKey(sessionId, messages);
     if (key) ambiguousProviderTurnKeys.add(key);
+    const messageId = messages[0]?.id;
+    if (sessionId && messages.length === 1 && messageId) {
+      pendingTurnContinuation = {
+        kind: "provider_continuation",
+        provider: runtimeProvider,
+        sessionId,
+        messageId,
+      };
+    }
   }
   const queue: QueuedDelivery[] = [];
 
@@ -342,7 +365,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
     state: TurnState;
     sessionCtx: SessionContext;
     abortSignal: AbortSignal;
-    timeoutMs: number;
+    timeoutMs?: number;
     turnGeneration: number;
     label: string;
   }): Promise<ProcessOutcome> {
@@ -353,7 +376,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
           command: input.command,
           args: input.args,
           label: input.label,
-          timeoutMs: input.timeoutMs,
+          ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),
           options: {
             cwd: input.workspaceCwd,
             env: input.env,
@@ -450,6 +473,9 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
       child.stderr?.setEncoding("utf8");
       child.stderr?.on("data", (chunk: string) => {
         stderrTail = (stderrTail + chunk).slice(-STDERR_TAIL_LIMIT);
+        if (antigravityCapacityDiagnostic(chunk) && !input.abortSignal.aborted) {
+          terminate();
+        }
       });
       child.on("close", (exitCode, signal) => {
         input.abortSignal.removeEventListener("abort", terminate);
@@ -463,6 +489,10 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
       try {
         child.stdin?.write(`${JSON.stringify({ event: "user", message: { content: input.prompt } })}\n`);
         child.stdin?.end();
+        // Prompt bytes have been handed to the child. Later abort cannot claim
+        // the Provider never received input, so replay is unsafe.
+        input.state.sawProviderActivity = true;
+        input.sessionCtx.recordProviderActivity();
       } catch (error) {
         spawnError = error instanceof Error ? error : new Error(String(error));
         try {
@@ -475,6 +505,13 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
   }
 
   function handleEvent(event: AntigravityStreamEvent, state: TurnState, sessionCtx: SessionContext): void {
+    if (event.kind === "noise") {
+      if (state.noiseLines < 5) {
+        sessionCtx.log(`Antigravity ignored non-JSON stdout: ${event.raw}`);
+      }
+      state.noiseLines += 1;
+      return;
+    }
     sessionCtx.recordProviderActivity();
     state.sawProviderActivity = true;
     switch (event.kind) {
@@ -505,10 +542,12 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
         state.usage = event.usage;
         break;
       case "result":
-        state.results.push({ isError: event.isError, text: event.text });
+        // Resume can replay earlier terminal events. Only the latest result
+        // is this turn; drop prior ERROR bodies so they cannot classify it.
+        state.results = [{ isError: event.isError, text: event.text, sessionId: event.sessionId ?? null }];
+        state.errors = [];
         if (event.sessionId) state.sessionIds.add(event.sessionId);
         if (event.usage) state.usage = event.usage;
-        if (event.isError && event.text) state.errors.push(event.text);
         break;
       case "error":
         state.errors.push(event.message);
@@ -571,13 +610,14 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
 
   function adoptSessionId(sessionCtx: SessionContext, id: string): void {
     if (providerSessionId === id) return;
-    const synthetic = pendingSyntheticId;
+    const previous = providerSessionId ?? pendingSyntheticId ?? droppedSessionId;
     providerSessionId = id;
-    if (synthetic) {
-      pendingSyntheticId = null;
+    pendingSyntheticId = null;
+    droppedSessionId = null;
+    if (previous && previous !== id) {
       sessionCtx.replaceSessionId?.(id, "antigravity_conversation_id_confirmed");
       if (cwd) {
-        const baseline = readSessionBriefingFingerprint(cwd, synthetic);
+        const baseline = readSessionBriefingFingerprint(cwd, previous);
         if (baseline) writeSessionBriefingFingerprint(cwd, id, baseline);
       }
     }
@@ -718,6 +758,46 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
     return true;
   }
 
+  /**
+   * Lifecycle cancellation of a provider-entered turn. Consume the delivery so
+   * the interrupted prompt is not replayed, but do not classify the
+   * cancellation as an unknown provider crash. Antigravity cannot resume the
+   * interrupted process, so preemption and retirement must fail closed too.
+   */
+  async function settleLifecycleConsumedTurn(input: {
+    state: TurnState;
+    sessionCtx: SessionContext;
+    messages: readonly SessionMessage[];
+    token: DeliveryToken;
+    expectedSessionId: string | null;
+  }): Promise<boolean> {
+    const lifecycleObservedId = adoptObservedSessionId(
+      input.sessionCtx,
+      input.state.sessionIds,
+      input.expectedSessionId,
+      input.state.usage,
+    );
+    if (lifecycleObservedId) pendingLifecycleSessionId = lifecycleObservedId;
+    rememberAmbiguousProviderTurn(providerSessionId, input.messages);
+    input.sessionCtx.log("Antigravity turn cancelled by session lifecycle after provider entry");
+    input.sessionCtx.emitEvent({ kind: "turn_end", payload: { status: "error" } });
+    const completion = await input.token.complete(input.messages, consumedErrorOutcome("unsafe_replay"));
+    if (completion === "retry") {
+      if (providerSessionId && input.messages.length === 1) {
+        input.sessionCtx.failSessionForRecovery?.("antigravity_unsafe_replay_notice_unsettled", providerSessionId, {
+          kind: "provider_continuation",
+          provider: runtimeProvider,
+          sessionId: providerSessionId,
+          messageId: input.messages[0]?.id ?? "",
+        });
+      }
+      return false;
+    }
+    providerTurnFailureAttempts.delete(providerAttemptKey(input.sessionCtx, input.messages));
+    pendingChatContextPrompt = null;
+    return true;
+  }
+
   async function runTurn(
     prompt: string,
     sessionCtx: SessionContext,
@@ -743,6 +823,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
       sawProviderActivity: false,
       sawUnsafeTool: false,
       protocolDiagnostics: [],
+      noiseLines: 0,
       toolsByCallId: new Map(),
     };
     let processingStarted = false;
@@ -770,8 +851,11 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
         token.processingStarted(messages);
         processingStarted = true;
         providerTurnActive = true;
-        const timeout = setTimeout(() => abort.abort(), turnTimeoutMs);
-        timeout.unref?.();
+        const timeout =
+          typeof turnTimeoutMs === "number" && turnTimeoutMs > 0
+            ? setTimeout(() => abort.abort(), turnTimeoutMs)
+            : null;
+        timeout?.unref?.();
         let outcome: ProcessOutcome;
         try {
           outcome = await runProcess({
@@ -793,7 +877,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
             label: `antigravity turn ${sessionCtx.chatId}`,
           });
         } finally {
-          clearTimeout(timeout);
+          if (timeout) clearTimeout(timeout);
           providerTurnActive = false;
         }
 
@@ -807,37 +891,52 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
           if (lifecycleObservedId) pendingLifecycleSessionId = lifecycleObservedId;
           if (drainingBatch?.some((entry) => entry.token === token)) drainingBatch = null;
           // A lifecycle cancellation leaves the interrupted process without a
-          // provider-supported resume primitive. Fail every provider-entered
-          // turn closed rather than choosing between an ACK-less fresh prompt
-          // and an advisory second user turn.
+          // provider-supported resume primitive. Provider-entered work must
+          // fail closed so the original prompt cannot be serialized again;
+          // unentered queued work stays ACK-none via retryQueue.
           if (state.sawProviderActivity) {
-            const lifecycleError = new Error(
-              "Antigravity turn cancelled during a lifecycle transition after a mutating tool",
-            );
-            lifecycleError.name = "AbortError";
-            return settleFailure({
-              failure: lifecycleError.message,
-              spawnError: lifecycleError,
+            return settleLifecycleConsumedTurn({
               state,
               sessionCtx,
               messages,
               token,
-              turnGeneration,
+              expectedSessionId,
             });
           }
           const lifecycleRecoveryReason = drainCancellationReason ?? "antigravity_turn_aborted_or_timed_out";
           token.retry(messages, lifecycleRecoveryReason);
           return false;
         }
+        const capacityDiagnostic = antigravityCapacityDiagnostic([outcome.stderrTail, ...state.errors].join("\n"));
+        if (capacityDiagnostic && !state.sawUnsafeTool && state.results.length === 0) {
+          // Drop an already-established conversation so the capacity retry
+          // cannot spawn `--conversation` for the same 503 cascade. Remember
+          // it so a later successful replacement can update SessionRuntime.
+          droppedSessionId = providerSessionId ?? droppedSessionId;
+          providerSessionId = null;
+          pendingLifecycleSessionId = null;
+          return settleFailure({
+            failure: capacityDiagnostic,
+            state: { sawProviderActivity: false, sawUnsafeTool: false, text: [] },
+            sessionCtx,
+            messages,
+            token,
+            turnGeneration,
+          });
+        }
         if (abort.signal.aborted) {
-          // A timeout/provider abort is a provider attempt, not an implicit
-          // safe redelivery. If the stream already observed a mutating tool,
-          // settleFailure must terminate as unsafe_replay. Preserve a single
-          // exact conversation id first so a later explicit resume cannot
-          // accidentally create a second Antigravity conversation.
+          // Timeout after the prompt was written is not a transport blip:
+          // Antigravity cannot resume, and TimeoutError would retry as
+          // transient network. Surface any partial text, but keep an
+          // incomplete/error outcome and the expected conversation identity.
           adoptObservedSessionId(sessionCtx, state.sessionIds, expectedSessionId, state.usage);
+          const finalText = (state.results[0]?.text || state.text.join("")).trim();
+          if (finalText) {
+            for (const chunk of chunkAssistantText(finalText)) {
+              sessionCtx.emitEvent({ kind: "assistant_text", payload: { text: chunk } });
+            }
+          }
           const abortError = new Error("Antigravity turn aborted or timed out before a safe terminal event");
-          abortError.name = "TimeoutError";
           return settleFailure({
             failure: abortError.message,
             spawnError: abortError,
@@ -851,32 +950,59 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
 
         const ids = [...state.sessionIds];
         const protocolErrors: string[] = [];
-        if (ids.length !== 1) protocolErrors.push(`expected one conversation ID, observed ${ids.length}`);
-        if (expectedSessionId && ids[0] !== expectedSessionId) {
-          protocolErrors.push(
-            `resume conversation mismatch: expected ${expectedSessionId}, observed ${ids[0] ?? "none"}`,
-          );
+        const result = state.results.at(-1);
+        const resultId = result?.sessionId ?? null;
+        const id = resultId ?? (ids.length === 1 ? ids[0] : undefined);
+        if (!id) protocolErrors.push(`expected one conversation ID, observed ${ids.length}`);
+        if (expectedSessionId && resultId && resultId !== expectedSessionId) {
+          protocolErrors.push(`resume conversation mismatch: expected ${expectedSessionId}, observed ${resultId}`);
+        } else if (expectedSessionId && id && id !== expectedSessionId) {
+          protocolErrors.push(`resume conversation mismatch: expected ${expectedSessionId}, observed ${id}`);
         }
-        if (state.results.length !== 1) {
+        if (!result) {
           protocolErrors.push(`expected one terminal result event, observed ${state.results.length}`);
         }
-        if (state.errors.length > 0) protocolErrors.push(...state.errors);
-        if (state.protocolDiagnostics.length > 0) {
+        const providerErrorText = state.errors.join("\n").trim();
+        let agentAuthoredError = false;
+        if (providerErrorText && result && id) {
+          const classification = classifyProviderFailure(new Error(providerErrorText), {
+            provider: runtimeProvider,
+            scope: "provider_turn",
+            source: "stream",
+          });
+          if (
+            isAntigravityRuntimeFailureCategory(classification.category) ||
+            !looksLikeNoOpWebhookReport(providerErrorText)
+          ) {
+            protocolErrors.push(providerErrorText);
+          } else {
+            agentAuthoredError = true;
+            if (result && !result.text.trim()) result.text = providerErrorText;
+          }
+        } else if (state.errors.length > 0) {
+          protocolErrors.push(...state.errors);
+        }
+        if (state.protocolDiagnostics.length > 0 && !result) {
           protocolErrors.push(
             `unsupported or malformed Antigravity stream (${state.protocolDiagnostics.length} line${
               state.protocolDiagnostics.length === 1 ? "" : "s"
             })`,
           );
         }
-        if (state.results[0]?.isError) protocolErrors.push("Antigravity returned an ERROR result");
+        if (result?.isError && state.errors.length === 0 && !agentAuthoredError) {
+          protocolErrors.push("Antigravity returned an ERROR result");
+        }
 
-        const success = !outcome.spawnError && outcome.exitCode === 0 && protocolErrors.length === 0;
+        const deliveredResult = Boolean(result) && !result?.isError;
+        const success =
+          !outcome.spawnError &&
+          protocolErrors.length === 0 &&
+          (outcome.exitCode === 0 || ((agentAuthoredError || deliveredResult) && outcome.exitCode !== null));
         if (success) {
-          const id = ids[0];
           if (!id) throw new Error("Antigravity success without conversation ID");
           adoptSessionId(sessionCtx, id);
           if (!expectedSessionId) freshConversations.add(id);
-          const finalText = state.results[0]?.text || state.text.join("");
+          const finalText = result?.text || state.text.join("");
           for (const chunk of chunkAssistantText(finalText)) {
             sessionCtx.emitEvent({ kind: "assistant_text", payload: { text: chunk } });
           }
@@ -921,7 +1047,6 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
           ...protocolErrors,
           outcome.spawnError?.message,
           outcome.stderrTail,
-          outcome.stdoutTail,
           outcome.exitCode === null ? `signal ${outcome.signal ?? "unknown"}` : `exit ${outcome.exitCode}`,
         ]
           .filter((value): value is string => Boolean(value?.trim()))
@@ -1176,9 +1301,14 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
       if (!sessionId) throw new Error("Antigravity conversation ID unresolved");
       pendingLifecycleSessionId = null;
       if (delivered) writeSessionBriefingFingerprint(workspaceCwd, sessionId, computeBriefingFingerprint(briefing));
+      const continuation =
+        pendingTurnContinuation?.messageId === message.id && pendingTurnContinuation.sessionId === sessionId
+          ? pendingTurnContinuation
+          : undefined;
       return {
         sessionId,
         route: { kind: "owned", mode: "processing" },
+        ...(continuation ? { continuation } : {}),
       };
     },
 
@@ -1275,6 +1405,7 @@ export const createAntigravityHandler: HandlerFactory = (config) => {
       binary = null;
       providerSessionId = null;
       pendingSyntheticId = null;
+      droppedSessionId = null;
       ambiguousProviderTurnKeys.clear();
       pendingChatContextPrompt = null;
       cumulativeUsageByConversation.clear();
@@ -1289,6 +1420,30 @@ function isReadOnlyTool(name: string): boolean {
   return /^(read|read_file|list|list_files|grep|search|search_files|find|find_files|stat|webfetch|websearch)$/i.test(
     name,
   );
+}
+
+/** Runtime classes that must remain terminal. Unknown ERROR bodies stay failures unless positively a turn. */
+function isAntigravityRuntimeFailureCategory(category: string): boolean {
+  return (
+    category === "credential" ||
+    category === "capability" ||
+    category === "configuration" ||
+    category === "provider_capacity" ||
+    category === "deterministic_input" ||
+    category === "runtime_transport" ||
+    category === "transient_transport"
+  );
+}
+
+/** Positive evidence for the no-op webhook compatibility case; length/newlines are not enough. */
+function looksLikeNoOpWebhookReport(text: string): boolean {
+  const body = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !/^antigravity returned (status |an error result)/i.test(line))
+    .join("\n");
+  if (!body) return false;
+  return /no-op webhook event on (?:pr|issue) #\d+/i.test(body);
 }
 
 export type { AntigravityMcpConfig };

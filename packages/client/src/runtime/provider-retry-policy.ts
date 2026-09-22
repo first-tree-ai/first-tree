@@ -70,6 +70,14 @@ export function requiresUnsafeReplayNoticeCustody(provider: RuntimeProvider): bo
   return provider === "antigravity";
 }
 
+/**
+ * Providers that cannot resume an interrupted process start a new conversation
+ * when a one-delivery continuation does not match the current message.
+ */
+export function startsFreshOnMismatchedContinuation(provider: RuntimeProvider): boolean {
+  return requiresUnsafeReplayNoticeCustody(provider);
+}
+
 export function classifyProviderFailure(
   err: unknown,
   context: {
@@ -82,7 +90,7 @@ export function classifyProviderFailure(
   const base = classify(err, source ? { source } : undefined);
   const shape = readErrorShape(err);
   const text = `${shape.name ?? ""} ${shape.message ?? ""} ${shape.code ?? ""} ${shape.reason ?? ""}`.toLowerCase();
-  const retryAfterMs = readRetryAfterMs(shape);
+  const retryAfterMs = readRetryAfterMs(shape) ?? parseResetsInDurationMs(text);
   const status = shape.status ?? shape.statusCode;
 
   const runtimeSessionReason = runtimeSessionProofReason(shape, text);
@@ -531,6 +539,16 @@ function readErrorShape(err: unknown): ErrorShape {
   };
 }
 
+function parseResetsInDurationMs(text: string): number | undefined {
+  const match = /resets in (?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?/.exec(text);
+  if (!match || (match[1] === undefined && match[2] === undefined && match[3] === undefined)) return undefined;
+  const hours = Number(match[1] ?? 0);
+  const minutes = Number(match[2] ?? 0);
+  const seconds = Number(match[3] ?? 0);
+  const totalMs = ((hours * 3600 + minutes * 60 + seconds) * 1000) | 0;
+  return totalMs > 0 ? totalMs : undefined;
+}
+
 function readRetryAfterMs(shape: ErrorShape): number | undefined {
   if (typeof shape.retryAfterMs === "number" && Number.isFinite(shape.retryAfterMs) && shape.retryAfterMs >= 0) {
     return Math.floor(shape.retryAfterMs);
@@ -565,18 +583,36 @@ function runtimeSessionProofReason(shape: ErrorShape, text: string): string | nu
   return null;
 }
 
+function isAntigravityAuthDiagnostic(text: string): boolean {
+  // Keep in sync with isAntigravityAuthError. Bare "authentication" / "sign in" /
+  // "credential" appear in agent ERROR reports (reviews, feature write-ups) and
+  // must not become a re-login prompt.
+  return (
+    /authentication required|not authenticated|login required|\bunauthorized\b|gemini_api_key|token missing|token expired|invalid token/.test(
+      text,
+    ) ||
+    /credential is missing|api credential|invalid credential/.test(text) ||
+    /run agy(?: once)? to sign in|please sign in|sign in again/.test(text)
+  );
+}
+
 function isCredential(
   text: string,
   base: Classification,
   status: number | undefined,
   provider: RuntimeProvider,
 ): boolean {
-  if (
+  const structuredAuth =
     status === 401 ||
     status === 403 ||
     base.reasonCode.includes("auth") ||
     base.reasonCode.includes("unauthorized") ||
-    AUTH_HTTP_CODE_RE.test(text) ||
+    AUTH_HTTP_CODE_RE.test(text);
+  if (provider === "antigravity") {
+    return structuredAuth || isAntigravityAuthDiagnostic(text);
+  }
+  if (
+    structuredAuth ||
     /unauthorized|forbidden|invalid api key|invalid_api_key|authentication|login required|not authenticated|oauth_org_not_allowed|auth\.(?:login_required|provisioning_required|token_missing|token_unauthorized|model_not_resolved)|provider\.auth_error/.test(
       text,
     )
@@ -610,14 +646,6 @@ function isCredential(
   // "not logged in" / "grok login" / "auth.json" carry no generic auth token
   // the shared classifier already covers, so they need a grok-only branch.
   if (provider === "grok" && /not logged in|grok login|auth\.json/.test(text)) return true;
-  // Antigravity headless auth failures are provider-owned and may mention a
-  // credential without using the generic "authentication required" wording.
-  if (
-    provider === "antigravity" &&
-    /gemini_api_key|credential|sign in|token (?:is )?(?:missing|expired)|invalid token/.test(text)
-  ) {
-    return true;
-  }
   // Pi CLI logged-out / missing-key phrasings (kept in sync with isPiAuthError).
   return (
     provider === "pi" &&
@@ -672,14 +700,7 @@ function isConfiguration(text: string, base: Classification, provider: RuntimePr
     return true;
   }
   if (provider === "pi" && (isPiModelConfiguration(text) || isPiMcpConfiguration(text))) return true;
-  if (
-    provider === "antigravity" &&
-    /expected one conversation id|resume conversation mismatch|terminal result event|malformed antigravity stream|antigravity returned an error result/.test(
-      text,
-    )
-  ) {
-    return true;
-  }
+  if (isAntigravityProtocolConfiguration(text, base, provider)) return true;
   // Cursor CLI literal invalid-model / explicit-deny / trust-wall phrasings
   // (captured in Phase 0). Gated to the cursor provider: this classifier is
   // shared and configuration wins over capacity in the classify chain, so an
@@ -690,16 +711,40 @@ function isConfiguration(text: string, base: Classification, provider: RuntimePr
   );
 }
 
+function isAntigravityProtocolConfiguration(text: string, base: Classification, provider: RuntimeProvider): boolean {
+  if (provider !== "antigravity") return false;
+  // A process crash, signal termination, or premature exit where zero results or conversation IDs
+  // were observed is a provider process failure, not a configuration error, unless accompanied
+  // by genuine protocol violations (mismatched conversation IDs or malformed stream diagnostics).
+  if (/expected one (?:terminal result event|conversation id), observed 0\b/i.test(text)) {
+    const stripped = text.replace(/expected one (?:terminal result event|conversation id), observed 0\b/gi, "");
+    if (
+      !/expected one conversation id|resume conversation mismatch|terminal result event|malformed antigravity stream|antigravity returned an error result/i.test(
+        stripped,
+      )
+    ) {
+      return false;
+    }
+  }
+  if (
+    !/expected one conversation id|resume conversation mismatch|terminal result event|malformed antigravity stream|antigravity returned an error result/i.test(
+      text,
+    )
+  ) {
+    return false;
+  }
+  // An ERROR result or extra stream noise must not mask a recoverable
+  // quota/auth failure as a configuration problem.
+  if (isCapacity(text, base, undefined, provider) || isBillingLimit(text)) return false;
+  if (/authentication required|unauthenticated|not logged in/.test(text)) return false;
+  return true;
+}
+
 function configurationReason(text: string, base: Classification, provider: RuntimeProvider): string {
   if (provider === "codex" && isCodexServiceTierConfiguration(text)) return "codex_service_tier_unsupported";
   if (provider === "pi" && isPiModelConfiguration(text)) return "pi_model_configuration_error";
   if (provider === "pi" && isPiMcpConfiguration(text)) return "pi_mcp_unsupported";
-  if (
-    provider === "antigravity" &&
-    /expected one conversation id|resume conversation mismatch|terminal result event|malformed antigravity stream|antigravity returned an error result/.test(
-      text,
-    )
-  ) {
+  if (isAntigravityProtocolConfiguration(text, base, provider)) {
     return "antigravity_protocol_error";
   }
   return base.reasonCode === "unknown" ? "provider_configuration_error" : base.reasonCode;
