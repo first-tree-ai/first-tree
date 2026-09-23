@@ -159,8 +159,9 @@ After the installer completes successfully, sign in with the staging binary:
   installs, upgrading either (for example, via `first-tree-staging upgrade`)
   follows that channel's configured server target and updates only that
   channel's portable prefix. Existing legacy npm-mode installs retain their
-  machine-wide global npm update behavior. Dev is immune because its
-  source-checkout install mode short-circuits the upgrade path.
+  machine-wide global npm update behavior; managed Linux daemons perform that
+  update in a transient unit while the daemon is stopped. Dev is immune
+  because its source-checkout install mode short-circuits the upgrade path.
 
 ## Tearing down a dev install
 
