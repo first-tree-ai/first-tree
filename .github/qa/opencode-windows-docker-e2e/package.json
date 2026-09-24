@@ -1,0 +1,11 @@
+{
+  "name": "first-tree-opencode-cross-platform-qa",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check:windows-static": "node --check qa-provider.mjs && node --check windows/job-launch-wrapper.mjs && node --check windows/windows-harness.mjs && node windows/static-check.mjs"
+  },
+  "dependencies": {
+    "opencode-ai": "1.18.7"
+  }
+}
