@@ -1,5 +1,5 @@
 import { Readable } from "node:stream";
-import { MAX_ATTACHMENT_BYTES, MAX_MESSAGE_ATTACHMENT_REFS } from "@first-tree/shared";
+import { MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_FILENAME_BYTES, MAX_MESSAGE_ATTACHMENT_REFS } from "@first-tree/shared";
 import { eq } from "drizzle-orm";
 import { describe, expect, it, vi } from "vitest";
 import { attachments } from "../db/schema/attachments.js";
@@ -84,6 +84,30 @@ describe("Feishu resource hydration", () => {
     ]);
     expect(result.unavailableNotes).toHaveLength(4);
     expect(download).toHaveBeenCalledTimes(2);
+  });
+
+  it("truncates long Unicode filenames at the UTF-8 byte boundary", async () => {
+    const app = getApp();
+    const filename = "\u4e2d".repeat(86);
+    const bytes = Buffer.from("unicode-feishu-file");
+    const result = await hydrateFeishuResources(app.db, {
+      organizationId: DEFAULT_ORG_ID,
+      botBindingId: "bot-binding-unicode",
+      messageId: "om_unicode_message",
+      descriptors: [{ type: "file", fileKey: "unicode-file", fileName: filename, origin: "message" }],
+      download: vi.fn().mockResolvedValue({
+        stream: Readable.from([bytes]),
+        headers: { "content-type": "text/plain", "content-length": String(bytes.length) },
+      }),
+      attachmentObjectQuota: { maxOrganizationAttachments: 10_000 },
+    });
+
+    expect(result.unavailableNotes).toEqual([]);
+    expect(result.attachments).toHaveLength(1);
+    expect(result.attachments[0]?.filename).toBe("\u4e2d".repeat(MAX_ATTACHMENT_FILENAME_BYTES / 3));
+    expect(new TextEncoder().encode(result.attachments[0]?.filename ?? "").byteLength).toBe(
+      MAX_ATTACHMENT_FILENAME_BYTES,
+    );
   });
 
   it("never downloads more than the existing per-message attachment-ref cap", async () => {

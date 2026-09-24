@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
-import { MAX_ATTACHMENT_BYTES, MESSAGE_ATTACHMENT_RETENTION_DAYS } from "@first-tree/shared";
+import {
+  getAttachmentFilenameError,
+  MAX_ATTACHMENT_BYTES,
+  MESSAGE_ATTACHMENT_RETENTION_DAYS,
+} from "@first-tree/shared";
 import { and, asc, eq, inArray, isNotNull, isNull, lt, ne, or, type SQLWrapper, sql } from "drizzle-orm";
 import type { Database } from "../db/connection.js";
 import { agentTemplates } from "../db/schema/agent-templates.js";
@@ -158,9 +162,8 @@ function validateCreateInput(input: CreateAttachmentInput): void {
   if (input.mimeType.trim().length === 0) {
     throw new BadRequestError("Attachment mime type is required");
   }
-  if (input.filename.trim().length === 0) {
-    throw new BadRequestError("Attachment filename is required");
-  }
+  const filenameError = getAttachmentFilenameError(input.filename);
+  if (filenameError) throw new BadRequestError(filenameError);
   if (input.contentLength !== undefined) {
     if (!Number.isSafeInteger(input.contentLength) || input.contentLength <= 0) {
       throw new BadRequestError("Attachment Content-Length must be a positive integer");
