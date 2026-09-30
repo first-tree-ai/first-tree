@@ -2,6 +2,7 @@ import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { codexDesktopAppBinDirs } from "../../../runtime/install-locations.js";
 import {
   CodexBinaryUnusableError,
   CodexBinaryVerifyTransientError,
@@ -452,6 +453,43 @@ describe("codex binary resolution", () => {
 
     rmSync(chatGptCodex);
     expect(findCodexExecutableOnPath({ PATH: "" }, deps)).toBe(legacyCodex);
+  });
+
+  it.each(["system", "user"])("discovers the nested ChatGPT Codex CLI in a %s installation", (installation) => {
+    tmp = mkdtempSync(join(tmpdir(), "ft-codex-nested-app-"));
+    const home = join(tmp, "home");
+    const systemRoot = join(tmp, "system");
+    const appRoot = installation === "system" ? systemRoot : home;
+    const binDir = join(
+      appRoot,
+      "Applications",
+      "ChatGPT.app",
+      "Contents",
+      "Resources",
+      "codex-cli",
+      "CodexCLI.app",
+      "Contents",
+      "MacOS",
+    );
+    mkdirSync(binDir, { recursive: true });
+    const executable = join(binDir, "codex");
+    writeFileSync(executable, "#!/bin/sh\nexit 0\n");
+    chmodSync(executable, 0o755);
+
+    const desktopDirs = codexDesktopAppBinDirs(home, "darwin").map((dir) =>
+      dir.startsWith("/Applications/") ? join(systemRoot, dir) : dir,
+    );
+    expect(
+      findCodexExecutableOnPath(
+        { PATH: "", HOME: home },
+        {
+          platform: "linux",
+          loginShellPathDirs: () => [],
+          wellKnownDirs: () => [],
+          desktopAppDirs: () => desktopDirs,
+        },
+      ),
+    ).toBe(executable);
   });
 
   it("prefers a login-shell PATH codex over the desktop app CLI", () => {

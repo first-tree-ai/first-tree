@@ -43,6 +43,18 @@ describe("codexDesktopAppBinDirs", () => {
     expect(codexDesktopAppBinDirs("/Users/gandy", "darwin")).toEqual([
       join("/Applications", "ChatGPT.app", "Contents", "Resources"),
       join("/Users/gandy", "Applications", "ChatGPT.app", "Contents", "Resources"),
+      join("/Applications", "ChatGPT.app", "Contents", "Resources", "codex-cli", "CodexCLI.app", "Contents", "MacOS"),
+      join(
+        "/Users/gandy",
+        "Applications",
+        "ChatGPT.app",
+        "Contents",
+        "Resources",
+        "codex-cli",
+        "CodexCLI.app",
+        "Contents",
+        "MacOS",
+      ),
       join("/Applications", "Codex.app", "Contents", "Resources"),
       join("/Users/gandy", "Applications", "Codex.app", "Contents", "Resources"),
     ]);

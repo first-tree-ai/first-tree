@@ -176,6 +176,19 @@ export function codexDesktopAppBinDirs(home: string, platform: NodeJS.Platform =
   return [
     join("/Applications", "ChatGPT.app", "Contents", "Resources"),
     join(home, "Applications", "ChatGPT.app", "Contents", "Resources"),
+    // Newer ChatGPT releases embed Codex in a nested app bundle.
+    join("/Applications", "ChatGPT.app", "Contents", "Resources", "codex-cli", "CodexCLI.app", "Contents", "MacOS"),
+    join(
+      home,
+      "Applications",
+      "ChatGPT.app",
+      "Contents",
+      "Resources",
+      "codex-cli",
+      "CodexCLI.app",
+      "Contents",
+      "MacOS",
+    ),
     join("/Applications", "Codex.app", "Contents", "Resources"),
     join(home, "Applications", "Codex.app", "Contents", "Resources"),
   ];
