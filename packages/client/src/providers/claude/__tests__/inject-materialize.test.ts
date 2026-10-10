@@ -675,3 +675,56 @@ describe("claude-code inject-time managed Skill reconciliation", () => {
     await handler.shutdown();
   });
 });
+
+describe("claude-code external Context source", () => {
+  let previousHome: string | undefined;
+
+  beforeEach(() => {
+    // External mode is driven by `context_tree.repository` in client.yaml,
+    // which `resolveAgentContextSource` reads through FIRST_TREE_HOME.
+    previousHome = process.env.FIRST_TREE_HOME;
+    const configHome = join(workspaceRoot, "config-home");
+    mkdirSync(join(configHome, "config"), { recursive: true });
+    writeFileSync(
+      join(configHome, "config", "client.yaml"),
+      "server:\n  url: http://localhost:8000\ncontext_tree:\n  repository: acme/context\n",
+      "utf8",
+    );
+    process.env.FIRST_TREE_HOME = configHome;
+  });
+
+  afterEach(() => {
+    if (previousHome === undefined) delete process.env.FIRST_TREE_HOME;
+    else process.env.FIRST_TREE_HOME = previousHome;
+  });
+
+  it("starts and restarts on a config bump while the configured repository is unchanged", async () => {
+    // Every source re-check must carry the captured repository. A handler that
+    // drops it can never match the re-resolved external source, so each fresh
+    // handler fails the same way and the chat loops through recovery.
+    cachedConfig = makeConfig(1, []);
+    const handler = createClaudeCodeHandler({
+      runtimeProvider: "claude-code",
+      workspaceRoot,
+      agentName: "test-agent",
+      agentConfigCache,
+      contextSourceKind: "external",
+      contextTreeRepository: "acme/context",
+    });
+    const ctx = makeContext();
+
+    const startPromise = handler.start(makeMessage("m1", "first"), ctx, noopDeliveryToken());
+    resolveChatContext();
+    await startPromise;
+    await waitFor(() => state.observedInputs.length === 1);
+
+    // A config bump re-projects the workspace with a source re-resolution
+    // before restarting the query.
+    cachedConfig = makeConfig(2, [SCAN_SKILL]);
+    handler.inject(makeMessage("m2", "second"), noopDeliveryToken());
+    await waitFor(() => state.observedInputs.length === 2);
+    expect(state.observedInputs[1]).toContain("second");
+
+    await handler.shutdown();
+  });
+});

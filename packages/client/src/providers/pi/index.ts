@@ -870,12 +870,7 @@ export const createPiHandler: HandlerFactory = (config) => {
     await assertContextSourceCurrent({
       sessionCtx,
       sourceAuthorityRoot: workspaceRoot,
-      contextTree: {
-        kind: contextTree.kind,
-        path: contextTree.path,
-        repoUrl: contextTree.repoUrl,
-        branch: contextTree.branch,
-      },
+      contextTree,
     });
     if (rpcClient && !rpcClient.isClosed) {
       sessionCtx.log("pi spawn-scoped config changed; restarting RPC process against the stable session id");
@@ -888,12 +883,7 @@ export const createPiHandler: HandlerFactory = (config) => {
     await assertContextSourceCurrent({
       sessionCtx,
       sourceAuthorityRoot: workspaceRoot,
-      contextTree: {
-        kind: contextTree.kind,
-        path: contextTree.path,
-        repoUrl: contextTree.repoUrl,
-        branch: contextTree.branch,
-      },
+      contextTree,
     });
     // Empty model: inherit whatever the persisted Pi session already selected.
     // Clearing config does not force a host-default reset on an existing session file.
@@ -1519,12 +1509,7 @@ export const createPiHandler: HandlerFactory = (config) => {
       payload,
       payloadResolved,
       existingPayload: existingPayload ?? undefined,
-      contextTree: {
-        kind: contextTree.kind,
-        path: contextTree.path,
-        repoUrl: contextTree.repoUrl,
-        branch: contextTree.branch,
-      },
+      contextTree,
       reresolveSource: true,
       markInitComplete: false,
       atProjectionEntry: (): undefined => {
@@ -1907,12 +1892,7 @@ export const createPiHandler: HandlerFactory = (config) => {
       payload,
       payloadResolved,
       existingPayload: existingPayload ?? undefined,
-      contextTree: {
-        kind: contextTree.kind,
-        path: contextTree.path,
-        repoUrl: contextTree.repoUrl,
-        branch: contextTree.branch,
-      },
+      contextTree,
       atProjectionEntry: (): undefined => {
         // Sync fence at projection entry (first statement of
         // projectManagedWorkspace, before any await) — closes the microtask

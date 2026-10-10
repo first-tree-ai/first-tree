@@ -368,12 +368,7 @@ export const createAmpHandler: HandlerFactory = (config) => {
       payload,
       payloadResolved: runtimeConfig !== null,
       existingPayload,
-      contextTree: {
-        kind: contextTree.kind,
-        path: contextTree.path,
-        repoUrl: contextTree.repoUrl,
-        branch: contextTree.branch,
-      },
+      contextTree,
       reresolveSource: true,
       markInitComplete: true,
     });
@@ -768,12 +763,7 @@ export const createAmpHandler: HandlerFactory = (config) => {
       await assertContextSourceCurrent({
         sessionCtx,
         sourceAuthorityRoot: workspaceRoot,
-        contextTree: {
-          kind: contextTree.kind,
-          path: contextTree.path,
-          repoUrl: contextTree.repoUrl,
-          branch: contextTree.branch,
-        },
+        contextTree,
       });
       if (abort.signal.aborted || generation !== turnGeneration || !sessionActive) return false;
 
@@ -1017,12 +1007,7 @@ export const createAmpHandler: HandlerFactory = (config) => {
       runtimeConfig,
       payload,
       payloadResolved: runtimeConfig !== null,
-      contextTree: {
-        kind: contextTree.kind,
-        path: contextTree.path,
-        repoUrl: contextTree.repoUrl,
-        branch: contextTree.branch,
-      },
+      contextTree,
     });
     cwd = prepared.workspace;
     activeConfig = runtimeConfig;

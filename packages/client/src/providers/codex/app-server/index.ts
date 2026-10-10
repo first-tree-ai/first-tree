@@ -427,12 +427,7 @@ export const createCodexAppServerHandler: HandlerFactory = (config: HandlerConfi
       runtimeConfig,
       payload,
       payloadResolved: resolved,
-      contextTree: {
-        kind: contextTree.kind,
-        path: contextTree.path,
-        repoUrl: contextTree.repoUrl,
-        branch: contextTree.branch,
-      },
+      contextTree,
       beforeBriefing: async ({ workspace }) => {
         env = buildEnv(sessionCtx);
         if (workspaceOnly) {
@@ -544,12 +539,7 @@ export const createCodexAppServerHandler: HandlerFactory = (config: HandlerConfi
     await assertContextSourceCurrent({
       sessionCtx,
       sourceAuthorityRoot: workspaceRoot,
-      contextTree: {
-        kind: contextTree.kind,
-        path: contextTree.path,
-        repoUrl: contextTree.repoUrl,
-        branch: contextTree.branch,
-      },
+      contextTree,
     });
     try {
       result = await client.request("thread/start", {
@@ -578,12 +568,7 @@ export const createCodexAppServerHandler: HandlerFactory = (config: HandlerConfi
     await assertContextSourceCurrent({
       sessionCtx,
       sourceAuthorityRoot: workspaceRoot,
-      contextTree: {
-        kind: contextTree.kind,
-        path: contextTree.path,
-        repoUrl: contextTree.repoUrl,
-        branch: contextTree.branch,
-      },
+      contextTree,
     });
     try {
       const result = await client.request("thread/resume", {
@@ -609,12 +594,7 @@ export const createCodexAppServerHandler: HandlerFactory = (config: HandlerConfi
       await assertContextSourceCurrent({
         sessionCtx,
         sourceAuthorityRoot: workspaceRoot,
-        contextTree: {
-          kind: contextTree.kind,
-          path: contextTree.path,
-          repoUrl: contextTree.repoUrl,
-          branch: contextTree.branch,
-        },
+        contextTree,
       });
     } catch (sourceError) {
       if (!isContextSourceTransitionError(sourceError)) throw sourceError;
@@ -1754,12 +1734,7 @@ export const createCodexAppServerHandler: HandlerFactory = (config: HandlerConfi
         payload,
         existingPayload: activePayload ?? undefined,
         payloadResolved: true,
-        contextTree: {
-          kind: contextTree.kind,
-          path: contextTree.path,
-          repoUrl: contextTree.repoUrl,
-          branch: contextTree.branch,
-        },
+        contextTree,
         reresolveSource: true,
         markInitComplete: false,
       });

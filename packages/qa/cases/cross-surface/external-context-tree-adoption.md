@@ -25,7 +25,10 @@ Skill directories. Build and globally install the candidate CLI artifact.
    provider's actual PATH. Confirm login connects existing workspaces without
    changing their existing `AGENTS.md` or `CLAUDE.md` instructions.
 3. Start ordinary Claude and Codex sessions. Resolve and read the configured tree
-   from each session. Check the replacement Skill set and briefing agree. Check
+   from each session. Check the replacement Skill set and briefing agree. Keep
+   each chat going across a second turn, a runtime-config change, and a
+   resumed session: every turn must reach the provider, and the client log must
+   show no `session_context_source_changed` failures or recovery loop. Check
    a Cursor session retains First Tree Skills and an appropriate unresolved
    context-source briefing instead of referring to unavailable external Skills.
 4. Separately exercise Codex's workspace-only mode, whose HOME points at the

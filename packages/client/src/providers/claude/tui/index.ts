@@ -284,12 +284,7 @@ export const createClaudeCodeTuiHandler: HandlerFactory = (config) => {
     await assertContextSourceCurrent({
       sessionCtx,
       sourceAuthorityRoot: workspaceRoot,
-      contextTree: {
-        kind: contextTree.kind,
-        path: contextTree.path,
-        repoUrl: contextTree.repoUrl,
-        branch: contextTree.branch,
-      },
+      contextTree,
     });
 
     await newSession({
@@ -672,12 +667,7 @@ export const createClaudeCodeTuiHandler: HandlerFactory = (config) => {
             // `gitRepos: []` is then NOT authoritative, and the workspace
             // manifest write is deferred for this session.
             payloadResolved: resolvedPayload !== null && resolvedPayload !== undefined,
-            contextTree: {
-              kind: contextTree.kind,
-              path: contextTree.path,
-              repoUrl: contextTree.repoUrl,
-              branch: contextTree.branch,
-            },
+            contextTree,
           });
           cwd = prepared.workspace;
           chatContextForPrompt = prepared.chatContext;
@@ -734,12 +724,7 @@ export const createClaudeCodeTuiHandler: HandlerFactory = (config) => {
             payload,
             // See PR #869 baixiaohang round-3 P0 — same gate as start().
             payloadResolved: resumePayloadResolved !== null && resumePayloadResolved !== undefined,
-            contextTree: {
-              kind: contextTree.kind,
-              path: contextTree.path,
-              repoUrl: contextTree.repoUrl,
-              branch: contextTree.branch,
-            },
+            contextTree,
           });
           cwd = prepared.workspace;
           chatContextForPrompt = prepared.chatContext;

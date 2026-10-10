@@ -505,12 +505,7 @@ export const createGrokHandler: HandlerFactory = (config) => {
     await assertContextSourceCurrent({
       sessionCtx,
       sourceAuthorityRoot: workspaceRoot,
-      contextTree: {
-        kind: contextTree.kind,
-        path: contextTree.path,
-        repoUrl: contextTree.repoUrl,
-        branch: contextTree.branch,
-      },
+      contextTree,
     });
     if (cwd !== workspaceCwd || binary !== activeBinary || !sessionActive) {
       token.retry(messages, "grok_session_inactive");
@@ -791,12 +786,7 @@ export const createGrokHandler: HandlerFactory = (config) => {
           await assertContextSourceCurrent({
             sessionCtx,
             sourceAuthorityRoot: workspaceRoot,
-            contextTree: {
-              kind: contextTree.kind,
-              path: contextTree.path,
-              repoUrl: contextTree.repoUrl,
-              branch: contextTree.branch,
-            },
+            contextTree,
           });
         } catch (sourceError) {
           if (!isContextSourceTransitionError(sourceError)) throw sourceError;
@@ -949,12 +939,7 @@ export const createGrokHandler: HandlerFactory = (config) => {
         payload,
         existingPayload: activePayload ?? undefined,
         payloadResolved: true,
-        contextTree: {
-          kind: contextTree.kind,
-          path: contextTree.path,
-          repoUrl: contextTree.repoUrl,
-          branch: contextTree.branch,
-        },
+        contextTree,
         reresolveSource: true,
         markInitComplete: false,
       });
@@ -1080,12 +1065,7 @@ export const createGrokHandler: HandlerFactory = (config) => {
       runtimeConfig,
       payload,
       payloadResolved,
-      contextTree: {
-        kind: contextTree.kind,
-        path: contextTree.path,
-        repoUrl: contextTree.repoUrl,
-        branch: contextTree.branch,
-      },
+      contextTree,
     });
     const workspaceCwd = prepared.workspace;
     cwd = workspaceCwd;

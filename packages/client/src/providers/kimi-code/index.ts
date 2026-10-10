@@ -876,12 +876,7 @@ export const createKimiCodeHandler: HandlerFactory = (config) => {
       runtimeConfig,
       payload,
       payloadResolved,
-      contextTree: {
-        kind: contextTree.kind,
-        path: contextTree.path,
-        repoUrl: contextTree.repoUrl,
-        branch: contextTree.branch,
-      },
+      contextTree,
     });
     const workspaceCwd = prepared.workspace;
     cwd = workspaceCwd;
@@ -977,12 +972,7 @@ export const createKimiCodeHandler: HandlerFactory = (config) => {
         await assertContextSourceCurrent({
           sessionCtx,
           sourceAuthorityRoot: workspaceRoot,
-          contextTree: {
-            kind: contextTree.kind,
-            path: contextTree.path,
-            repoUrl: contextTree.repoUrl,
-            branch: contextTree.branch,
-          },
+          contextTree,
         });
         session = await activeHarness.createSession(options);
         sessionId = session.id;
@@ -1020,12 +1010,7 @@ export const createKimiCodeHandler: HandlerFactory = (config) => {
         await assertContextSourceCurrent({
           sessionCtx,
           sourceAuthorityRoot: workspaceRoot,
-          contextTree: {
-            kind: contextTree.kind,
-            path: contextTree.path,
-            repoUrl: contextTree.repoUrl,
-            branch: contextTree.branch,
-          },
+          contextTree,
         });
         session = await activeHarness.resumeSession(input);
         sessionId = session.id;

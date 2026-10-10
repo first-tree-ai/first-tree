@@ -1696,6 +1696,76 @@ describe("Pi handler", () => {
     await handler.shutdown();
   });
 
+  describe("external Context source", () => {
+    let previousHome: string | undefined;
+
+    // External mode is driven by `context_tree.repository` in client.yaml,
+    // which `resolveAgentContextSource` reads through FIRST_TREE_HOME.
+    function configureExternalRepository(repository: string): void {
+      const configHome = mkdtempSync(join(tmpdir(), "pi-external-home-"));
+      roots.push(configHome);
+      mkdirSync(join(configHome, "config"), { recursive: true });
+      writeFileSync(
+        join(configHome, "config", "client.yaml"),
+        `server:\n  url: http://localhost:8000\ncontext_tree:\n  repository: ${repository}\n`,
+        "utf8",
+      );
+      process.env.FIRST_TREE_HOME = configHome;
+    }
+
+    function createExternalHandler(specs: ProviderProcessSpec[]) {
+      return createPiHandler({
+        workspaceRoot,
+        agentName: "pi-test-agent",
+        runtimeProvider: "pi",
+        agentConfigCache: cache(runtimeConfig()),
+        piBinaryResolver: () => ({ ok: true, binary: "/host/pi" }),
+        providerProcessSupervisor: createSyntheticSupervisor(specs),
+        contextSourceKind: "external",
+        contextTreeRepository: "acme/context",
+      });
+    }
+
+    beforeEach(() => {
+      previousHome = process.env.FIRST_TREE_HOME;
+    });
+
+    afterEach(() => {
+      if (previousHome === undefined) delete process.env.FIRST_TREE_HOME;
+      else process.env.FIRST_TREE_HOME = previousHome;
+    });
+
+    it("starts when the configured repository is unchanged", async () => {
+      // The re-check must compare the captured repository, not drop it: a
+      // handler that loses it can never match the re-resolved source, so every
+      // fresh handler fails the same way and the chat loops through recovery.
+      configureExternalRepository("acme/context");
+      const specs: ProviderProcessSpec[] = [];
+      const handler = createExternalHandler(specs);
+      const events: SessionEvent[] = [];
+      const token = makeToken();
+
+      await handler.start(message("m-external", "work"), makeContext(events), token);
+
+      expect(specs.filter((spec) => spec.args.includes("--mode"))).toHaveLength(1);
+      expect(events).toContainEqual({ kind: "turn_end", payload: { status: "success" } });
+      await handler.shutdown();
+    });
+
+    it("requires handler replacement when the configured repository changed", async () => {
+      configureExternalRepository("acme/other-context");
+      const specs: ProviderProcessSpec[] = [];
+      const handler = createExternalHandler(specs);
+      const token = makeToken();
+
+      await expect(handler.start(message("m-external-moved", "work"), makeContext([]), token)).rejects.toMatchObject({
+        name: "ContextSourceTransitionError",
+      });
+      expect(specs.filter((spec) => spec.args.includes("--mode"))).toHaveLength(0);
+      await handler.shutdown();
+    });
+  });
+
   it("defers a changed MCP config while the captured RPC remains healthy", async () => {
     const agentCache = cache(runtimeConfig());
     const specs: ProviderProcessSpec[] = [];

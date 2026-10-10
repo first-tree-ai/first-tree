@@ -859,12 +859,7 @@ export const createClaudeCodeHandler: HandlerFactory = (config) => {
     await assertContextSourceCurrent({
       sessionCtx,
       sourceAuthorityRoot: workspaceRoot,
-      contextTree: {
-        kind: contextTree.kind,
-        path: contextTree.path,
-        repoUrl: contextTree.repoUrl,
-        branch: contextTree.branch,
-      },
+      contextTree,
     });
   }
 
@@ -1054,12 +1049,7 @@ export const createClaudeCodeHandler: HandlerFactory = (config) => {
           payload: cached.payload,
           payloadResolved: true,
           existingPayload: projectedPayload ?? undefined,
-          contextTree: {
-            kind: contextTree.kind,
-            path: contextTree.path,
-            repoUrl: contextTree.repoUrl,
-            branch: contextTree.branch,
-          },
+          contextTree,
           reresolveSource: true,
           markInitComplete: false,
           writeIdentityAndManifest: !legacyProjection,
@@ -1214,12 +1204,7 @@ export const createClaudeCodeHandler: HandlerFactory = (config) => {
     await assertContextSourceCurrent({
       sessionCtx,
       sourceAuthorityRoot: workspaceRoot,
-      contextTree: {
-        kind: contextTree.kind,
-        path: contextTree.path,
-        repoUrl: contextTree.repoUrl,
-        branch: contextTree.branch,
-      },
+      contextTree,
     });
     buildQuery(sessionId, sessionCtx, sessionId, activeProviderEnv ?? buildEnv(sessionCtx));
     const replay = unclosedSdkInputs.slice();
@@ -1373,12 +1358,7 @@ export const createClaudeCodeHandler: HandlerFactory = (config) => {
         payload: newPayload,
         payloadResolved: true,
         existingPayload: appliedPayload ?? undefined,
-        contextTree: {
-          kind: contextTree.kind,
-          path: contextTree.path,
-          repoUrl: contextTree.repoUrl,
-          branch: contextTree.branch,
-        },
+        contextTree,
         reresolveSource: true,
         markInitComplete: false,
         writeIdentityAndManifest: !legacyProjection,
@@ -1935,12 +1915,7 @@ export const createClaudeCodeHandler: HandlerFactory = (config) => {
         runtimeConfig,
         payload,
         payloadResolved,
-        contextTree: {
-          kind: contextTree.kind,
-          path: contextTree.path,
-          repoUrl: contextTree.repoUrl,
-          branch: contextTree.branch,
-        },
+        contextTree,
       });
       // Per agent-session-cwd-redesign: cwd is per-agent, shared by every
       // chat session. prepareManagedSession acquires the home (and writes the
@@ -2038,12 +2013,7 @@ export const createClaudeCodeHandler: HandlerFactory = (config) => {
           runtimeConfig,
           payload,
           payloadResolved,
-          contextTree: {
-            kind: contextTree.kind,
-            path: contextTree.path,
-            repoUrl: contextTree.repoUrl,
-            branch: contextTree.branch,
-          },
+          contextTree,
           reresolveSource: true,
           markInitComplete: false,
           writeIdentityAndManifest: false,
@@ -2090,12 +2060,7 @@ export const createClaudeCodeHandler: HandlerFactory = (config) => {
         runtimeConfig,
         payload,
         payloadResolved,
-        contextTree: {
-          kind: contextTree.kind,
-          path: contextTree.path,
-          repoUrl: contextTree.repoUrl,
-          branch: contextTree.branch,
-        },
+        contextTree,
       });
       cwd = prepared.workspace;
       chatContextForPrompt = prepared.chatContext;
