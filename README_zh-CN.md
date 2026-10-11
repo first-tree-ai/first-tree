@@ -3,6 +3,18 @@
 <p align="center">
   <a href="README.md">English</a> | 中文
 </p>
+<p align="center">
+  <a href="https://first-tree.ai/?utm_source=github&utm_medium=readme&utm_campaign=nav-app"><strong>打开应用</strong></a> ·
+  <a href="#开始使用"><strong>开始使用</strong></a> ·
+  <a href="#它如何工作"><strong>它如何工作</strong></a> ·
+  <a href="docs/quickstart.md"><strong>快速开始</strong></a> ·
+  <a href="docs/onboarding-guide.md"><strong>文档</strong></a> ·
+  <a href="CONTRIBUTING.md"><strong>贡献指南</strong></a> ·
+  <a href="https://github.com/agent-team-foundation/first-tree/discussions"><strong>讨论区</strong></a>
+</p>
+<p align="center">
+  中文说明用于帮助中文用户快速了解项目；GitHub 协作、实现细节和最新入口以<a href="README.md">英文 README</a>为准。
+</p>
 
 **让 Agent 带着团队上下文工作。**
 
@@ -87,7 +99,7 @@ First Tree 围绕 Context Tree 连接五个部分：
 打开 <https://first-tree.ai> 或你自己的部署登录。引导式流程会带你完成首次
 使用：给团队命名、连接一台电脑、创建第一个 Agent、开始工作。
 
-完整步骤见 [Quickstart](docs/quickstart.md)。
+完整步骤见[快速开始指南](docs/quickstart.md)。
 
 走到“连接一台电脑”这步时，引导流程会给出与发布通道匹配的 CLI 安装和登录
 命令。托管生产环境使用：
@@ -160,3 +172,4 @@ pnpm coverage:summary                       # 汇总覆盖率报告
 ## 许可证
 
 [Apache 2.0](LICENSE)
+
