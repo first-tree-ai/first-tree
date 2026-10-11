@@ -34,6 +34,7 @@ import {
 const NPM_INSTALL_TIMEOUT_MS = 5 * 60 * 1000;
 /** Short metadata probe used only to catch guaranteed npm-mode engine mismatch. */
 const NPM_METADATA_TIMEOUT_MS = 10 * 1000;
+const SYSTEMD_UPDATE_RUNNER = "systemd-run";
 
 export type InstallMode = "global" | "npx" | "source" | "portable";
 export type VersionLookupFailureCode = "server_url_not_configured";
@@ -171,10 +172,171 @@ export type ExecuteUpdateResult =
 
 export type InstallGlobalSpecOptions = {
   output?: (chunk: string) => void;
+  /** Run the install outside the supervisor cgroup when the daemon is managed. */
+  managed?: boolean;
 };
 
 function writeInstallOutput(options: InstallGlobalSpecOptions | undefined, chunk: string): void {
   (options?.output ?? print.line)(chunk);
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function systemdManagerArgs(): string[] {
+  return process.getuid?.() === 0 ? [] : ["--user"];
+}
+
+function systemdUpdateUnitName(): string {
+  const serviceUnit = channelConfig.serviceUnitFile.replace(/\.service$/u, "");
+  return `${serviceUnit}-update.service`;
+}
+
+/**
+ * Keep the npm tree quiescent while npm reifies it. The service stop is part
+ * of the transient unit rather than the daemon process, so systemd can kill
+ * the daemon's `systemd-run` client without killing this worker. The old
+ * package and bin links are moved aside first; a failed or interrupted npm
+ * run is rolled back before the service is started again.
+ */
+function systemdUpdateScript(): string {
+  const systemctl = ["systemctl", ...systemdManagerArgs()].map(shellQuote).join(" ");
+  const packageName = shellQuote(PACKAGE_NAME ?? "");
+  const binName = shellQuote(channelConfig.binName);
+  const aliasName = shellQuote(channelConfig.aliasName);
+  const serviceUnit = shellQuote(channelConfig.serviceUnitFile);
+
+  return [
+    "set -u",
+    "service_stopped=0",
+    "install_succeeded=0",
+    "rollback_safe=1",
+    "had_package=0",
+    "had_bin=0",
+    "had_alias=0",
+    "package_backup=",
+    "bin_backup=",
+    "alias_backup=",
+    "package_root=",
+    "prefix=",
+    "package_dir=",
+    "bin_dir=",
+    "bin_path=",
+    "alias_path=",
+    'path_exists() { [ -e "$1" ] || [ -L "$1" ]; }',
+    'remove_path() { if path_exists "$1"; then rm -rf -- "$1" || return 1; fi; }',
+    "restore_path() {",
+    '  original="$1"',
+    '  backup="$2"',
+    '  had="$3"',
+    '  remove_path "$original" || return 1',
+    '  if [ "$had" -eq 1 ]; then',
+    '    mv -- "$backup" "$original" || return 1',
+    "  fi",
+    "}",
+    "rollback() {",
+    "  rollback_status=0",
+    '  if [ -n "$package_dir" ]; then restore_path "$package_dir" "$package_backup" "$had_package" || rollback_status=1; fi',
+    '  if [ -n "$bin_path" ]; then restore_path "$bin_path" "$bin_backup" "$had_bin" || rollback_status=1; fi',
+    '  if [ -n "$alias_path" ]; then restore_path "$alias_path" "$alias_backup" "$had_alias" || rollback_status=1; fi',
+    '  return "$rollback_status"',
+    "}",
+    "finish() {",
+    "  status=$?",
+    '  if [ "$install_succeeded" -ne 1 ]; then',
+    "    rollback || rollback_safe=0",
+    "  else",
+    '    remove_path "$package_backup" || true',
+    '    remove_path "$bin_backup" || true',
+    '    remove_path "$alias_backup" || true',
+    "  fi",
+    '  if [ "$service_stopped" -eq 1 ] && { [ "$install_succeeded" -eq 1 ] || [ "$rollback_safe" -eq 1 ]; }; then',
+    `    ${systemctl} start ${serviceUnit} >/dev/null 2>&1 || start_status=$?`,
+    "    start_status=$" + "{start_status:-0}",
+    '    if [ "$status" -eq 0 ] && [ "$start_status" -ne 0 ]; then status=$start_status; fi',
+    "  fi",
+    '  exit "$status"',
+    "}",
+    "trap finish EXIT",
+    "trap 'exit 143' HUP INT TERM",
+    `npm_command="$1"; shift; package_name=${packageName}; bin_name=${binName}; alias_name=${aliasName}`,
+    `${systemctl} stop ${serviceUnit}`,
+    "stop_status=$?",
+    'if [ "$stop_status" -ne 0 ]; then exit "$stop_status"; fi',
+    "service_stopped=1",
+    'package_root=$("$npm_command" root --global 2>/dev/null) || exit 1',
+    'prefix=$("$npm_command" prefix --global 2>/dev/null) || exit 1',
+    'case "$package_root" in /*) ;; *) exit 1 ;; esac',
+    'case "$prefix" in /*) ;; *) exit 1 ;; esac',
+    'package_dir="$package_root/$package_name"',
+    'bin_dir="$prefix/bin"',
+    'bin_path="$bin_dir/$bin_name"',
+    'alias_path="$bin_dir/$alias_name"',
+    'package_backup="$package_dir.first-tree-update-backup.$$"',
+    'bin_backup="$bin_path.first-tree-update-backup.$$"',
+    'alias_backup="$alias_path.first-tree-update-backup.$$"',
+    'if path_exists "$package_backup" || path_exists "$bin_backup" || path_exists "$alias_backup"; then package_dir=; bin_path=; alias_path=; exit 1; fi',
+    'if path_exists "$package_dir"; then if mv -- "$package_dir" "$package_backup"; then had_package=1; else package_dir=; bin_path=; alias_path=; exit 1; fi; fi',
+    'if path_exists "$bin_path"; then if mv -- "$bin_path" "$bin_backup"; then had_bin=1; else bin_path=; alias_path=; exit 1; fi; fi',
+    'if path_exists "$alias_path"; then if mv -- "$alias_path" "$alias_backup"; then had_alias=1; else alias_path=; exit 1; fi; fi',
+    '"$npm_command" "$@"',
+    "install_status=$?",
+    'if [ "$install_status" -ne 0 ]; then exit "$install_status"; fi',
+    "install_succeeded=1",
+    "exit 0",
+  ].join("\n");
+}
+
+function systemdUpdateArgs(npm: ReturnType<typeof resolveNpmInvocation>): string[] {
+  const environment = [
+    "PATH",
+    "HOME",
+    "FIRST_TREE_HOME",
+    "NPM_CONFIG_PREFIX",
+    "NPM_CONFIG_USERCONFIG",
+    "NPM_CONFIG_REGISTRY",
+    "NPM_CONFIG_CACHE",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "NODE_EXTRA_CA_CERTS",
+    "NODE_OPTIONS",
+  ]
+    .map((name) => {
+      const value = process.env[name];
+      return value === undefined ? null : `--setenv=${name}=${value}`;
+    })
+    .filter((value): value is string => value !== null);
+
+  return [
+    ...systemdManagerArgs(),
+    "--unit",
+    systemdUpdateUnitName(),
+    "--collect",
+    "--wait",
+    "--pipe",
+    "--quiet",
+    "--service-type=oneshot",
+    `--property=TimeoutStartSec=${NPM_INSTALL_TIMEOUT_MS / 1000}s`,
+    ...environment,
+    "--",
+    "/bin/sh",
+    "-c",
+    systemdUpdateScript(),
+    "first-tree-npm-update",
+    npm.command,
+    ...npm.args,
+  ];
+}
+
+function isMissingCommandError(err: unknown): boolean {
+  return typeof err === "object" && err !== null && "code" in err && (err as { code?: unknown }).code === "ENOENT";
 }
 
 /**
@@ -736,18 +898,25 @@ export async function installGlobalSpec(
     writeInstallOutput(options, `  [update] ${prefixFailure.reason}\n`);
     return prefixFailure;
   }
+  const useSystemdRunner = options?.managed === true && process.platform === "linux";
   return new Promise((resolvePromise) => {
     const npm = resolveNpmInvocation(["install", "-g", `${PACKAGE_NAME}@${spec}`]);
-    // Bug 4: route the subprocess through ChildProcessRegistry so it is
-    // tracked and reaped by the lifecycle shutdown hook, AND give it a
-    // 5-minute hard timeout (network blip on the registry used to block
-    // the main process for 60s+ with no escalation). Failures are mapped
-    // through the error taxonomy so UpdateManager knows whether to retry.
+    const command = useSystemdRunner ? SYSTEMD_UPDATE_RUNNER : npm.command;
+    const args = useSystemdRunner ? systemdUpdateArgs(npm) : npm.args;
+    // Route the wrapper through ChildProcessRegistry so it is tracked and
+    // reaped by the lifecycle shutdown hook, AND give it a 5-minute hard
+    // timeout. In managed Linux mode the wrapper creates a transient unit;
+    // that unit stops the daemon, performs the install, rolls back on
+    // failure, and starts the daemon only after the package tree is complete.
+    // The transient worker therefore survives the supervisor killing this
+    // daemon's wrapper during the stop phase.
     let child: ChildProcess;
     try {
-      ({ child } = getChildProcessRegistry().spawn(npm.command, npm.args, {
+      ({ child } = getChildProcessRegistry().spawn(command, args, {
         category: "npm-install",
-        label: `npm install -g ${PACKAGE_NAME}@${spec}`,
+        label: useSystemdRunner
+          ? `systemd-run npm install -g ${PACKAGE_NAME}@${spec}`
+          : `npm install -g ${PACKAGE_NAME}@${spec}`,
         timeoutMs: NPM_INSTALL_TIMEOUT_MS,
         stdio: ["ignore", "pipe", "pipe"],
         shell: npm.shell,
@@ -755,12 +924,15 @@ export async function installGlobalSpec(
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const classification = classify(err, { source: "update" });
+      const runnerUnavailable = useSystemdRunner && isMissingCommandError(err);
       resolvePromise({
         ok: false,
         mode: "global",
-        reason: message,
-        retryable: classification.kind === ERROR_KINDS.TRANSIENT,
-        reasonCode: classification.reasonCode,
+        reason: runnerUnavailable
+          ? "Cannot run a managed npm update safely because systemd-run is unavailable; install the portable CLI or update manually."
+          : message,
+        retryable: runnerUnavailable ? false : classification.kind === ERROR_KINDS.TRANSIENT,
+        reasonCode: runnerUnavailable ? "systemd_update_runner_unavailable" : classification.reasonCode,
       });
       return;
     }
@@ -777,12 +949,15 @@ export async function installGlobalSpec(
     child.on("error", (err) => {
       const message = err instanceof Error ? err.message : String(err);
       const classification = classify(err, { source: "update" });
+      const runnerUnavailable = useSystemdRunner && isMissingCommandError(err);
       resolvePromise({
         ok: false,
         mode: "global",
-        reason: message,
-        retryable: classification.kind === ERROR_KINDS.TRANSIENT,
-        reasonCode: classification.reasonCode,
+        reason: runnerUnavailable
+          ? "Cannot run a managed npm update safely because systemd-run is unavailable; install the portable CLI or update manually."
+          : message,
+        retryable: runnerUnavailable ? false : classification.kind === ERROR_KINDS.TRANSIENT,
+        reasonCode: runnerUnavailable ? "systemd_update_runner_unavailable" : classification.reasonCode,
       });
     });
 

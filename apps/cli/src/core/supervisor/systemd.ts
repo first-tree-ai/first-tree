@@ -109,9 +109,10 @@ export function renderSystemdUnit(
   // Restart policy split:
   //   - on-failure  → operator-issued `systemctl stop` (clean exit 0) really stops.
   //   - SuccessExitStatus=0 makes that explicit.
-  //   - RestartForceExitStatus=75 keeps the self-update path working: the
-  //     UpdateManager exits 75 after `npm i -g`, systemd sees it as a
-  //     "must restart" signal and brings up the new binary.
+  //   - RestartForceExitStatus=75 remains the fallback self-update path for
+  //     portable installs and environments that do not use the managed Linux
+  //     npm handoff. Managed Linux npm updates run in a transient unit that
+  //     stops this service before touching its global package tree.
   // StartLimit* caps a crash storm (10 failures in 5 min → systemd holds back).
   // Normal client diagnostics go through the rotating NDJSON `client.log` when
   // FIRST_TREE_SERVICE_MODE=1; journald is only the supervisor fallback for
