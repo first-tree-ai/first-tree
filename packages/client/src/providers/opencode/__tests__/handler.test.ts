@@ -1716,7 +1716,7 @@ describe("OpenCode V1 handler", () => {
       runtimeProvider: "opencode",
       agentConfigCache: cache(runtimeConfig()),
       opencodeBinaryResolver: () => ({ ok: true, binary: "/host/opencode" }),
-      providerProcessSupervisor: createSyntheticSupervisor(specs, { version: "2.0.0" }),
+      providerProcessSupervisor: createSyntheticSupervisor(specs, { version: "3.0.0" }),
     });
 
     const token = deliveryToken();
