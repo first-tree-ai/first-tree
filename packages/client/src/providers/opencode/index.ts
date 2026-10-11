@@ -155,7 +155,6 @@ export function buildOpenCodeTurnArgs(input: {
   resumeSessionId: string | null;
   managedAgentName: string;
   v2?: boolean;
-  prompt?: string;
 }): string[] {
   const args = [
     "run",
@@ -169,10 +168,10 @@ export function buildOpenCodeTurnArgs(input: {
   ];
   if (input.v2) {
     // OpenCode 2.x runs against a background service and rejects the V1 `--dir`
-    // / `--log-level` flags. The working directory is inherited from the spawn
-    // cwd (or PWD); the prompt rides as a positional argument instead of stdin.
+    // / `--log-level` flags. The prompt is streamed on stdin (V2 merges piped
+    // stdin with any positional message), which avoids the OS argv size limit
+    // that a positional prompt would hit on large Chat Context payloads.
     args.push("--standalone");
-    if (input.prompt) args.push(input.prompt);
   } else {
     args.push("--dir", input.cwd, "--print-logs", "--log-level", "ERROR");
   }
@@ -1015,10 +1014,11 @@ export const createOpenCodeHandler: HandlerFactory = (config) => {
               resumeSessionId: expectedSessionId,
               managedAgentName: activeManagedAgentName,
               v2: isV2,
-              // V2 takes the prompt as a positional argument; V1 keeps it on stdin.
-              prompt: isV2 ? providerPrompt : undefined,
             }),
-            prompt: isV2 ? undefined : `${providerPrompt}\n`,
+            // Both V1 and V2 stream the prompt on stdin: V1 reads it directly,
+            // and V2 (run.ts) merges piped stdin with any positional message.
+            // This keeps large Chat Context payloads off argv and avoids E2BIG.
+            prompt: `${providerPrompt}\n`,
             // V2 selects its working directory from PWD / cwd; set it explicitly to
             // preserve the V1 `--dir` semantics under the background-service model.
             env: isV2 ? { ...configProjection.env, PWD: workspaceCwd } : configProjection.env,

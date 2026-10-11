@@ -152,29 +152,22 @@ function controlledOpenCodeSleep() {
 
 const SYNTHETIC_PROVIDER_SCRIPT = `
 const kind = process.env.FIRST_TREE_TEST_PROVIDER_KIND;
-const v2 = process.env.FIRST_TREE_TEST_PROVIDER_V2 === "1";
 if (kind === "version") {
   process.stdout.write(process.env.FIRST_TREE_TEST_PROVIDER_VERSION ?? "");
 } else if (kind === "db") {
   process.stdout.write('[{"ready":1}]\\n');
 } else {
-  const sid = process.env.FIRST_TREE_TEST_PROVIDER_SESSION_ID ?? "ses_new";
-  const finish = (text) => {
+  let input = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => { input += chunk; });
+  process.stdin.on("end", () => {
+    const sid = process.env.FIRST_TREE_TEST_PROVIDER_SESSION_ID ?? "ses_new";
     setTimeout(() => {
       process.stdout.write(JSON.stringify({type:"step_start",sessionID:sid,part:{sessionID:sid}}) + "\\n");
-      process.stdout.write(JSON.stringify({type:"text",sessionID:sid,part:{text:text}}) + "\\n");
+      process.stdout.write(JSON.stringify({type:"text",sessionID:sid,part:{text:input.trim()}}) + "\\n");
       process.stdout.write(JSON.stringify({type:"step_finish",sessionID:sid,part:{reason:"stop",tokens:{input:3,output:2}}}) + "\\n");
     }, Number(process.env.FIRST_TREE_TEST_PROVIDER_DELAY_MS ?? "0"));
-  };
-  if (v2) {
-    // V2 turns receive the prompt as a positional argument, not on stdin.
-    finish((process.env.FIRST_TREE_TEST_PROVIDER_PROMPT ?? "").trim());
-  } else {
-    let input = "";
-    process.stdin.setEncoding("utf8");
-    process.stdin.on("data", (chunk) => { input += chunk; });
-    process.stdin.on("end", () => finish(input.trim()));
-  }
+  });
 }
 `;
 
@@ -200,7 +193,6 @@ function createSyntheticSupervisor(
       const isDb = spec.args[0] === "db";
       const isVersion = spec.args[0] === "--version";
       const resumed = spec.args.includes("--session") ? spec.args[spec.args.indexOf("--session") + 1] : "ses_new";
-      const promptArg = v2 && spec.args[0] === "run" ? spec.args[spec.args.length - 1] : undefined;
       const child = spawn(process.execPath, ["-e", SYNTHETIC_PROVIDER_SCRIPT], {
         ...spec.options,
         env: {
@@ -210,11 +202,11 @@ function createSyntheticSupervisor(
           FIRST_TREE_TEST_PROVIDER_SESSION_ID: resumed,
           FIRST_TREE_TEST_PROVIDER_DELAY_MS: String(options.turnDelayMs ?? 0),
           FIRST_TREE_TEST_PROVIDER_V2: v2 ? "1" : "0",
-          ...(promptArg !== undefined ? { FIRST_TREE_TEST_PROVIDER_PROMPT: promptArg } : {}),
         },
         detached: false,
       });
-      if (!isDb && !isVersion && child.stdin && options.capturedInputs && !v2) {
+      // Both V1 and V2 turns stream the prompt on stdin; capture it for assertions.
+      if (!isDb && !isVersion && child.stdin && options.capturedInputs) {
         const stdin = child.stdin;
         const write = stdin.write.bind(stdin);
         stdin.write = ((chunk: string | Uint8Array, ...args: unknown[]) => {
@@ -1738,17 +1730,18 @@ describe("OpenCode V1 handler", () => {
     await handler.shutdown();
   });
 
-  it("accepts OpenCode 2.x and skips the V1 db gate, sending a positional prompt", async () => {
+  it("accepts OpenCode 2.x and skips the V1 db gate, streaming the prompt on stdin", async () => {
     const root = mkdtempSync(join(realpathSync(tmpdir()), "ft-opencode-v2-ok-"));
     roots.push(root);
     const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
     const handler = createOpenCodeHandler({
       workspaceRoot: root,
       agentName: "opencode-test-agent",
       runtimeProvider: "opencode",
       agentConfigCache: cache(runtimeConfig()),
       opencodeBinaryResolver: () => ({ ok: true, binary: "/host/opencode" }),
-      providerProcessSupervisor: createSyntheticSupervisor(specs, { version: "2.0.26" }),
+      providerProcessSupervisor: createSyntheticSupervisor(specs, { version: "2.0.26", capturedInputs: inputs }),
     });
 
     await expect(handler.start(message("m1", "v2 prompt"), context([], []), deliveryToken())).resolves.toMatchObject({
@@ -1760,11 +1753,34 @@ describe("OpenCode V1 handler", () => {
     expect(runArgs).toContain("--standalone");
     expect(runArgs).not.toContain("--dir");
     expect(runArgs).not.toContain("--log-level");
-    // The prompt rides as the positional message argument, right after --standalone.
-    const standaloneIndex = runArgs.indexOf("--standalone");
-    expect(standaloneIndex).toBeGreaterThan(-1);
-    const messageArg = runArgs[standaloneIndex + 1] ?? "";
-    expect(messageArg).toContain("v2 prompt");
+    // V2 streams the prompt on stdin (not argv) to avoid the OS argv size limit.
+    const messageArg = runArgs.find((arg) => arg === "v2 prompt");
+    expect(messageArg).toBeUndefined();
+    expect(inputs.join("")).toContain("v2 prompt");
+    await handler.shutdown();
+  });
+
+  it("keeps a large V2 prompt off argv and on stdin (no E2BIG)", async () => {
+    const root = mkdtempSync(join(realpathSync(tmpdir()), "ft-opencode-v2-large-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const big = "x".repeat(2 * 1024 * 1024); // 2 MiB, exceeds typical ARG_MAX on macOS.
+    const handler = createOpenCodeHandler({
+      workspaceRoot: root,
+      agentName: "opencode-test-agent",
+      runtimeProvider: "opencode",
+      agentConfigCache: cache(runtimeConfig()),
+      opencodeBinaryResolver: () => ({ ok: true, binary: "/host/opencode" }),
+      providerProcessSupervisor: createSyntheticSupervisor(specs, { version: "2.0.26", capturedInputs: inputs }),
+    });
+
+    await expect(handler.start(message("m1", big), context([], []), deliveryToken())).resolves.toMatchObject({
+      sessionId: "ses_new",
+    });
+    const runArgs = specs.find((spec) => spec.args[0] === "run")?.args ?? [];
+    expect(runArgs.join("").length).toBeLessThan(64 * 1024);
+    expect(inputs.join("")).toContain(big);
     await handler.shutdown();
   });
 
