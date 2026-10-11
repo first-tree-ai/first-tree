@@ -99,6 +99,23 @@ describe("runtime notice formatting", () => {
     expect(notice).not.toContain("sign in");
   });
 
+  it("formats Cursor resume-stuck notices as a fresh-session recovery, not generic config", () => {
+    const notice = formatProviderFailureRuntimeNotice(
+      payload({
+        provider: "cursor",
+        scope: "provider_turn",
+        category: "configuration",
+        reasonCode: "cursor_resume_stuck",
+        messagePreview:
+          "RetriableError: Agent turn stopped after repeated resume attempts made no progress\nError: command failed unexpectedly.",
+      }),
+    );
+    expect(notice).toContain("Cursor could not run this turn");
+    expect(notice).toContain("previous Cursor conversation could not be resumed");
+    expect(notice).toContain("Send your message again in this chat");
+    expect(notice).not.toContain("runtime configuration needs attention");
+  });
+
   it("formats Pi credential notices with host-local pi /login recovery", () => {
     const notice = formatProviderFailureRuntimeNotice(
       payload({

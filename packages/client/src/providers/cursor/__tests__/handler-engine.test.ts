@@ -113,6 +113,37 @@ function authFailureScript(): ChildScript {
   };
 }
 
+const CURSOR_RESUME_STUCK_TEXT =
+  "RetriableError: Agent turn stopped after repeated resume attempts made no progress\nError: command failed unexpectedly.";
+
+function resumeStuckScript(input: { sessionId: string; extraLines?: string[] }): ChildScript {
+  return (child) => {
+    child.stdout.emit(
+      "data",
+      line({
+        type: "system",
+        subtype: "init",
+        session_id: input.sessionId,
+        model: "Composer 2.5",
+        permissionMode: "default",
+      }),
+    );
+    for (const extra of input.extraLines ?? []) child.stdout.emit("data", extra);
+    child.stdout.emit(
+      "data",
+      line({
+        type: "result",
+        subtype: "error",
+        is_error: true,
+        result: CURSOR_RESUME_STUCK_TEXT,
+        session_id: input.sessionId,
+      }),
+    );
+    child.stdout.emit("end");
+    child.emit("close", 1, null);
+  };
+}
+
 function makeToken(): DeliveryToken & { completed: TurnOutcome[]; retried: string[] } {
   const completed: TurnOutcome[] = [];
   const retried: string[] = [];
@@ -1356,5 +1387,132 @@ describe("cursor handler — per-turn CLI transport", () => {
     expect(JSON.parse(readFileSync(join(workspaceRoot, ".cursor", "mcp.json"), "utf8"))).toEqual({
       mcpServers: { alpha: { command: "alpha-server" } },
     });
+  });
+
+  it("abandons a stuck Cursor session and retries the same delivery without --resume", async () => {
+    const events: SessionEvent[] = [];
+    const replaceCalls: Array<{ id: string; reason: string }> = [];
+    const { spawnFn, calls } = makeFakeSpawn([
+      resumeStuckScript({ sessionId: "sess-stuck" }),
+      successScript({ sessionId: "sess-fresh", text: "recovered" }),
+    ]);
+    const handler = makeHandler(spawnFn);
+    const token = makeToken();
+    const ctx = makeContext({
+      events,
+      replaceSessionId: (id, reason) => void replaceCalls.push({ id, reason }),
+    });
+
+    const started = await handler.start(makeMessage("m1", "continue"), ctx, token);
+    if (typeof started === "string") throw new Error("expected a start receipt");
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0]?.args).not.toContain("--resume");
+    expect(calls[1]?.args).not.toContain("--resume");
+    expect(token.completed).toMatchObject([{ status: "success" }]);
+    expect(started.sessionId).toBe("sess-fresh");
+    expect(replaceCalls.some((call) => call.reason === "cursor_resume_stuck_abandoned")).toBe(true);
+    expect(replaceCalls).toContainEqual({ id: "sess-fresh", reason: "cursor_session_id_confirmed" });
+    expect(
+      events.some(
+        (event) => event.kind === "error" && event.payload.message.includes("starting a fresh Cursor session"),
+      ),
+    ).toBe(true);
+  });
+
+  it("does not pass --resume after a stuck resume of a confirmed session", async () => {
+    const events: SessionEvent[] = [];
+    const replaceCalls: Array<{ id: string; reason: string }> = [];
+    const { spawnFn, calls } = makeFakeSpawn([
+      resumeStuckScript({ sessionId: "sess-old" }),
+      successScript({ sessionId: "sess-fresh", text: "recovered" }),
+    ]);
+    const handler = makeHandler(spawnFn);
+    const token = makeToken();
+
+    const resumed = await handler.resume(
+      makeMessage("m2", "continue"),
+      "sess-old",
+      makeContext({
+        events,
+        replaceSessionId: (id, reason) => void replaceCalls.push({ id, reason }),
+      }),
+      token,
+    );
+    if (typeof resumed === "string") throw new Error("expected a resume receipt");
+
+    expect(calls[0]?.args).toEqual(expect.arrayContaining(["--resume", "sess-old"]));
+    expect(calls[1]?.args).not.toContain("--resume");
+    expect(calls[1]?.args).not.toContain("sess-old");
+    expect(token.completed).toMatchObject([{ status: "success" }]);
+    expect(resumed.sessionId).toBe("sess-fresh");
+    expect(replaceCalls).toContainEqual({ id: "sess-fresh", reason: "cursor_session_id_confirmed" });
+  });
+
+  it("stops without a fresh-start retry when resume is stuck after assistant output", async () => {
+    const assistantLine = line({
+      type: "assistant",
+      message: { role: "assistant", content: [{ type: "text", text: "working on it" }] },
+      session_id: "sess-visible",
+    });
+    const { spawnFn, calls } = makeFakeSpawn([
+      resumeStuckScript({ sessionId: "sess-visible", extraLines: [assistantLine] }),
+      successScript({ sessionId: "must-not-spawn", text: "stale" }),
+    ]);
+    const handler = makeHandler(spawnFn);
+    const token = makeToken();
+
+    await handler.resume(makeMessage("m2", "continue"), "sess-visible", makeContext({ events: [] }), token);
+
+    expect(calls).toHaveLength(1);
+    expect(token.completed).toMatchObject([{ status: "error", completion: "consumed", reason: "cursor_resume_stuck" }]);
+  });
+
+  it("stops without a fresh-start retry when resume is stuck after a write tool effect", async () => {
+    const events: SessionEvent[] = [];
+    const replaceCalls: Array<{ id: string; reason: string }> = [];
+    const writeStarted = line({
+      type: "tool_call",
+      subtype: "started",
+      call_id: "tool_write",
+      tool_call: { writeToolCall: { args: { path: "/tmp/out.txt", contents: "x" } } },
+      session_id: "sess-effect",
+    });
+    const { spawnFn, calls } = makeFakeSpawn([
+      resumeStuckScript({ sessionId: "sess-effect", extraLines: [writeStarted] }),
+      successScript({ sessionId: "must-not-spawn", text: "stale" }),
+    ]);
+    const handler = makeHandler(spawnFn);
+    const token = makeToken();
+
+    await handler.resume(
+      makeMessage("m2", "continue"),
+      "sess-effect",
+      makeContext({
+        events,
+        replaceSessionId: (id, reason) => void replaceCalls.push({ id, reason }),
+      }),
+      token,
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(token.completed).toMatchObject([{ status: "error", completion: "consumed", reason: "cursor_resume_stuck" }]);
+    expect(replaceCalls.some((call) => call.reason === "cursor_resume_stuck_abandoned")).toBe(true);
+    expect(replaceCalls[0]?.id.startsWith(CURSOR_PENDING_SESSION_PREFIX)).toBe(true);
+  });
+
+  it("stops if a fresh-start recovery also reports resume stuck", async () => {
+    const { spawnFn, calls } = makeFakeSpawn([
+      resumeStuckScript({ sessionId: "sess-a" }),
+      resumeStuckScript({ sessionId: "sess-b" }),
+      successScript({ sessionId: "must-not-spawn", text: "stale" }),
+    ]);
+    const handler = makeHandler(spawnFn);
+    const token = makeToken();
+
+    await handler.start(makeMessage("m1", "hi"), makeContext({ events: [] }), token);
+
+    expect(calls).toHaveLength(2);
+    expect(token.completed).toMatchObject([{ status: "error", completion: "consumed", reason: "cursor_resume_stuck" }]);
   });
 });

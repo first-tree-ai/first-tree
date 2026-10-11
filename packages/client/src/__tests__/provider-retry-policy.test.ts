@@ -784,6 +784,27 @@ describe("classifyProviderFailure", () => {
     });
     expect(other.reasonCode).not.toBe("grok_platform_unsupported");
   });
+
+  it("classifies Cursor resume-exhausted phrasing as a hard stop, not unknown retry", () => {
+    const err = new Error(
+      "RetriableError: Agent turn stopped after repeated resume attempts made no progress\nError: command failed unexpectedly.",
+    );
+    const c = classifyProviderFailure(err, { provider: "cursor", scope: "provider_turn", source: "stream" });
+    expect(c).toMatchObject({ category: "configuration", reasonCode: "cursor_resume_stuck" });
+    expect(
+      decideProviderRetry({ classification: c, scope: "provider_turn", attempt: 1, replaySafety: "pre_provider" }),
+    ).toMatchObject({ action: "stop", terminalKind: "needs_operator" });
+    expect(
+      decideProviderRetry({ classification: c, scope: "provider_turn", attempt: 1, replaySafety: "unsafe" }),
+    ).toMatchObject({ action: "stop", reasonCode: "cursor_resume_stuck", terminalKind: "needs_operator" });
+    const other = classifyProviderFailure(err, { provider: "grok", scope: "provider_turn", source: "stream" });
+    expect(other.reasonCode).not.toBe("cursor_resume_stuck");
+    const mixedCase = classifyProviderFailure(
+      new Error("agent turn stopped after Repeated Resume Attempts Made No Progress"),
+      { provider: "cursor", scope: "provider_turn", source: "stream" },
+    );
+    expect(mixedCase.reasonCode).toBe("cursor_resume_stuck");
+  });
 });
 
 describe("decideProviderRetry", () => {
