@@ -21,7 +21,7 @@ surface, skills projection, or provider supervisor changes.
 
 - Run in the isolated QA cell selected by the plan: Docker plus a temporary source worktree, with an explicit native
   bridge only where the OS process authority cannot live inside Docker. Never modify the operator checkout.
-- Install a Pi version in the product's supported `>=0.80.5 <1.0.0` range on the client host using
+- Install a Pi version in the product's supported `>=0.80.5` range (any stable 0.x or 1.x release) on the client host using
   `npm install -g --ignore-scripts @earendil-works/pi-coding-agent`, then complete provider-owned setup by running
   `pi` then `/login`. The test may prove the login by completing a real turn, but must not read, copy, print, or
   archive provider credential files.
@@ -40,8 +40,8 @@ surface, skills projection, or provider supervisor changes.
   separate reasoning-effort control. Empty model keeps an existing persisted Pi session's model; only a brand-new
   session uses Pi's local default (no forced host-default reset on resume).
 - Runtime gates: the first active use launches `pi --version` through the provider supervisor and requires a stable
-  release in `>=0.80.5 <1.0.0`; older, `>=1.0.0`, prerelease, and unparseable output fail closed. Transient launch
-  timeouts remain retryable.
+  release at or above `0.80.5` (the RPC spawn contract is stable across 0.x and 1.x); only below-`0.80.5`, prerelease,
+  and unparseable output fail closed. Transient launch timeouts remain retryable.
 - Spawn contract: observe one long-lived
   `pi --mode rpc --no-extensions --no-skills --skill <cwd>/.agents/skills --no-prompt-templates --no-approve
   --tools read,bash,edit,write,grep,find,ls --session-id <stable-id>

@@ -411,7 +411,7 @@ describe("classifyProviderFailure", () => {
     expect(missing).toMatchObject({ category: "capability", reasonCode: "pi_binary_missing" });
 
     const unsupported = classifyProviderFailure(
-      new Error("Pi runtime provider mismatch: unsupported version. First Tree requires >=0.80.5 <1.0.0"),
+      new Error("Pi runtime provider mismatch: unsupported version. First Tree requires >=0.80.5"),
       { provider: "pi", scope: "session_start", source: "session" },
     );
     expect(unsupported).toMatchObject({ category: "capability", reasonCode: "pi_binary_unsupported" });

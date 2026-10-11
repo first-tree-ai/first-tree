@@ -121,8 +121,11 @@ describe("Pi binary resolution", () => {
   it("accepts the supported range and fails closed outside it", () => {
     expect(isSupportedPiVersion("0.80.5")).toBe(true);
     expect(isSupportedPiVersion("0.81.0")).toBe(true);
+    // Pi 1.x shares the stable RPC spawn contract, so it must pass the gate.
+    expect(isSupportedPiVersion("1.0.0")).toBe(true);
+    expect(isSupportedPiVersion("1.2.0")).toBe(true);
+    // Only below the floor, prerelease, and unparseable output fail closed.
     expect(isSupportedPiVersion("0.80.4")).toBe(false);
-    expect(isSupportedPiVersion("1.0.0")).toBe(false);
     expect(isSupportedPiVersion(null)).toBe(false);
   });
 });

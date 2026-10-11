@@ -15,7 +15,14 @@ import {
 
 /** Lowest published compatible CLI validated by the runtime contract. */
 export const PI_MINIMUM_VERSION = "0.80.5";
-export const PI_SUPPORTED_VERSION_RANGE = ">=0.80.5 <1.0.0";
+/**
+ * Compatible CLI range. There is no upper bound: the RPC spawn contract
+ * (`--mode rpc` and the V1 native tool set) is stable across Pi's 0.x and 1.x
+ * lines, so any stable release at or above {@link PI_MINIMUM_VERSION} is
+ * accepted. Prerelease and unparseable `--version` output still fail closed
+ * via {@link isSupportedPiVersion}.
+ */
+export const PI_SUPPORTED_VERSION_RANGE = ">=0.80.5";
 /** Official install / login — shared catalog (compatible re-exports). */
 export const PI_INSTALL_COMMAND = runtimeProviderInstallCommand("pi");
 export const PI_LOGIN_COMMAND = runtimeProviderLoginCommand("pi");
