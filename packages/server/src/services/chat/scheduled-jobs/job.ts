@@ -8,7 +8,8 @@ import type {
   DeleteCronJobResponse,
   UpdateCronJobRequest,
 } from "@first-tree/shared";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, exists, or, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import type { Database } from "../../../db/connection.js";
 import { agents } from "../../../db/schema/agents.js";
 import { chatMembership } from "../../../db/schema/chat-membership.js";
@@ -209,6 +210,64 @@ export async function listCronJobsForChat(db: Database, controlChatId: string): 
     .where(eq(cronJobs.controlChatId, controlChatId))
     .orderBy(asc(cronJobs.createdAt), asc(cronJobs.id));
   return Promise.all(rows.map((row) => projectCronJob(db, row)));
+}
+
+/**
+ * Every schedule owned by a user that the user can still see, across the orgs
+ * they belong to.
+ *
+ * The per-chat listing answers "what runs from here", which leaves a client
+ * that wants "what do I have scheduled" fanning out across every chat it knows
+ * about — one request per chat to find the handful that have any.
+ *
+ * Ownership alone is NOT the boundary. `requireCronJobAccess` gates reads and
+ * mutations alike on `requireChatAccess` first, and only adds an ownership
+ * check for mutations, so a job whose control chat the caller has lost access
+ * to is already invisible to them by id and through its chat. This listing
+ * intersects ownership with that same visibility rule — a direct membership
+ * row (speaker or watcher), or a speaker in the chat the caller manages — so
+ * revoking chat access removes the job here exactly as it does everywhere
+ * else. Losing access without losing org membership is a real transition:
+ * remove the manager's agent from the chat, then have the human leave it.
+ *
+ * Ordered by next run so the answer matches the question — what happens
+ * soonest — with paused jobs after, since a job with no next occurrence
+ * cannot be sorted among the ones that have one.
+ */
+export async function listCronJobsForUser(db: Database, userId: string): Promise<CronJob[]> {
+  const owner = alias(members, "cron_owner_member");
+  const managedAgent = alias(agents, "cron_managed_agent");
+
+  const directMembership = db
+    .select({ one: sql`1` })
+    .from(chatMembership)
+    .where(and(eq(chatMembership.chatId, cronJobs.controlChatId), eq(chatMembership.agentId, owner.agentId)));
+
+  const supervisedSpeaker = db
+    .select({ one: sql`1` })
+    .from(chatMembership)
+    .innerJoin(managedAgent, eq(managedAgent.uuid, chatMembership.agentId))
+    .where(
+      and(
+        eq(chatMembership.chatId, cronJobs.controlChatId),
+        eq(chatMembership.accessMode, "speaker"),
+        eq(managedAgent.managerId, owner.id),
+      ),
+    );
+
+  const rows = await db
+    .select({ job: cronJobs })
+    .from(cronJobs)
+    .innerJoin(owner, eq(owner.id, cronJobs.ownerMemberId))
+    .where(
+      and(
+        eq(owner.userId, userId),
+        eq(owner.status, "active"),
+        or(exists(directMembership), exists(supervisedSpeaker)),
+      ),
+    )
+    .orderBy(asc(cronJobs.nextRunAt), asc(cronJobs.createdAt), asc(cronJobs.id));
+  return Promise.all(rows.map((row) => projectCronJob(db, row.job)));
 }
 
 export async function getCronJobRow(db: Database, id: string): Promise<CronJobRow | null> {
