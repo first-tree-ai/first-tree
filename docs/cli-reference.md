@@ -284,7 +284,7 @@ needed if the daemon is already up.
 
 `--runtime` defaults to `claude-code`. The `opencode` runtime uses an
 operator-installed OpenCode CLI (`>=1.18.7 <3.0.0`, covering 1.x and 2.x) on macOS or Linux. Install
-it with `npm install -g opencode-ai@^2`, complete provider-owned
+it with `npm install -g @opencode/cli@^2`, complete provider-owned
 authentication with `opencode auth login`, and run `first-tree daemon probe`
 after installation to force immediate artifact/platform re-detection and
 upload the machine's advertised capabilities. First Tree never reads or relays

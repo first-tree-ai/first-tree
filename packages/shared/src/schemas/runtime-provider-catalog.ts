@@ -21,11 +21,13 @@ export const ANTIGRAVITY_INSTALL_COMMAND = "curl -fsSL https://antigravity.googl
  */
 export const OPENCODE_MINIMUM_VERSION = "1.18.7";
 /**
- * Fresh-install package hint. Decoupled from {@link OPENCODE_MINIMUM_VERSION}
- * so new installs resolve a supported 2.x line; the runtime version gate still
+ * Fresh-install package hint. The current OpenCode 2.x line publishes under the
+ * `@opencode/cli` package (the legacy `opencode-ai` family stops at 1.19.0), so
+ * new installs resolve a supported 2.x release. The runtime version gate still
  * accepts `>=1.18.7 <3.0.0` (both 1.x and 2.x).
  */
-export const OPENCODE_NPM_PACKAGE = `opencode-ai@^2`;
+export const OPENCODE_NPM_PACKAGE = `@opencode/cli@^2`;
+export const OPENCODE_V1_NPM_PACKAGE = `opencode-ai@^${OPENCODE_MINIMUM_VERSION}`;
 
 export const PI_NPM_PACKAGE = "@earendil-works/pi-coding-agent";
 export const KIMI_NPM_PACKAGE = "@moonshot-ai/kimi-code";

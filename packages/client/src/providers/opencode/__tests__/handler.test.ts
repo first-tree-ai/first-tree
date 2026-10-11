@@ -152,24 +152,29 @@ function controlledOpenCodeSleep() {
 
 const SYNTHETIC_PROVIDER_SCRIPT = `
 const kind = process.env.FIRST_TREE_TEST_PROVIDER_KIND;
+const v2 = process.env.FIRST_TREE_TEST_PROVIDER_V2 === "1";
 if (kind === "version") {
   process.stdout.write(process.env.FIRST_TREE_TEST_PROVIDER_VERSION ?? "");
 } else if (kind === "db") {
   process.stdout.write('[{"ready":1}]\\n');
 } else {
-  let input = "";
-  process.stdin.setEncoding("utf8");
-  process.stdin.on("data", (chunk) => {
-    input += chunk;
-  });
-  process.stdin.on("end", () => {
+  const sid = process.env.FIRST_TREE_TEST_PROVIDER_SESSION_ID ?? "ses_new";
+  const finish = (text) => {
     setTimeout(() => {
-      const sid = process.env.FIRST_TREE_TEST_PROVIDER_SESSION_ID ?? "ses_new";
       process.stdout.write(JSON.stringify({type:"step_start",sessionID:sid,part:{sessionID:sid}}) + "\\n");
-      process.stdout.write(JSON.stringify({type:"text",sessionID:sid,part:{text:input.trim()}}) + "\\n");
+      process.stdout.write(JSON.stringify({type:"text",sessionID:sid,part:{text:text}}) + "\\n");
       process.stdout.write(JSON.stringify({type:"step_finish",sessionID:sid,part:{reason:"stop",tokens:{input:3,output:2}}}) + "\\n");
     }, Number(process.env.FIRST_TREE_TEST_PROVIDER_DELAY_MS ?? "0"));
-  });
+  };
+  if (v2) {
+    // V2 turns receive the prompt as a positional argument, not on stdin.
+    finish((process.env.FIRST_TREE_TEST_PROVIDER_PROMPT ?? "").trim());
+  } else {
+    let input = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => { input += chunk; });
+    process.stdin.on("end", () => finish(input.trim()));
+  }
 }
 `;
 
@@ -188,12 +193,14 @@ function createSyntheticSupervisor(
   specs: ProviderProcessSpec[],
   options: { version?: string; turnDelayMs?: number; capturedInputs?: string[] } = {},
 ): ProviderProcessSupervisor {
+  const v2 = (options.version ?? "1.18.7").startsWith("2.");
   return {
     spawn(spec) {
       specs.push(spec);
       const isDb = spec.args[0] === "db";
       const isVersion = spec.args[0] === "--version";
       const resumed = spec.args.includes("--session") ? spec.args[spec.args.indexOf("--session") + 1] : "ses_new";
+      const promptArg = v2 && spec.args[0] === "run" ? spec.args[spec.args.length - 1] : undefined;
       const child = spawn(process.execPath, ["-e", SYNTHETIC_PROVIDER_SCRIPT], {
         ...spec.options,
         env: {
@@ -202,10 +209,12 @@ function createSyntheticSupervisor(
           FIRST_TREE_TEST_PROVIDER_VERSION: `${options.version ?? "1.18.7"}\n`,
           FIRST_TREE_TEST_PROVIDER_SESSION_ID: resumed,
           FIRST_TREE_TEST_PROVIDER_DELAY_MS: String(options.turnDelayMs ?? 0),
+          FIRST_TREE_TEST_PROVIDER_V2: v2 ? "1" : "0",
+          ...(promptArg !== undefined ? { FIRST_TREE_TEST_PROVIDER_PROMPT: promptArg } : {}),
         },
         detached: false,
       });
-      if (!isDb && !isVersion && child.stdin && options.capturedInputs) {
+      if (!isDb && !isVersion && child.stdin && options.capturedInputs && !v2) {
         const stdin = child.stdin;
         const write = stdin.write.bind(stdin);
         stdin.write = ((chunk: string | Uint8Array, ...args: unknown[]) => {
@@ -1708,6 +1717,59 @@ describe("OpenCode V1 handler", () => {
 
   it("fails closed through the supervisor before DB or turn launch outside the supported range", async () => {
     const root = mkdtempSync(join(realpathSync(tmpdir()), "ft-opencode-version-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const handler = createOpenCodeHandler({
+      workspaceRoot: root,
+      agentName: "opencode-test-agent",
+      runtimeProvider: "opencode",
+      agentConfigCache: cache(runtimeConfig()),
+      opencodeBinaryResolver: () => ({ ok: true, binary: "/host/opencode" }),
+      providerProcessSupervisor: createSyntheticSupervisor(specs, { version: "3.0.0" }),
+    });
+
+    const token = deliveryToken();
+    await handler.start(message("m1", "never submitted"), context([], []), token);
+    expect(token.complete).toHaveBeenCalledWith(
+      [expect.objectContaining({ id: "m1" })],
+      expect.objectContaining({ status: "error", completion: "consumed" }),
+    );
+    expect(specs.map((spec) => spec.args)).toEqual([["--version"]]);
+    await handler.shutdown();
+  });
+
+  it("accepts OpenCode 2.x and skips the V1 db gate, sending a positional prompt", async () => {
+    const root = mkdtempSync(join(realpathSync(tmpdir()), "ft-opencode-v2-ok-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const handler = createOpenCodeHandler({
+      workspaceRoot: root,
+      agentName: "opencode-test-agent",
+      runtimeProvider: "opencode",
+      agentConfigCache: cache(runtimeConfig()),
+      opencodeBinaryResolver: () => ({ ok: true, binary: "/host/opencode" }),
+      providerProcessSupervisor: createSyntheticSupervisor(specs, { version: "2.0.26" }),
+    });
+
+    await expect(handler.start(message("m1", "v2 prompt"), context([], []), deliveryToken())).resolves.toMatchObject({
+      sessionId: "ses_new",
+    });
+    // V2 has no `db` command, so only `--version` and `run` are launched.
+    expect(specs.map((spec) => spec.args[0])).toEqual(["--version", "run"]);
+    const runArgs = specs.find((spec) => spec.args[0] === "run")?.args ?? [];
+    expect(runArgs).toContain("--standalone");
+    expect(runArgs).not.toContain("--dir");
+    expect(runArgs).not.toContain("--log-level");
+    // The prompt rides as the positional message argument, right after --standalone.
+    const standaloneIndex = runArgs.indexOf("--standalone");
+    expect(standaloneIndex).toBeGreaterThan(-1);
+    const messageArg = runArgs[standaloneIndex + 1] ?? "";
+    expect(messageArg).toContain("v2 prompt");
+    await handler.shutdown();
+  });
+
+  it("fails closed on OpenCode 3.x before any turn", async () => {
+    const root = mkdtempSync(join(realpathSync(tmpdir()), "ft-opencode-v3-"));
     roots.push(root);
     const specs: ProviderProcessSpec[] = [];
     const handler = createOpenCodeHandler({

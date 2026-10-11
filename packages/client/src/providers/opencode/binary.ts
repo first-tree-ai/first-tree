@@ -6,7 +6,7 @@ import {
   runtimeProviderInstallCommand,
   runtimeProviderLoginCommand,
 } from "@first-tree/shared";
-import { prerelease, satisfies, valid } from "semver";
+import { major, prerelease, satisfies, valid } from "semver";
 import {
   automaticCandidateAllowed,
   getLoginShellPathDirs,
@@ -141,6 +141,17 @@ export function parseOpenCodeVersionOutput(output: string): string | null {
 export function isSupportedOpenCodeVersion(version: string | null): boolean {
   if (!version || valid(version) !== version || prerelease(version) !== null) return false;
   return satisfies(version, OPENCODE_SUPPORTED_VERSION_RANGE, { includePrerelease: false });
+}
+
+/**
+ * OpenCode 2.x is a separate runtime generation: it dropped the `db` command,
+ * changed `run` to a background-service/`--standalone` model, and moved the
+ * prompt to a positional argument. The handler branches on this to avoid the V1
+ * `db` readiness gate and V1-only `run` flags.
+ */
+export function isOpenCodeV2(version: string | null): boolean {
+  if (!version || valid(version) !== version || prerelease(version) !== null) return false;
+  return major(version) >= 2;
 }
 
 function whitespaceTokens(value: string): string[] {

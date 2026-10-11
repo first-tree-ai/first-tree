@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   findOpenCodeExecutableOnPath,
   formatOpenCodeBinaryMissingMessage,
+  isOpenCodeV2,
   isSupportedOpenCodeVersion,
   parseOpenCodeVersionOutput,
   resolveOpenCodeRuntimeBinary,
@@ -114,7 +115,7 @@ describe("OpenCode binary resolution", () => {
   });
 
   it("surfaces external install and provider-owned auth instructions", () => {
-    expect(formatOpenCodeBinaryMissingMessage("not found")).toContain("npm install -g opencode-ai@^2");
+    expect(formatOpenCodeBinaryMissingMessage("not found")).toContain("npm install -g @opencode/cli@^2");
     expect(formatOpenCodeBinaryMissingMessage("not found")).toContain("opencode auth login");
   });
 
@@ -144,5 +145,17 @@ describe("OpenCode binary resolution", () => {
     expect(isSupportedOpenCodeVersion("01.18.7")).toBe(false);
     expect(isSupportedOpenCodeVersion("1.18.7_suffix")).toBe(false);
     expect(isSupportedOpenCodeVersion(null)).toBe(false);
+  });
+
+  it("classifies the V1/V2 runtime generation from the parsed version", () => {
+    expect(isOpenCodeV2("1.18.7")).toBe(false);
+    expect(isOpenCodeV2("1.19.0")).toBe(false);
+    expect(isOpenCodeV2("2.0.0")).toBe(true);
+    expect(isOpenCodeV2("2.0.26")).toBe(true);
+    expect(isOpenCodeV2("2.99.99")).toBe(true);
+    expect(isOpenCodeV2("3.0.0")).toBe(true);
+    expect(isOpenCodeV2("2.0.0-beta.1")).toBe(false);
+    expect(isOpenCodeV2("v2.0.26")).toBe(false);
+    expect(isOpenCodeV2(null)).toBe(false);
   });
 });

@@ -121,7 +121,7 @@ describe("web provider surfaces derived from shared catalog", () => {
     expect(buildInstallCommand("pi")).toBe(
       "npm install -g --ignore-scripts @earendil-works/pi-coding-agent\npi # then run /login",
     );
-    expect(buildInstallCommand("opencode")).toBe("npm install -g opencode-ai@^2\nopencode auth login");
+    expect(buildInstallCommand("opencode")).toBe("npm install -g @opencode/cli@^2\nopencode auth login");
     expect(buildInstallCommand("amp")).toBe("curl -fsSL https://ampcode.com/install.sh | bash\namp login");
     expect(providerInstallHint("amp", "linux")).toContain("ampcode.com/install.sh");
     expect(buildInstallCommand("deepseek-harness")).toContain("export DEEPSEEK_API_KEY=<your DeepSeek API key>");
@@ -146,7 +146,7 @@ describe("web provider surfaces derived from shared catalog", () => {
     expect(providerInstallHint("codex", "darwin")).toContain("npm install -g @openai/codex");
     expect(providerInstallHint("codex", "darwin")).not.toContain("codex login");
     expect(providerInstallHint("codex", "darwin")).not.toContain("Install the OpenAI Codex CLI");
-    expect(providerInstallHint("opencode", "linux")).toContain("opencode-ai@^2");
+    expect(providerInstallHint("opencode", "linux")).toContain("@opencode/cli@^2");
     expect(providerInstallHint("claude-code-tui", "darwin", "tmux not found")).toContain("brew install tmux");
     expect(providerInstallHint("claude-code-tui", "darwin", "tmux not found")).not.toContain(
       "npm install -g @anthropic-ai/claude-code",
