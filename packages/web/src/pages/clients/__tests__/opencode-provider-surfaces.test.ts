@@ -15,7 +15,7 @@ describe("OpenCode provider surfaces", () => {
   });
 
   it("shows the pinned package family and provider-owned login command", () => {
-    expect(buildInstallCommand("opencode")).toBe("npm install -g opencode-ai@^1.18.7\nopencode auth login");
+    expect(buildInstallCommand("opencode")).toBe("npm install -g opencode-ai@^2\nopencode auth login");
     expect(providerInstallHint("opencode", "win32")).toContain("opencode auth login");
     expect(providerInstallHint("opencode", "win32")).toContain("Windows PC");
   });

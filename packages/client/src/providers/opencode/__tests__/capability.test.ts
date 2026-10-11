@@ -16,7 +16,7 @@ describe("OpenCode install-only capability", () => {
   it("reports a missing external runtime with actionable setup copy", async () => {
     const result = await probeOpenCodeCapability({ findOnPath: () => null, env: {} });
     expect(result).toMatchObject({ state: "missing", available: false });
-    expect(result.error).toContain("npm install -g opencode-ai@^1.18.7");
+    expect(result.error).toContain("npm install -g opencode-ai@^2");
     expect(result.error).toContain("opencode auth login");
   });
 

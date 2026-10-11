@@ -20,7 +20,7 @@ surface, or provider supervisor changes.
 
 - Run in the isolated QA cell selected by the plan: Docker plus a temporary source worktree, with an explicit native
   bridge only where the OS process authority cannot live inside Docker. Never modify the operator checkout.
-- Install an OpenCode version in the product's supported `>=1.18.7 <2.0.0` range on the client host and complete provider-owned setup with
+- Install an OpenCode version in the product's supported `>=1.18.7 <3.0.0` range (1.x and 2.x) on the client host and complete provider-owned setup with
   `opencode auth login`. The test may prove the login by completing a real turn, but must not read, copy, print, or
   archive provider credential files.
 - Use disposable source, MCP, and Context Tree fixtures. Provider tool calls must not modify the product checkout.
@@ -35,7 +35,7 @@ surface, or provider supervisor changes.
   an empty model, accepts an exact provider-native `provider/model` string, and exposes no separate reasoning-effort
   control.
 - Runtime gates: the first active use launches `opencode --version` through the provider supervisor and requires a
-  stable release in `>=1.18.7 <2.0.0`; prerelease, older, major-two, and unparseable output fail closed. It then
+  stable release in `>=1.18.7 <3.0.0` (1.x and 2.x); prerelease, older, major-three, and unparseable output fail closed. It then
   serially runs `opencode db "SELECT 1 AS ready" --format json` before concurrent
   per-turn processes may use the same client data home.
 - Private projection: each handler supplies uniquely namespaced First Tree primary-agent and MCP keys so OpenCode's

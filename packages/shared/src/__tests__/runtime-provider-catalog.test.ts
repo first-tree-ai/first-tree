@@ -187,7 +187,7 @@ describe("runtime provider identity + catalog completeness", () => {
 
   it("locks product-critical strings, OpenCode version, and preferred-runtime priority", () => {
     expect(OPENCODE_MINIMUM_VERSION).toBe("1.18.7");
-    expect(OPENCODE_NPM_PACKAGE).toBe(`opencode-ai@^${OPENCODE_MINIMUM_VERSION}`);
+    expect(OPENCODE_NPM_PACKAGE).toBe("opencode-ai@^2");
     expect(runtimeProviderInstallCommand("pi")).toBe("npm install -g --ignore-scripts @earendil-works/pi-coding-agent");
     expect(runtimeProviderInstallCommand("opencode")).toBe(`npm install -g ${OPENCODE_NPM_PACKAGE}`);
     expect(runtimeProviderInstallCommand("cursor")).toBe("curl https://cursor.com/install -fsS | bash");

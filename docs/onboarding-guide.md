@@ -76,7 +76,7 @@ because an agent is permanently bound to exactly one client machine.
 `--runtime` accepts `claude-code`, `codex`, `cursor`, `grok`, `kimi-code`, or
 `opencode`, and defaults to `claude-code`.
 OpenCode requires an operator-installed CLI (`npm install -g
-opencode-ai@^1.18.7`) plus provider-owned authentication (`opencode auth login`)
+opencode-ai@^2`) plus provider-owned authentication (`opencode auth login`)
 on macOS or Linux.
 After installing a provider, run `first-tree daemon probe` to force immediate
 artifact/platform re-detection and upload the machine's advertised
