@@ -1807,10 +1807,16 @@ export class SessionRuntime {
 
     try {
       await postProviderFailureRuntimeNotice(this.config.sdk, chatId, payload);
-      if (mutationLeaseValid && !mutationLeaseValid()) return { kind: "posted" };
+      // The notice is durable in the chat once posted. Clear the pending slot
+      // even when the settlement lease turned invalid while the post was in
+      // flight: a surviving payload is re-marked onto unacked deliveries at the
+      // next suspend and reposted on every redelivery, which replayed one stale
+      // quota notice after every later successful turn. The identity check
+      // still protects a newer payload captured by a replacement route.
       if (this.projection.isSameSession(chatId, entry) && entry.pendingRuntimeFailureNotice === payload) {
         entry.pendingRuntimeFailureNotice = null;
       }
+      if (mutationLeaseValid && !mutationLeaseValid()) return { kind: "posted" };
       return { kind: "posted" };
     } catch (err) {
       if (mutationLeaseValid && !mutationLeaseValid()) return { kind: "failed" };

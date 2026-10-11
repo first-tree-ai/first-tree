@@ -2540,6 +2540,83 @@ describe("SessionRuntime edge coverage", () => {
     await sm.shutdown();
   });
 
+  it("clears a posted pending runtime failure notice even when the settlement lease turns invalid", async () => {
+    let oldToken: Parameters<AgentHandler["start"]>[2] | undefined;
+    let signalNoticeStarted: (() => void) | undefined;
+    let resolveNotice: (() => void) | undefined;
+    const noticeStarted = new Promise<void>((resolve) => {
+      signalNoticeStarted = resolve;
+    });
+    const noticeGate = new Promise<void>((resolve) => {
+      resolveNotice = resolve;
+    });
+    const routedHandler = handler({
+      start: vi.fn().mockImplementation(async (_message, _ctx, token) => {
+        oldToken = token;
+        return { sessionId: "notice-lease-session", route: { kind: "owned" as const, mode: "queued" as const } };
+      }),
+    });
+    const ackEntry = vi.fn<(entryId: number) => Promise<void>>().mockResolvedValue(undefined);
+    const recoverChat = vi.fn<(chatId: string) => Promise<void>>().mockResolvedValue(undefined);
+    const sendMessage = vi.fn().mockImplementation(async () => {
+      signalNoticeStarted?.();
+      await noticeGate;
+      return { id: "runtime-notice-lease-message" };
+    });
+    const sm = makeRuntime({
+      handlers: [routedHandler, handler()],
+      ackEntry,
+      recoverChat,
+      sdk: { ...mockSdk(), sendMessage } as unknown as FirstTreeHubSDK,
+    });
+    const i = internals(sm);
+    const chatId = "chat-notice-lease-invalid";
+    const entry = mockEntry({ id: 82, chatId, messageId: "msg-notice-lease-invalid" });
+    const message = messageFromEntry(entry);
+    const stalePayload: ProviderRetryEventPayload = {
+      event: "provider_failure_terminal",
+      provider: "codex",
+      scope: "provider_turn",
+      category: "provider_capacity",
+      reasonCode: "provider_quota_exhausted",
+      replaySafety: "provider_entered",
+      userSeverity: "error",
+      messagePreview: "Individual quota reached. Resets in 1h5m4s.",
+    };
+
+    await sm.dispatch(entry);
+    const entryRef = i.projection.sessions.get(chatId);
+    if (!entryRef || !oldToken) throw new Error("notice lease route was not captured");
+    entryRef.pendingRuntimeFailureNotice = stalePayload;
+    const staleCompletion = oldToken.complete(message, {
+      status: "error",
+      terminal: true,
+      completion: "consumed",
+      reason: "unsafe_replay",
+    });
+    await noticeStarted;
+
+    // Suspend and resume while the notice post is in flight: the replacement
+    // route invalidates the old delivery settlement lease before the post lands.
+    await sm.handleCommand(chatId, "session:suspend");
+    await sm.handleCommand(chatId, "session:resume");
+    resolveNotice?.();
+    await staleCompletion;
+
+    // Regression: the payload survived on the entry here and was re-marked onto
+    // unacked ledger entries at the next suspend, reposting the identical stale
+    // quota notice after every later successful turn. A posted notice is
+    // durable in the chat, so the pending slot must be cleared regardless of
+    // the (now invalid) settlement lease. Settlement itself stays protected:
+    // the ACK is still skipped for the invalidated route.
+    const currentEntry = i.projection.sessions.get(chatId);
+    expect(currentEntry?.pendingRuntimeFailureNotice).toBeNull();
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(ackEntry).not.toHaveBeenCalled();
+
+    await sm.shutdown();
+  });
+
   it("runs post-settlement cleanup when a canceled resume materializes resources late", async () => {
     let signalResumeStarted: (() => void) | undefined;
     let resolveResume: (() => void) | undefined;
