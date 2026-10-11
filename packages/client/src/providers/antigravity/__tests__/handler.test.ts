@@ -206,13 +206,18 @@ function createControlledSupervisor(
   outputLines: readonly string[],
   outputLinesByTurn: readonly (readonly string[])[] = [],
   closeAfterTurn: readonly boolean[] = [],
+  closeExitCode = 0,
+  stderrLines: readonly string[] = [],
+  stderrLinesByTurn: readonly (readonly string[])[] = [],
 ): ProviderProcessSupervisor {
   let turn = 0;
   return {
     spawn(spec) {
       specs.push(spec);
-      const currentOutputLines = outputLinesByTurn[turn] ?? outputLines;
-      const shouldCloseAfterOutput = closeAfterTurn[turn] ?? false;
+      const turnIndex = turn;
+      const currentOutputLines = outputLinesByTurn[turnIndex] ?? outputLines;
+      const currentStderrLines = stderrLinesByTurn[turnIndex] ?? stderrLines;
+      const shouldCloseAfterOutput = closeAfterTurn[turnIndex] ?? false;
       turn += 1;
       const stdin = new PassThrough();
       const stdout = new PassThrough();
@@ -230,7 +235,7 @@ function createControlledSupervisor(
         closed = true;
         stdout.end();
         stderr.end();
-        queueMicrotask(() => child.emit("close", 0, null));
+        queueMicrotask(() => child.emit("close", closeExitCode, null));
       };
       const child = Object.assign(new EventEmitter(), {
         pid: undefined,
@@ -249,6 +254,7 @@ function createControlledSupervisor(
       }) as typeof stdin.write;
       setImmediate(() => {
         for (const line of currentOutputLines) stdout.write(`${line}\n`);
+        for (const line of currentStderrLines) stderr.write(`${line}\n`);
         if (shouldCloseAfterOutput) complete();
       });
       return { child, exited: new Promise<void>((resolve) => child.once("close", () => resolve())) };
@@ -412,7 +418,7 @@ process.stdin.on("end", () => {
   JSON.parse(input.trim());
   process.stdout.write(JSON.stringify({event:"init",conversation_id:conversationId}) + "\\n");
   if (turn === 0) {
-    process.stdout.write(JSON.stringify({event:"result",result:{conversation_id:conversationId,status:"ERROR",response:"failed",usage:{input_tokens:3,cache_read_tokens:1,output_tokens:2}}}) + "\\n");
+    process.stdout.write(JSON.stringify({event:"result",result:{conversation_id:conversationId,status:"ERROR",response:"",error:"failed",usage:{input_tokens:3,cache_read_tokens:1,output_tokens:2}}}) + "\\n");
     process.exitCode = 1;
     return;
   }
@@ -675,12 +681,10 @@ process.stdin.on("end", () => {
   });
 
   it.each([
-    ["suspend", true],
-    ["shutdown", true],
-    ["suspend", false],
-    ["shutdown", false],
-  ] as const)("preserves the exact conversation and handles a mutating first turn on %s with settleProviderEntered=%s", async (lifecycle, shouldSettleProviderEntered) => {
-    const root = mkdtempSync(join(tmpdir(), `ft-antigravity-lifecycle-${lifecycle}-`));
+    "suspend",
+    "shutdown",
+  ] as const)("operator %s with settleProviderEntered consumes a mutating turn without a terminal provider-failure notice", async (lifecycle) => {
+    const root = mkdtempSync(join(tmpdir(), `ft-antigravity-lifecycle-settle-${lifecycle}-`));
     roots.push(root);
     const specs: ProviderProcessSpec[] = [];
     const inputs: string[] = [];
@@ -717,18 +721,27 @@ process.stdin.on("end", () => {
     await vi.waitFor(() =>
       expect(events.some((event) => (event as { kind?: string }).kind === "tool_call")).toBe(true),
     );
-    const lifecycleOptions = shouldSettleProviderEntered ? { settleProviderEntered: true } : undefined;
-    if (lifecycle === "suspend") await handler.suspend("test lifecycle suspend", lifecycleOptions);
-    else await handler.shutdown("test lifecycle shutdown", lifecycleOptions);
+    if (lifecycle === "suspend") {
+      await handler.suspend("operator_suspended", { settleProviderEntered: true });
+    } else {
+      await handler.shutdown("runtime switched by server", { settleProviderEntered: true });
+    }
 
     const started = await startPromise;
     expect(started.sessionId).toBe("conversation-lifecycle");
-    expect(started.continuation).toBeUndefined();
+    expect(started.continuation).toEqual({
+      kind: "provider_continuation",
+      provider: "antigravity",
+      sessionId: "conversation-lifecycle",
+      messageId: "m-lifecycle",
+    });
     expect(token.retry).not.toHaveBeenCalled();
     expect(token.complete).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ status: "error", completion: "consumed", reason: "unsafe_replay" }),
     );
+    expect(providerRetryEventNames(events)).toEqual([]);
+    expect(JSON.stringify(events)).not.toContain("Antigravity turn cancelled during a lifecycle transition");
 
     const recoveryToken = deliveryToken();
     const recoveryMessage = message("m-lifecycle", "mutate this");
@@ -751,8 +764,518 @@ process.stdin.on("end", () => {
     await handler.shutdown();
   });
 
-  it("routes a pre-provider timeout through retry settlement", async () => {
-    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-pre-provider-timeout-"));
+  it.each([
+    "suspend",
+    "shutdown",
+  ] as const)("plain %s of a provider-entered mutating turn never re-sends the original prompt", async (lifecycle) => {
+    const root = mkdtempSync(join(tmpdir(), `ft-antigravity-lifecycle-noreplay-${lifecycle}-`));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const helloOutput = [
+      JSON.stringify({ event: "init", conversation_id: "conversation-lifecycle" }),
+      JSON.stringify({
+        event: "result",
+        result: { conversation_id: "conversation-lifecycle", status: "SUCCESS", response: "hello" },
+      }),
+    ];
+    const mutatingOutput = [
+      JSON.stringify({ event: "init", conversation_id: "conversation-lifecycle" }),
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "conversation-lifecycle",
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "run_command",
+          tool_call_id: "call-lifecycle",
+          tool_info: { parameters: { command: "touch side-effect-marker" } },
+        },
+      }),
+    ];
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(
+        specs,
+        inputs,
+        helloOutput,
+        [helloOutput, mutatingOutput],
+        [true, false],
+      ),
+      antigravityTurnTimeoutMs: 5_000,
+    });
+    await handler.start(message("m-hello", "start the conversation"), sessionCtx, deliveryToken());
+    const mutatingToken = deliveryToken();
+    handler.inject(message("m-lifecycle", "mutate this"), mutatingToken);
+
+    await vi.waitFor(() => expect(specs).toHaveLength(2), { timeout: 3_000 });
+    await vi.waitFor(() =>
+      expect(events.some((event) => (event as { kind?: string }).kind === "tool_call")).toBe(true),
+    );
+    if (lifecycle === "suspend") await handler.suspend("concurrency_preempted");
+    else await handler.shutdown("session_evicted");
+
+    expect(mutatingToken.retry).not.toHaveBeenCalled();
+    expect(mutatingToken.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "error", completion: "consumed", reason: "unsafe_replay" }),
+    );
+    expect(providerRetryEventNames(events)).toEqual([]);
+    expect(inputs.filter((input) => input.includes("mutate this"))).toHaveLength(1);
+
+    if (lifecycle === "shutdown") {
+      return;
+    }
+
+    const recoveryToken = deliveryToken();
+    const resumed = await handler.resume(
+      message("m-lifecycle", "mutate this"),
+      "conversation-lifecycle",
+      sessionCtx,
+      recoveryToken,
+    );
+    expect(resumed.sessionId).toBe("conversation-lifecycle");
+    expect(specs).toHaveLength(2);
+    expect(recoveryToken.retry).not.toHaveBeenCalled();
+    expect(recoveryToken.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "error", completion: "consumed", reason: "unsafe_replay" }),
+    );
+    expect(inputs.filter((input) => input.includes("mutate this"))).toHaveLength(1);
+    expect(forwarded).toEqual(["hello"]);
+    await handler.shutdown();
+  });
+
+  it("ignores stray non-JSON stdout when the documented stream-json result is intact", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-stream-noise-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const output = [
+      JSON.stringify({ event: "init", conversation_id: "conversation-noise" }),
+      '14:50 0:00 /bin/bash -O extglob -c snap=$(command cat <&3); builtin shopt -s extglob; builtin eval -- "$snap"',
+      JSON.stringify({
+        event: "result",
+        result: { conversation_id: "conversation-noise", status: "SUCCESS", response: "done" },
+      }),
+    ];
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(specs, inputs, output, [], [true]),
+      antigravityTurnTimeoutMs: 5_000,
+    });
+    const token = deliveryToken();
+
+    await handler.start(message("m-noise", "please respond"), sessionCtx, token);
+
+    expect(token.retry).not.toHaveBeenCalled();
+    expect(token.complete).toHaveBeenCalledWith(expect.anything(), { status: "success" });
+    expect(forwarded).toEqual(["done"]);
+    expect(providerRetryEventNames(events)).toEqual([]);
+    expect(sessionCtx.log).toHaveBeenCalledWith(expect.stringContaining("ignored non-JSON stdout"));
+    await handler.shutdown();
+  });
+
+  it("classifies an Individual quota ERROR result as capacity, not malformed-stream configuration", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-quota-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const quotaMessage =
+      "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 2h42m27s.";
+    const output = [
+      JSON.stringify({ event: "init", conversation_id: "conversation-quota" }),
+      JSON.stringify({ event: "future_event", note: "noise-1" }),
+      JSON.stringify({ event: "future_event", note: "noise-2" }),
+      JSON.stringify({
+        event: "result",
+        result: {
+          conversation_id: "conversation-quota",
+          status: "ERROR",
+          error: quotaMessage,
+        },
+      }),
+    ];
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(specs, inputs, output, [], [true]),
+      antigravityTurnTimeoutMs: 5_000,
+    });
+    const token = deliveryToken();
+
+    await handler.start(message("m-quota", "please respond"), sessionCtx, token);
+
+    expect(token.retry).not.toHaveBeenCalled();
+    expect(token.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "error", completion: "consumed" }),
+    );
+    const retryEvents = events.flatMap((event) => {
+      const { kind, payload } = event as { kind?: unknown; payload?: { message?: unknown } };
+      if (kind !== "error" || typeof payload?.message !== "string") return [];
+      const parsed = parseProviderRetryEventMessage(payload.message);
+      return parsed ? [parsed] : [];
+    });
+    expect(retryEvents).toEqual([
+      expect.objectContaining({
+        event: "provider_failure_terminal",
+        category: "provider_capacity",
+      }),
+    ]);
+    expect(JSON.stringify(events)).toContain("Individual quota reached");
+    expect(JSON.stringify(events)).not.toContain("malformed Antigravity stream");
+    await handler.shutdown();
+  });
+
+  it("delivers a no-op webhook ERROR report as the turn instead of a configuration failure", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-noop-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const report = [
+      "No-op webhook event on PR #3910:",
+      "",
+      "Event: issue_comment created by github-bot.",
+      "Comment: issuecomment-5718353169 (own thread).",
+    ].join("\n");
+    const output = [
+      JSON.stringify({ event: "init", conversation_id: "conversation-noop" }),
+      JSON.stringify({ event: "future_event", note: "noise" }),
+      JSON.stringify({
+        event: "result",
+        result: {
+          conversation_id: "conversation-noop",
+          status: "ERROR",
+          response: "",
+          error: report,
+        },
+      }),
+    ];
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(specs, inputs, output, [], [true], 1),
+      antigravityTurnTimeoutMs: 5_000,
+    });
+    const token = deliveryToken();
+
+    await handler.start(message("m-noop", "handle the webhook"), sessionCtx, token);
+
+    expect(token.retry).not.toHaveBeenCalled();
+    expect(token.complete).toHaveBeenCalledWith(expect.anything(), { status: "success" });
+    expect(forwarded).toEqual([report]);
+    expect(providerRetryEventNames(events)).toEqual([]);
+    expect(JSON.stringify(events)).toContain("No-op webhook event on PR #3910");
+    expect(JSON.stringify(events)).not.toContain("runtime configuration needs attention");
+    expect(JSON.stringify(events)).not.toContain("malformed Antigravity stream");
+    await handler.shutdown();
+  });
+
+  it("keeps an unclassified runtime ERROR result in the failure path", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-sqlite-error-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const diagnostic = "database disk image is malformed while loading the conversation state";
+    const output = [
+      JSON.stringify({ event: "init", conversation_id: "conversation-sqlite" }),
+      JSON.stringify({
+        event: "result",
+        result: {
+          conversation_id: "conversation-sqlite",
+          status: "ERROR",
+          response: "",
+          error: diagnostic,
+        },
+      }),
+    ];
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(specs, inputs, output, [], [true], 1),
+      antigravityTurnTimeoutMs: 5_000,
+    });
+    const token = deliveryToken();
+
+    await handler.start(message("m-sqlite", "please respond"), sessionCtx, token);
+
+    expect(token.retry).not.toHaveBeenCalled();
+    expect(token.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "error", completion: "consumed" }),
+    );
+    expect(forwarded).toEqual([]);
+    expect(JSON.stringify(events)).toContain(diagnostic);
+    expect(JSON.stringify(events)).not.toContain('"status":"success"');
+    await handler.shutdown();
+  });
+
+  it("keeps a later runtime ERROR after earlier assistant progress in the failure path", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-sqlite-after-progress-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const diagnostic = "database disk image is malformed while loading the conversation state";
+    const output = [
+      JSON.stringify({ event: "init", conversation_id: "conversation-sqlite-progress" }),
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "conversation-sqlite-progress",
+          step_type: "agent_response",
+          text_delta: "I will inspect the saved conversation before continuing.",
+        },
+      }),
+      JSON.stringify({
+        event: "result",
+        result: {
+          conversation_id: "conversation-sqlite-progress",
+          status: "ERROR",
+          response: "",
+          error: diagnostic,
+        },
+      }),
+    ];
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(specs, inputs, output, [], [true], 1),
+      antigravityTurnTimeoutMs: 5_000,
+    });
+    const token = deliveryToken();
+
+    await handler.start(message("m-sqlite-progress", "please respond"), sessionCtx, token);
+
+    expect(token.retry).not.toHaveBeenCalled();
+    expect(token.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "error", completion: "consumed" }),
+    );
+    expect(forwarded).toEqual([]);
+    expect(JSON.stringify(events)).toContain(diagnostic);
+    expect(JSON.stringify(events)).not.toContain('"status":"success"');
+    await handler.shutdown();
+  });
+
+  it("does not treat an ERROR review body that mentions sign-in as a credential failure", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-review-error-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const report = [
+      "Reviewed successor head 03e8f42a4721630f3c15dd28f6754a342460ec27 on PR #3881 across two full sweeps: clean verdict with zero real findings.",
+      "",
+      "Previous Finding Resolved: Listing bed feature promotion now strictly keeps the sign in CTA.",
+    ].join("\n");
+    const output = [
+      JSON.stringify({ event: "init", conversation_id: "conversation-review" }),
+      JSON.stringify({
+        event: "result",
+        result: {
+          conversation_id: "conversation-review",
+          status: "ERROR",
+          response: "",
+          error: report,
+        },
+      }),
+    ];
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(specs, inputs, output, [], [true], 1),
+      antigravityTurnTimeoutMs: 5_000,
+    });
+    const token = deliveryToken();
+
+    await handler.start(message("m-review", "review the PR"), sessionCtx, token);
+
+    expect(token.retry).not.toHaveBeenCalled();
+    expect(token.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "error", completion: "consumed" }),
+    );
+    expect(forwarded).toEqual([]);
+    const retryEvents = events.flatMap((event) => {
+      const { kind, payload } = event as { kind?: unknown; payload?: { message?: unknown } };
+      if (kind !== "error" || typeof payload?.message !== "string") return [];
+      const parsed = parseProviderRetryEventMessage(payload.message);
+      return parsed ? [parsed] : [];
+    });
+    expect(retryEvents.some((event) => event.category === "credential")).toBe(false);
+    expect(JSON.stringify(events)).not.toContain("run agy once to sign in");
+    await handler.shutdown();
+  });
+
+  it("delivers status ERROR with a response body and no diagnostic as the turn", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-error-response-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const report = "Checking PR #3935 status on GitHub.\nPR #3935 Landed on main.";
+    const output = [
+      JSON.stringify({ event: "init", conversation_id: "conversation-error-response" }),
+      JSON.stringify({
+        event: "result",
+        result: {
+          conversation_id: "conversation-error-response",
+          status: "ERROR",
+          response: report,
+        },
+      }),
+    ];
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(specs, inputs, output, [], [true], 1),
+      antigravityTurnTimeoutMs: 5_000,
+    });
+    const token = deliveryToken();
+
+    await handler.start(message("m-error-response", "check the PRs"), sessionCtx, token);
+
+    expect(token.retry).not.toHaveBeenCalled();
+    expect(token.complete).toHaveBeenCalledWith(expect.anything(), { status: "success" });
+    expect(forwarded).toEqual([report]);
+    expect(providerRetryEventNames(events)).toEqual([]);
+    expect(JSON.stringify(events)).not.toContain("run agy once to sign in");
+    await handler.shutdown();
+  });
+
+  it("delivers a mid-turn ERROR response body as the turn", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-mid-turn-error-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const report = [
+      "Checking PR #3935 status on GitHub.",
+      "Checking PR 3926 details.",
+      "### PR #3935 Merged & Next Steps",
+      "PR #3935 Landed on main.",
+    ].join("\n");
+    const output = [
+      JSON.stringify({ event: "init", conversation_id: "conversation-mid" }),
+      JSON.stringify({
+        event: "step_update",
+        step_update: { conversation_id: "conversation-mid", step_type: "agent_response", text_delta: report },
+      }),
+      JSON.stringify({
+        event: "result",
+        result: {
+          conversation_id: "conversation-mid",
+          status: "ERROR",
+          response: report,
+          error: "",
+        },
+      }),
+    ];
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(specs, inputs, output, [], [true], 1),
+      antigravityTurnTimeoutMs: 5_000,
+    });
+    const token = deliveryToken();
+
+    await handler.start(message("m-mid", "check the PRs"), sessionCtx, token);
+
+    expect(token.retry).not.toHaveBeenCalled();
+    expect(token.complete).toHaveBeenCalledWith(expect.anything(), { status: "success" });
+    expect(forwarded).toEqual([report]);
+    expect(providerRetryEventNames(events)).toEqual([]);
+    expect(JSON.stringify(events)).not.toContain("run agy once to sign in");
+    expect(JSON.stringify(events)).not.toContain("unknown terminal failure");
+    await handler.shutdown();
+  });
+
+  it("stops waiting when agy reports no model capacity instead of timing out as a crash", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-no-capacity-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const retrySleep = vi.fn(async () => true);
+    const stderr = "UNAVAILABLE (code 503): No capacity available for model gemini-3.8-flash-high on the server";
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(specs, inputs, [], [], [], 0, [stderr]),
+      antigravityTurnTimeoutMs: 5_000,
+      antigravityRetrySleep: retrySleep,
+    });
+    const token = deliveryToken();
+
+    await handler.start(message("m-capacity", "review the PR"), sessionCtx, token);
+
+    expect(JSON.stringify(events)).toContain("No capacity available");
+    expect(JSON.stringify(events)).not.toContain("after retrying a transient provider or network failure");
+    expect(forwarded).toEqual([]);
+    await handler.shutdown();
+  });
+
+  it("fails closed on timeout after the prompt was written instead of retrying as transport", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-prompt-timeout-"));
     roots.push(root);
     const specs: ProviderProcessSpec[] = [];
     const inputs: string[] = [];
@@ -774,10 +1297,276 @@ process.stdin.on("end", () => {
 
     await handler.start(message("m1", "please respond"), sessionCtx, token);
 
-    expect(token.retry).toHaveBeenCalledWith(expect.anything(), "operation_timeout");
-    expect(token.complete).not.toHaveBeenCalled();
-    expect(retrySleep).toHaveBeenCalledWith(500, expect.any(AbortSignal));
+    expect(token.retry).not.toHaveBeenCalled();
+    expect(retrySleep).not.toHaveBeenCalled();
+    expect(token.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "error", completion: "consumed", reason: "unsafe_replay" }),
+    );
+    expect(JSON.stringify(events)).not.toContain("after retrying a transient provider or network failure");
     await handler.shutdown();
+  });
+
+  it("surfaces timed-out progress without acknowledging a successful turn", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-timeout-text-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const report = "I will apply the migration, then verify its result.";
+    const output = [
+      JSON.stringify({ event: "init", conversation_id: "conversation-timeout-text" }),
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "conversation-timeout-text",
+          step_type: "agent_response",
+          text_delta: report,
+        },
+      }),
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "conversation-timeout-text",
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "run_command",
+          tool_call_id: "call-1",
+          tool_info: { parameters: { command: "apply-migration" } },
+        },
+      }),
+    ];
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(specs, inputs, output),
+      antigravityTurnTimeoutMs: 50,
+    });
+    const token = deliveryToken();
+
+    await handler.start(message("m-timeout-text", "apply the migration"), sessionCtx, token);
+
+    expect(token.retry).not.toHaveBeenCalled();
+    expect(token.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "error", completion: "consumed", reason: "unsafe_replay" }),
+    );
+    expect(forwarded).toEqual([]);
+    expect(JSON.stringify(events)).toContain(report);
+    expect(JSON.stringify(events)).not.toContain("after retrying a transient provider or network failure");
+    await handler.shutdown();
+  });
+
+  it("keeps the expected conversation when a timed-out resume emits a different id", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-timeout-mismatch-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(
+        specs,
+        inputs,
+        [],
+        [
+          [
+            JSON.stringify({ event: "init", conversation_id: "conversation-a" }),
+            JSON.stringify({
+              event: "result",
+              result: { conversation_id: "conversation-a", status: "SUCCESS", response: "first" },
+            }),
+          ],
+          [
+            JSON.stringify({ event: "init", conversation_id: "conversation-b" }),
+            JSON.stringify({
+              event: "step_update",
+              step_update: {
+                conversation_id: "conversation-b",
+                step_type: "agent_response",
+                text_delta: "from the wrong conversation",
+              },
+            }),
+          ],
+        ],
+        [true, false],
+      ),
+      antigravityTurnTimeoutMs: 50,
+    });
+
+    const first = await handler.start(message("m1", "first prompt"), sessionCtx, deliveryToken());
+    expect(first.sessionId).toBe("conversation-a");
+    const secondToken = deliveryToken();
+    const second = await handler.resume(message("m2", "follow-up"), "conversation-a", sessionCtx, secondToken);
+
+    expect(second.sessionId).toBe("conversation-a");
+    expect(secondToken.retry).not.toHaveBeenCalled();
+    expect(secondToken.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "error", completion: "consumed", reason: "unsafe_replay" }),
+    );
+    expect(forwarded).toEqual(["first"]);
+    await handler.shutdown();
+  });
+
+  it("rejects a latest SUCCESS result from a different conversation than the resume target", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-result-id-mismatch-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(
+        specs,
+        inputs,
+        [],
+        [
+          [
+            JSON.stringify({ event: "init", conversation_id: "conversation-a" }),
+            JSON.stringify({
+              event: "result",
+              result: { conversation_id: "conversation-a", status: "SUCCESS", response: "first" },
+            }),
+          ],
+          [
+            JSON.stringify({ event: "init", conversation_id: "conversation-a" }),
+            JSON.stringify({
+              event: "result",
+              result: { conversation_id: "conversation-b", status: "SUCCESS", response: "answer-from-B" },
+            }),
+          ],
+        ],
+        [true, true],
+      ),
+      antigravityTurnTimeoutMs: 5_000,
+    });
+
+    const first = await handler.start(message("m1", "first prompt"), sessionCtx, deliveryToken());
+    expect(first.sessionId).toBe("conversation-a");
+    const secondToken = deliveryToken();
+    await handler.resume(message("m2", "follow-up"), "conversation-a", sessionCtx, secondToken);
+
+    expect(secondToken.retry).not.toHaveBeenCalled();
+    expect(secondToken.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "error", completion: "consumed" }),
+    );
+    expect(forwarded).toEqual(["first"]);
+    expect(JSON.stringify(events)).toContain("resume conversation mismatch");
+    await handler.shutdown();
+  });
+
+  it("retries a follow-up 503 without --conversation of the established session", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-followup-503-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const retrySleep = vi.fn(async () => true);
+    const stderr = "UNAVAILABLE (code 503): No capacity available for model gemini-3.8-flash-high on the server";
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(
+        specs,
+        inputs,
+        [],
+        [
+          [
+            JSON.stringify({ event: "init", conversation_id: "conversation-a" }),
+            JSON.stringify({
+              event: "result",
+              result: { conversation_id: "conversation-a", status: "SUCCESS", response: "first" },
+            }),
+          ],
+          [],
+          [
+            JSON.stringify({ event: "init", conversation_id: "conversation-b" }),
+            JSON.stringify({
+              event: "result",
+              result: { conversation_id: "conversation-b", status: "SUCCESS", response: "recovered" },
+            }),
+          ],
+        ],
+        [true, false, true],
+        0,
+        [],
+        [[], [stderr], []],
+      ),
+      antigravityTurnTimeoutMs: 5_000,
+      antigravityRetrySleep: retrySleep,
+    });
+
+    await handler.start(message("m1", "first prompt"), sessionCtx, deliveryToken());
+    const secondToken = deliveryToken();
+    handler.inject(message("m2", "follow-up"), secondToken);
+    await vi.waitFor(() => expect(secondToken.retry).toHaveBeenCalled(), { timeout: 3_000 });
+    const retryToken = deliveryToken();
+    handler.inject(message("m2", "follow-up"), retryToken);
+    await vi.waitFor(() => expect(specs.length).toBeGreaterThanOrEqual(3), { timeout: 3_000 });
+
+    expect(specs[2]?.args).not.toContain("conversation-a");
+    await vi.waitFor(() => expect(retryToken.complete).toHaveBeenCalledWith(expect.anything(), { status: "success" }));
+    expect(sessionCtx.replaceSessionId).toHaveBeenCalledWith("conversation-b", "antigravity_conversation_id_confirmed");
+    expect(forwarded).toEqual(["first", "recovered"]);
+    await handler.shutdown();
+
+    const coldSpecs: ProviderProcessSpec[] = [];
+    const coldInputs: string[] = [];
+    const coldEvents: unknown[] = [];
+    const coldForwarded: string[] = [];
+    const coldCtx = context(coldEvents, coldForwarded);
+    const cold = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(
+        coldSpecs,
+        coldInputs,
+        [
+          JSON.stringify({ event: "init", conversation_id: "conversation-b" }),
+          JSON.stringify({
+            event: "result",
+            result: { conversation_id: "conversation-b", status: "SUCCESS", response: "after-restart" },
+          }),
+        ],
+        [],
+        [true],
+      ),
+      antigravityTurnTimeoutMs: 5_000,
+    });
+    const coldToken = deliveryToken();
+    await cold.resume(message("m3", "after restart"), "conversation-b", coldCtx, coldToken);
+    expect(coldSpecs[0]?.args).toContain("conversation-b");
+    expect(coldSpecs[0]?.args).not.toContain("conversation-a");
+    expect(coldToken.complete).toHaveBeenCalledWith(expect.anything(), { status: "success" });
+    expect(coldForwarded).toEqual(["after-restart"]);
+    await cold.shutdown();
   });
 
   it("fails closed when a resumed turn returns a different conversation id", async () => {
@@ -813,7 +1602,61 @@ process.stdin.on("end", () => {
     await handler.shutdown();
   });
 
-  it("keeps pending retry accounting across an unrelated handler shutdown", async () => {
+  it("ignores a replayed historical quota ERROR when the latest result succeeded", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-stale-quota-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const leftover = `{"role":null,"message-preview":"gREKhgz+odn0Zc8cCm96i8sp1Xy5gQ","status":"completed"}`;
+    const quota =
+      "API error (attempt 6): RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 2h53m10s.";
+    const output = [
+      leftover,
+      JSON.stringify({ event: "init", conversation_id: "conversation-stale" }),
+      JSON.stringify({
+        event: "result",
+        result: {
+          conversation_id: "conversation-stale",
+          status: "ERROR",
+          response: "",
+          error: quota,
+        },
+      }),
+      JSON.stringify({ event: "init", conversation_id: "conversation-stale" }),
+      JSON.stringify({
+        event: "result",
+        result: {
+          conversation_id: "conversation-stale",
+          status: "SUCCESS",
+          response: "Reviewed the latest head. No blocking findings.",
+        },
+      }),
+    ];
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(specs, inputs, output, [], [true]),
+      antigravityTurnTimeoutMs: 5_000,
+    });
+    const token = deliveryToken();
+
+    await handler.start(message("m-stale", "review the PR"), sessionCtx, token);
+
+    expect(token.retry).not.toHaveBeenCalled();
+    expect(token.complete).toHaveBeenCalledWith(expect.anything(), { status: "success" });
+    expect(forwarded).toEqual(["Reviewed the latest head. No blocking findings."]);
+    expect(JSON.stringify(events)).not.toContain("runtime configuration needs attention");
+    expect(JSON.stringify(events)).not.toContain("Individual quota reached");
+    await handler.shutdown();
+  });
+
+  it("does not reopen a fail-closed timeout after an unrelated handler shutdown", async () => {
     const root = mkdtempSync(join(tmpdir(), "ft-antigravity-attempt-scope-"));
     roots.push(root);
     const failingSpecs: ProviderProcessSpec[] = [];
@@ -832,7 +1675,11 @@ process.stdin.on("end", () => {
     });
     const activeMessage = message("m1", "first attempt");
     const firstToken = deliveryToken();
-    const activeStart = await activeHandler.start(activeMessage, context(events, forwarded), firstToken);
+    await activeHandler.start(activeMessage, context(events, forwarded), firstToken);
+    expect(firstToken.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "error", completion: "consumed", reason: "unsafe_replay" }),
+    );
 
     const unrelatedSpecs: ProviderProcessSpec[] = [];
     const unrelatedInputs: string[] = [];
@@ -854,22 +1701,135 @@ process.stdin.on("end", () => {
     );
     await unrelatedHandler.shutdown();
 
-    const secondToken = deliveryToken();
-    await activeHandler.resume(activeMessage, activeStart.sessionId, context(events, forwarded), secondToken);
-    expect(secondToken.retry).toHaveBeenCalledTimes(1);
-
-    const thirdToken = deliveryToken();
-    await activeHandler.resume(activeMessage, activeStart.sessionId, context(events, forwarded), thirdToken);
-    expect(thirdToken.complete).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ status: "error", completion: "consumed", reason: "operation_timeout_exhausted" }),
-    );
-
-    expect(providerRetryEventNames(events)).toEqual([
-      "provider_retry_scheduled",
-      "provider_retry_scheduled",
-      "provider_retry_exhausted",
-    ]);
+    expect(firstToken.retry).not.toHaveBeenCalled();
+    expect(JSON.stringify(events)).not.toContain("after retrying a transient provider or network failure");
     await activeHandler.shutdown();
+  });
+
+  it("omits --print-timeout and process timeout by default to align with other runtimes", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-no-timeout-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createSupervisor(specs, inputs),
+    });
+
+    const outcome = await handler.start(message("m1", "run indefinitely"), sessionCtx, deliveryToken());
+    expect(outcome.sessionId).toBe("conversation-1");
+    expect(specs[0]?.args).not.toContain("--print-timeout");
+    expect(specs[0]?.timeoutMs).toBeUndefined();
+    expect(forwarded).toEqual(["hello"]);
+    await handler.shutdown();
+  });
+
+  it("does not classify premature process exit or missing result as a configuration error and sanitizes stdout noise", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-premature-exit-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const output = [
+      JSON.stringify({ event: "init", conversation_id: "conversation-crash" }),
+      "ask [options] [name] [message] Ask a HUMAN in the caller's current chat",
+    ];
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(specs, inputs, output, [], [true], 1, [
+        "sqlite3: database or disk is full",
+      ]),
+      antigravityTurnTimeoutMs: 5_000,
+    });
+    const token = deliveryToken();
+
+    await handler.start(message("m-crash", "please review"), sessionCtx, token);
+
+    expect(token.retry).not.toHaveBeenCalled();
+    expect(token.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "error", completion: "consumed" }),
+    );
+    expect(JSON.stringify(events)).not.toContain("runtime configuration needs attention");
+    expect(JSON.stringify(events)).not.toContain("Ask a HUMAN");
+    expect(JSON.stringify(events)).toContain("database or disk is full");
+    const retryEvents = events.flatMap((event) => {
+      const { kind, payload } = event as { kind?: unknown; payload?: { message?: unknown } };
+      if (kind !== "error" || typeof payload?.message !== "string") return [];
+      const parsed = parseProviderRetryEventMessage(payload.message);
+      return parsed ? [parsed] : [];
+    });
+    expect(retryEvents).toEqual([
+      expect.objectContaining({
+        category: "unknown",
+        reasonCode: "unsafe_replay",
+      }),
+    ]);
+    await handler.shutdown();
+  });
+
+  it("preserves replay custody when stream payload content mentions capacity phrases and terminates without result", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ft-antigravity-quoted-capacity-"));
+    roots.push(root);
+    const specs: ProviderProcessSpec[] = [];
+    const inputs: string[] = [];
+    const events: unknown[] = [];
+    const forwarded: string[] = [];
+    const sessionCtx = context(events, forwarded);
+    const output = [
+      JSON.stringify({ event: "init", conversation_id: "conversation-quoted-cap" }),
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "conversation-quoted-cap",
+          step_type: "agent_response",
+          text_delta: "The API responded with: resource_exhausted or individual quota reached.",
+        },
+      }),
+    ];
+    const handler = createAntigravityHandler({
+      workspaceRoot: root,
+      agentName: "antigravity-test-agent",
+      runtimeProvider: "antigravity",
+      agentConfigCache: cache(runtimeConfig()),
+      antigravityBinaryResolver: () => ({ ok: true, binary: process.execPath }),
+      providerProcessSupervisor: createControlledSupervisor(specs, inputs, output, [], [true], 1),
+      antigravityTurnTimeoutMs: 5_000,
+    });
+    const token = deliveryToken();
+
+    await handler.start(message("m-quoted", "please assist"), sessionCtx, token);
+
+    expect(token.retry).not.toHaveBeenCalled();
+    expect(token.complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "error", completion: "consumed" }),
+    );
+    const retryEvents = events.flatMap((event) => {
+      const { kind, payload } = event as { kind?: unknown; payload?: { message?: unknown } };
+      if (kind !== "error" || typeof payload?.message !== "string") return [];
+      const parsed = parseProviderRetryEventMessage(payload.message);
+      return parsed ? [parsed] : [];
+    });
+    expect(retryEvents).toEqual([
+      expect.objectContaining({
+        category: "unknown",
+        reasonCode: "unsafe_replay",
+      }),
+    ]);
+    await handler.shutdown();
   });
 });

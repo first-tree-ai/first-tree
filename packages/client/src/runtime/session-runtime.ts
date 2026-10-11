@@ -74,6 +74,7 @@ import {
   PROVIDER_UNSAFE_REPLAY_NOTICE_UNSETTLED,
   type ProviderFailureClassification,
   requiresUnsafeReplayNoticeCustody,
+  startsFreshOnMismatchedContinuation,
 } from "./provider-retry-policy.js";
 import { isAttachmentGoneError } from "./provider-support/attachment-availability.js";
 import { isContextSourceTransitionError } from "./provider-support/preparation.js";
@@ -2276,6 +2277,27 @@ export class SessionRuntime {
     this.projection.persistRegistry();
   }
 
+  /**
+   * Providers that cannot resume an interrupted process must not mark the
+   * session Failed forever when a one-delivery continuation does not match
+   * the current message. Drop it so the next turn starts a new conversation.
+   */
+  private clearUnresumableProviderContinuation(entry: SessionEntry, reason: string): boolean {
+    if (!startsFreshOnMismatchedContinuation(this.runtimeProvider())) return false;
+    this.config.log.warn(
+      { chatId: entry.chatId, reason },
+      "dropping unresumable provider continuation; next delivery starts a new conversation",
+    );
+    entry.claudeSessionId = "";
+    entry.providerContinuation = null;
+    this.projection.recordEvictionResume(entry.chatId, {
+      claudeSessionId: "",
+      lastActivity: entry.lastActivity,
+    });
+    this.projection.persistRegistry();
+    return true;
+  }
+
   private async routeMessage(
     chatId: string,
     message: SessionMessage,
@@ -2539,6 +2561,7 @@ export class SessionRuntime {
       settleRouteProducer = this.routeTeardown.registerRouteProducer(chatId);
       this.projection.setCurrentTrigger(chatId, message);
       const token = this.createDeliveryToken(chatId, routeLeases);
+      let startFresh = !evicted;
       if (evicted) {
         const continuationOptions = continuationResumeOptions(
           evicted.continuation,
@@ -2547,33 +2570,39 @@ export class SessionRuntime {
           this.runtimeProvider(),
         );
         if (evicted.continuation && !continuationOptions) {
-          this.deferMismatchedProviderContinuation(
-            entry,
-            {
-              claudeSessionId: evicted.claudeSessionId,
-              lastActivity: evicted.lastActivity,
-              continuation: evicted.continuation,
-            },
-            "session_eviction_provider_continuation_mismatch",
-          );
-          return;
+          if (!this.clearUnresumableProviderContinuation(entry, "session_eviction_provider_continuation_mismatch")) {
+            this.deferMismatchedProviderContinuation(
+              entry,
+              {
+                claudeSessionId: evicted.claudeSessionId,
+                lastActivity: evicted.lastActivity,
+                continuation: evicted.continuation,
+              },
+              "session_eviction_provider_continuation_mismatch",
+            );
+            return;
+          }
+          startFresh = true;
         }
-        const resumeResult = continuationOptions
-          ? await handler.resume(message, evicted.claudeSessionId, ctx, token, continuationOptions)
-          : await handler.resume(message, evicted.claudeSessionId, ctx, token);
-        const receipt = normalizeResumeReceipt(resumeResult);
-        if (!this.routeTeardown.isCurrentRouteTransition(entry, transition)) {
-          this.preserveStaleProviderContinuation(entry, message, receipt);
-          this.routeTeardown.discardStaleRouteTransition(
-            entry.chatId,
-            transition,
-            "session_eviction_resume_stale_completion",
-          );
-          return;
+        if (!startFresh) {
+          const resumeResult = continuationOptions
+            ? await handler.resume(message, evicted.claudeSessionId, ctx, token, continuationOptions)
+            : await handler.resume(message, evicted.claudeSessionId, ctx, token);
+          const receipt = normalizeResumeReceipt(resumeResult);
+          if (!this.routeTeardown.isCurrentRouteTransition(entry, transition)) {
+            this.preserveStaleProviderContinuation(entry, message, receipt);
+            this.routeTeardown.discardStaleRouteTransition(
+              entry.chatId,
+              transition,
+              "session_eviction_resume_stale_completion",
+            );
+            return;
+          }
+          if (!this.adoptResumeReceipt(entry, message, receipt, "session_eviction_resume_unowned_delivery")) return;
+          this.config.log.info({ chatId, sessionId: entry.claudeSessionId }, "session resumed from eviction");
         }
-        if (!this.adoptResumeReceipt(entry, message, receipt, "session_eviction_resume_unowned_delivery")) return;
-        this.config.log.info({ chatId, sessionId: entry.claudeSessionId }, "session resumed from eviction");
-      } else {
+      }
+      if (startFresh) {
         const receipt = normalizeStartReceipt(await handler.start(message, ctx, token));
         if (!this.routeTeardown.isCurrentRouteTransition(entry, transition)) {
           this.preserveStaleProviderContinuation(entry, message, receipt);
@@ -2813,15 +2842,41 @@ export class SessionRuntime {
         this.runtimeProvider(),
       );
       if (entry.providerContinuation && !continuationOptions) {
-        this.deferMismatchedProviderContinuation(
-          entry,
-          {
-            claudeSessionId: entry.claudeSessionId,
-            lastActivity: entry.lastActivity,
-            continuation: entry.providerContinuation,
-          },
-          "session_resume_provider_continuation_mismatch",
+        if (!this.clearUnresumableProviderContinuation(entry, "session_resume_provider_continuation_mismatch")) {
+          this.deferMismatchedProviderContinuation(
+            entry,
+            {
+              claudeSessionId: entry.claudeSessionId,
+              lastActivity: entry.lastActivity,
+              continuation: entry.providerContinuation,
+            },
+            "session_resume_provider_continuation_mismatch",
+          );
+          return;
+        }
+        if (!token || !message) return;
+        const receipt = normalizeStartReceipt(await routeHandler.start(message, ctx, token));
+        if (!this.routeTeardown.isCurrentRouteTransition(entry, transition)) {
+          this.preserveStaleProviderContinuation(entry, message, receipt);
+          this.routeTeardown.discardStaleRouteTransition(entry.chatId, transition, "session_resume_stale_completion");
+          return;
+        }
+        entry.claudeSessionId = receipt.sessionId;
+        entry.providerContinuation = null;
+        if (this.markRouteOwned(entry.chatId, message, receipt.route) === "lost") {
+          this.abortUnownedRoute(entry, "session_resume_unowned_delivery");
+          return;
+        }
+        if (!this.routeTeardown.completeRouteTransition(entry, transition)) {
+          this.routeTeardown.discardStaleRouteTransition(entry.chatId, transition, "session_resume_stale_adoption");
+          return;
+        }
+        this.drainDeferredMessages(entry);
+        this.config.log.info(
+          { chatId: entry.chatId, sessionId: entry.claudeSessionId },
+          "session started after unresumable continuation",
         );
+        this.projection.persistRegistry();
         return;
       }
       const resumeResult = token
