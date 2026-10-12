@@ -118,13 +118,40 @@ export function resolveContextTreeCli(): ContextTreeCliInvocation | null {
 }
 
 /**
+ * The failure the external CLI reported inside a payload, or undefined when the
+ * payload is a success.
+ *
+ * Success payloads are command-specific and do NOT carry an `ok` field. A JSON
+ * failure is `{ok:false,error:{code,message}}`, and `verify` reports an unusable
+ * tree as `{ok:false,findings:[...]}` with no `error`. The CLI does not tie these
+ * envelopes to a non-zero exit code, so the payload is checked on its own.
+ */
+export function contextTreePayloadFailure(payload: unknown): { reason: string; reasonCode: string } | undefined {
+  if (!isRecord(payload)) {
+    return { reason: "context-tree returned a non-object JSON result.", reasonCode: "context_tree_bad_payload" };
+  }
+  const error = isRecord(payload.error) ? payload.error : undefined;
+  if (error === undefined && payload.ok !== false) return undefined;
+  const code = typeof error?.code === "string" ? error.code : undefined;
+  const message = typeof error?.message === "string" ? error.message : undefined;
+  const finding = Array.isArray(payload.findings)
+    ? payload.findings.find(
+        (entry): entry is Record<string, unknown> => isRecord(entry) && typeof entry.code === "string",
+      )
+    : undefined;
+  const findingCode = typeof finding?.code === "string" ? finding.code : undefined;
+  const reasonCode = code ?? findingCode ?? "context_tree_failed";
+  return { reason: message ?? `context-tree reported ${reasonCode}.`, reasonCode };
+}
+
+/**
  * Run one `context-tree` subcommand and parse its result.
  *
  * Text-default commands must be invoked with `--json`; install and uninstall
- * always print JSON. Success payloads are command-specific and do NOT carry an
- * `ok` field, so exit code is the only reliable verdict; a non-zero JSON-mode
- * failure prints `{ok:false,error:{code,message}}`, whose code becomes
- * `reasonCode`.
+ * always print JSON. A zero exit code is necessary but not sufficient: the
+ * payload must also not carry a failure envelope (see
+ * `contextTreePayloadFailure`). A non-zero JSON-mode failure prints
+ * `{ok:false,error:{code,message}}`, whose code becomes `reasonCode`.
  */
 export async function runContextTreeCommand(args: string[]): Promise<ContextTreeCliResult> {
   const cli = resolveContextTreeCli();
@@ -170,14 +197,19 @@ export async function runContextTreeCommand(args: string[]): Promise<ContextTree
           });
           return;
         }
+        const failure = contextTreePayloadFailure(payload);
+        if (failure !== undefined) {
+          resolvePromise({ ok: false, ...failure });
+          return;
+        }
         resolvePromise({ ok: true, payload });
         return;
       }
       if (code === null && signal) timedOut = true;
       const envelope = parseJsonLine(stdout);
-      const envelopeError = isRecord(envelope) && isRecord(envelope.error) ? envelope.error : undefined;
-      const envelopeCode = typeof envelopeError?.code === "string" ? envelopeError.code : undefined;
-      const envelopeMessage = typeof envelopeError?.message === "string" ? envelopeError.message : undefined;
+      const envelopeFailure = isRecord(envelope) ? contextTreePayloadFailure(envelope) : undefined;
+      const envelopeCode = envelopeFailure?.reasonCode;
+      const envelopeMessage = envelopeFailure?.reason;
       const stderr = Buffer.concat(stderrChunks).toString("utf8").trim();
       const reason =
         envelopeMessage ??
