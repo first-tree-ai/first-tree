@@ -155,6 +155,45 @@ describe("runContextTreeCommand", () => {
     if (result.ok) return;
     expect(result.reasonCode).toBe("NO_CONNECTION");
   });
+
+  it("surfaces a verify finding code when the envelope carries no error object", async () => {
+    const { runContextTreeCommand } = await loadModule();
+    const empty = mkdtempSync(join(tmpdir(), "ft-context-tree-invalid-"));
+    const result = await runContextTreeCommand(["verify", "--tree-path", empty, "--json"]);
+    expect(result).toMatchObject({ ok: false, reasonCode: "TREE_ROOT_MISSING" });
+  });
+});
+
+describe("contextTreePayloadFailure", () => {
+  it("accepts a command-specific success payload with no ok field", async () => {
+    const { contextTreePayloadFailure } = await loadModule();
+    expect(contextTreePayloadFailure({ schemaVersion: 1, trees: [] })).toBeUndefined();
+    expect(contextTreePayloadFailure({ ok: true, findings: [] })).toBeUndefined();
+  });
+
+  it("treats an error envelope as a failure even without ok:false", async () => {
+    const { contextTreePayloadFailure } = await loadModule();
+    // The CLI does not tie its envelopes to the exit code, so a zero exit with
+    // this payload must still be reported as a failure.
+    expect(contextTreePayloadFailure({ error: { code: "DIRTY_TREE", message: "dirty" } })).toEqual({
+      reason: "dirty",
+      reasonCode: "DIRTY_TREE",
+    });
+  });
+
+  it("uses the first finding code for ok:false without an error object", async () => {
+    const { contextTreePayloadFailure } = await loadModule();
+    expect(
+      contextTreePayloadFailure({ ok: false, findings: [{ message: "no code" }, { code: "TREE_ROOT_MISSING" }] }),
+    ).toMatchObject({ reasonCode: "TREE_ROOT_MISSING" });
+    expect(contextTreePayloadFailure({ ok: false })).toMatchObject({ reasonCode: "context_tree_failed" });
+  });
+
+  it("rejects a non-object payload", async () => {
+    const { contextTreePayloadFailure } = await loadModule();
+    expect(contextTreePayloadFailure(null)).toMatchObject({ reasonCode: "context_tree_bad_payload" });
+    expect(contextTreePayloadFailure("ok")).toMatchObject({ reasonCode: "context_tree_bad_payload" });
+  });
 });
 
 describe("ensureContextTreeSkills", () => {
