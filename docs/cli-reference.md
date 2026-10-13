@@ -1298,10 +1298,13 @@ host’s entire Skill set and reports the skipped installation. Other hosts can
 still be installed. Replacement of preserved Skills is an operator-managed
 action; login never authorizes it. The installer writes
 the `context-tree-{setup,create,connect,read,write,publish,cleanup,schedule-cleanup}` Skills into
-`~/.claude/skills` and `~/.codex/skills`, then `context-tree connect
-<OWNER/REPO>` for each existing agent workspace. The tree itself is cloned to
-`~/.context-tree/trees/<repo>` and the project mapping is recorded in
-`~/.context-tree/connections.json`. Agents then see `context-tree-read` /
+`~/.claude/skills` and, for Codex, `~/.agents/skills` (Codex is detected by its
+config home, `~/.codex` by default), then `context-tree connect <OWNER/REPO>` for each existing agent
+workspace. The tree itself is cloned below `~/.context-tree/trees/` (a new
+clone is named `github-<sha256 of the repository>`; a valid, clean checkout of
+the same repository already there is reused) and the project
+mapping is recorded in `~/.context-tree/connections.json` under the alias
+`<repo>`. Agents then see `context-tree-read` /
 `context-tree-write` / `context-tree-setup`, and the overlapping
 `first-tree-read`, `first-tree-write`, and `first-tree-seed` Skills are removed
 from each workspace on its next session — along with `context-tree-review` and
@@ -1316,8 +1319,9 @@ equivalent. An existing `context-tree` that First Tree did not write — a real
 global install, for instance — is left exactly as it is and never removed on
 revert.
 
-**Only Claude and Codex agents switch.** `context-tree install` supports exactly
-those two hosts. An agent on any other provider — Cursor, Grok, Kimi, OpenCode,
+**Only Claude and Codex agents switch.** First Tree runs `context-tree install`
+for exactly those two hosts; the bundled CLI also supports Pi, but First Tree
+does not wire it yet. An agent on any other provider — Cursor, Grok, Kimi, OpenCode,
 Amp, DeepSeek, Pi — keeps First Tree's own Context Tree Skills and its ordinary
 briefing, because standing them down would leave that agent with no Context Tree
 Skills at all. One caveat: such an agent moves to the unbound state, so if it
@@ -1342,11 +1346,33 @@ Re-running `first-tree login` also links any workspace created since.
 
 **To revert**, unset the key and re-run `first-tree login`. First Tree removes
 only Skill directories it recorded as newly created during its own installation
-and whose contents still match the bundled payload. Independently installed
+and whose contents still match what First Tree wrote: the digest recorded at
+install time, the bundled payload, or the payload of an earlier bundled release. Independently installed
 Skills, edited copies, and legacy copies without ownership records are preserved
 and reported. Only a shim carrying First Tree's marker is removed. First Tree's
 Skills are reprojected on the next session. Cleanup leaves host directories,
 project instructions, tree checkouts, and connection records untouched.
+
+**Upgrading from a First Tree release that bundled `context-tree` 0.1.12.**
+The bundled CLI is pinned to exactly `0.1.16`. On the next `login`:
+
+- Unedited Skills that First Tree installed are replaced with the new payload.
+  Edited or hand-installed copies are preserved and block that host, as before.
+- Codex Skills move from `~/.codex/skills` to `~/.agents/skills`. Unedited
+  copies that First Tree owned in `~/.codex/skills` are removed so that Codex
+  does not load two `context-tree-*` families. Edited copies are preserved and
+  reported, and you must remove them yourself.
+- `context-tree` 0.1.16 does not read the version-1
+  `~/.context-tree/connections.json` that 0.1.12 wrote, and it has no
+  migration. `login` and `doctor` report this with the remedy, and First Tree
+  never rewrites the file, because it is global and can hold connections that
+  First Tree did not make. Move the file aside, then run `first-tree login`
+  again to reconnect the agent workspaces. Connections that you made by hand
+  for other projects must be made again with `context-tree connect`.
+- A valid, clean 0.1.12 checkout under `~/.context-tree/trees/<repo>` is
+  reused. A dirty or invalid checkout is not reused: the repository is cloned
+  again to `github-<sha256>`, and the old checkout is left in place with its
+  unpublished work.
 
 The bundled Context Tree dependency does not install Skills during a global
 First Tree package installation: its postinstall only installs them for a direct
