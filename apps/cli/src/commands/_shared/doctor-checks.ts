@@ -25,6 +25,7 @@ import {
   ensureFreshAccessToken,
   inspectLocalContextTree,
   listLocalContextDataLoss,
+  probeContextTreeConnectionStore,
   reconcileAgentConfigs,
   resolveContextTreeCli,
   resolveServerUrl,
@@ -98,6 +99,12 @@ export async function checkContextTreeCli(): Promise<CheckResult> {
   const probe = await runContextTreeCommand(["list", "--json"]);
   if (!probe.ok) {
     return { label: "Context Tree CLI", ok: false, detail: `${repository}: ${probe.reason}` };
+  }
+  // `list` never reads the connection store, so a store the bundled CLI can no
+  // longer parse (an upgrade from a release that wrote version 1) needs its own probe.
+  const store = await probeContextTreeConnectionStore();
+  if (!store.ok) {
+    return { label: "Context Tree CLI", ok: false, detail: `${repository}: ${store.reason}` };
   }
   return { label: "Context Tree CLI", ok: true, detail: `external mode on (${repository})` };
 }

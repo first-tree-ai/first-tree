@@ -17,6 +17,7 @@ const doctorCoreMocks = vi.hoisted(() => ({
   ensureFreshAccessToken: vi.fn(),
   inspectLocalContextTree: vi.fn(),
   listLocalContextDataLoss: vi.fn(),
+  probeContextTreeConnectionStore: vi.fn(),
   reconcileAgentConfigs: vi.fn(),
   resolveContextTreeCli: vi.fn(),
   resolveServerUrl: vi.fn(),
@@ -218,6 +219,7 @@ describe("doctor checks and agent resolver", () => {
     configMocks.readContextTreeRepositorySetting.mockReturnValue({ raw: "acme/context", repository: "acme/context" });
     doctorCoreMocks.resolveContextTreeCli.mockReturnValue({ command: "node", args: ["/cli.mjs"] });
     doctorCoreMocks.runContextTreeCommand.mockResolvedValue({ ok: true, payload: { trees: [] } });
+    doctorCoreMocks.probeContextTreeConnectionStore.mockResolvedValue({ ok: true });
 
     const checks = await runDaemonChecks();
     expect(checks.find((check) => check.label === "Context Tree CLI")).toEqual({
@@ -227,6 +229,21 @@ describe("doctor checks and agent resolver", () => {
     });
     // `list` is the probe: no connection, no network, tolerates an absent root.
     expect(doctorCoreMocks.runContextTreeCommand).toHaveBeenCalledWith(["list", "--json"]);
+  });
+
+  it("fails the Context Tree check when the connection store is unreadable", async () => {
+    const { runDaemonChecks } = await import("../commands/_shared/doctor-checks.js");
+    configMocks.readContextTreeRepositorySetting.mockReturnValue({ raw: "acme/context", repository: "acme/context" });
+    doctorCoreMocks.resolveContextTreeCli.mockReturnValue({ command: "node", args: ["/cli.mjs"] });
+    doctorCoreMocks.runContextTreeCommand.mockResolvedValue({ ok: true, payload: { trees: [] } });
+    doctorCoreMocks.probeContextTreeConnectionStore.mockResolvedValue({ ok: false, reason: "move it aside" });
+
+    const checks = await runDaemonChecks();
+    expect(checks.find((check) => check.label === "Context Tree CLI")).toEqual({
+      label: "Context Tree CLI",
+      ok: false,
+      detail: "acme/context: move it aside",
+    });
   });
 
   it("reports a set-but-unusable Context Tree repository", async () => {

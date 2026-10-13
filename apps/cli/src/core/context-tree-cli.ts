@@ -1,4 +1,5 @@
 import type { ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
 import {
   chmodSync,
@@ -319,17 +320,49 @@ function writeContextTreeShim(): { path: string } | { reason: string } {
   }
 }
 
-/** Host names to their home-relative Skill directories (mirrors the external CLI's host table). */
+/**
+ * Host names to their home-relative Skill directories (mirrors the external
+ * CLI's host table). Since `@first-tree-ai/context-tree` 0.1.16 the Codex host
+ * installs into `~/.agents/skills`; `~/.codex/skills` is only its config probe.
+ */
 const HOST_SKILL_DIRS = [
   ["claude", join(".claude", "skills")],
-  ["codex", join(".codex", "skills")],
+  ["codex", join(".agents", "skills")],
 ] as const;
+
+/**
+ * Destinations an earlier bundled CLI installed into. They are scanned only to
+ * retire copies First Tree recorded as its own, so an upgraded Codex does not
+ * load a stale second `context-tree-*` family next to the current one.
+ */
+const LEGACY_HOST_SKILL_DIRS = [["codex", join(".codex", "skills")]] as const;
+
+const OWNED_SKILLS_FILENAME = "context-tree-owned-skills.json";
+const OWNED_SKILLS_SCHEMA_VERSION = 2;
+
+/**
+ * Content digests of the Skill payload shipped by every earlier bundled CLI
+ * release (only 0.1.12). A version-1 ownership record holds paths without
+ * digests, so these are what let an unedited copy installed by that release be
+ * replaced or removed after an upgrade instead of being mistaken for an edit.
+ * Computed with `skillTreeDigest` over the published package's `skills/`.
+ */
+const LEGACY_PACKAGED_SKILL_DIGESTS: Readonly<Record<string, readonly string[]>> = {
+  "context-tree-cleanup": ["3a161c292a806ed433275edade89fa65c4cf5a2c07cdab8f7acd698b49b5ffd0"],
+  "context-tree-connect": ["20f90351d8035f7cbb7fed286fe7e29061c85673ad0a0a383da03a1da7e25c02"],
+  "context-tree-create": ["b006259fb5dbcb5ceeae7508a0c79777459f558b52d7f12a3e36570fa166732e"],
+  "context-tree-publish": ["a88688d4403ef3582bb619b04d359e611f5d3bbdcb982a2852987ce244c11664"],
+  "context-tree-read": ["b3f910e2c360d7dcc7369119e773a80c6274f08db4f894c1d1547e5895bf774c"],
+  "context-tree-schedule-cleanup": ["e93bed959edf08977b50837b5ca7209850859044a6b11de27412c34f524197f7"],
+  "context-tree-setup": ["7abce1d2f33a8d2cc8f72ca783344970fb7f141fdf47873b5f5a645d83fba839"],
+  "context-tree-write": ["91e46636c04a3f2c2c1cf48b00922ddeb4b003a116a72716c0b38ad0a6f236fe"],
+};
 
 /**
  * The packaged Skill payload the bundled CLI ships (`<pkg>/skills`), or null
  * when the dependency is absent. Both the dependency's postinstall and our
- * `context-tree install` write exactly these bytes, so byte-identity with this
- * tree checks for edits; a separate installation record establishes ownership.
+ * `context-tree install` write exactly these bytes, so a matching digest checks
+ * for edits; a separate installation record establishes ownership.
  */
 function packagedSkillsRoot(): string | null {
   const entry = resolveContextTreeCli()?.args[0];
@@ -339,43 +372,195 @@ function packagedSkillsRoot(): string | null {
   return existsSync(root) ? root : null;
 }
 
+/**
+ * Paths First Tree created, each with the digest recorded when it last wrote
+ * that path. Version-1 records carry no digest (`null`).
+ */
+type OwnedSkills = Map<string, string | null>;
+
 /** Only this versioned record proves that First Tree created a Skill directory. */
-function readOwnedSkillPaths(): Set<string> {
+function readOwnedSkills(): OwnedSkills {
+  const owned: OwnedSkills = new Map();
+  let value: unknown;
   try {
-    const value: unknown = JSON.parse(readFileSync(join(defaultDataDir(), "context-tree-owned-skills.json"), "utf8"));
-    if (!isRecord(value) || value.schemaVersion !== 1 || !Array.isArray(value.paths)) return new Set();
-    return new Set(value.paths.filter((path): path is string => typeof path === "string"));
+    value = JSON.parse(readFileSync(join(defaultDataDir(), OWNED_SKILLS_FILENAME), "utf8"));
   } catch {
     // Missing or unreadable provenance never authorizes deletion.
-    return new Set();
+    return owned;
+  }
+  if (!isRecord(value)) return owned;
+  if (value.schemaVersion === 1 && Array.isArray(value.paths)) {
+    for (const path of value.paths) if (typeof path === "string") owned.set(path, null);
+    return owned;
+  }
+  if (value.schemaVersion === OWNED_SKILLS_SCHEMA_VERSION && Array.isArray(value.skills)) {
+    for (const skill of value.skills) {
+      if (!isRecord(skill) || typeof skill.path !== "string") continue;
+      owned.set(skill.path, typeof skill.digest === "string" ? skill.digest : null);
+    }
+  }
+  return owned;
+}
+
+function writeOwnedSkills(owned: OwnedSkills): void {
+  mkdirSync(defaultDataDir(), { recursive: true });
+  const skills = [...owned].map(([path, digest]) => (digest === null ? { path } : { path, digest }));
+  writeFileSync(
+    join(defaultDataDir(), OWNED_SKILLS_FILENAME),
+    JSON.stringify({ schemaVersion: OWNED_SKILLS_SCHEMA_VERSION, skills }),
+  );
+}
+
+/**
+ * A content digest of one Skill directory: its shape, names and bytes, in a
+ * stable order. Returns null for anything that is not a plain tree of regular
+ * files and directories — a linked-in Skill is never one we own.
+ */
+export function skillTreeDigest(root: string): string | null {
+  const hash = createHash("sha256");
+  const visit = (directory: string, prefix: string): boolean => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(directory, { withFileTypes: true });
+    } catch {
+      return false;
+    }
+    entries.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+    for (const entry of entries) {
+      const relative = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+      if (entry.isSymbolicLink()) return false;
+      if (entry.isDirectory()) {
+        hash.update(`d\0${relative}\0`);
+        if (!visit(join(directory, entry.name), relative)) return false;
+      } else if (entry.isFile()) {
+        const bytes = readFileSync(join(directory, entry.name));
+        hash.update(`f\0${relative}\0${bytes.length}\0`);
+        hash.update(bytes);
+      } else {
+        return false;
+      }
+    }
+    return true;
+  };
+  try {
+    const entry = lstatSync(root, { throwIfNoEntry: false });
+    if (entry === undefined || entry.isSymbolicLink() || !entry.isDirectory()) return null;
+    return visit(root, "") ? hash.digest("hex") : null;
+  } catch {
+    return null;
   }
 }
 
-/** True when `left` and `right` are identical directory trees (same shape, same bytes). */
-function directoriesEqual(left: string, right: string): boolean {
-  let leftEntries: Dirent[];
-  let rightEntries: Dirent[];
-  try {
-    leftEntries = readdirSync(left, { withFileTypes: true });
-    rightEntries = readdirSync(right, { withFileTypes: true });
-  } catch {
-    return false;
+/** Digest of each packaged `context-tree-*` Skill, keyed by directory name. */
+function packagedSkillDigests(packagedRoot: string): Map<string, string> {
+  const digests = new Map<string, string>();
+  for (const entry of readdirSync(packagedRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith("context-tree-")) continue;
+    const digest = skillTreeDigest(join(packagedRoot, entry.name));
+    if (digest !== null) digests.set(entry.name, digest);
   }
-  if (leftEntries.length !== rightEntries.length) return false;
-  const rightByName = new Map(rightEntries.map((entry) => [entry.name, entry]));
-  for (const leftEntry of leftEntries) {
-    const rightEntry = rightByName.get(leftEntry.name);
-    if (rightEntry === undefined) return false;
-    if (leftEntry.isDirectory() !== rightEntry.isDirectory()) return false;
-    // Never equate or traverse symlinks: a linked-in Skill is not one we own.
-    if (leftEntry.isSymbolicLink() || rightEntry.isSymbolicLink()) return false;
-    if (leftEntry.isDirectory()) {
-      if (!directoriesEqual(join(left, leftEntry.name), join(right, rightEntry.name))) return false;
-    } else if (!readFileSync(join(left, leftEntry.name)).equals(readFileSync(join(right, rightEntry.name)))) {
-      return false;
+  return digests;
+}
+
+/**
+ * True when `target` is a Skill First Tree recorded as its own AND still holds
+ * bytes First Tree wrote: the digest recorded at install time, the current
+ * packaged payload, or the payload of an earlier bundled release.
+ */
+function isOwnedPristineSkill(
+  target: string,
+  name: string,
+  owned: OwnedSkills,
+  packagedDigests: ReadonlyMap<string, string>,
+): boolean {
+  if (!owned.has(target)) return false;
+  const digest = skillTreeDigest(target);
+  if (digest === null) return false;
+  return (
+    digest === owned.get(target) ||
+    digest === packagedDigests.get(name) ||
+    (LEGACY_PACKAGED_SKILL_DIGESTS[name]?.includes(digest) ?? false)
+  );
+}
+
+/** Names First Tree may ever have installed: the current payload plus earlier releases. */
+function knownSkillNames(packagedDigests: ReadonlyMap<string, string>): Set<string> {
+  return new Set([...packagedDigests.keys(), ...Object.keys(LEGACY_PACKAGED_SKILL_DIGESTS)]);
+}
+
+type RetireResult = {
+  /** Owned, unedited copies that were deleted (and dropped from `owned`). */
+  removed: string[];
+  /** Known Skill names left in place: unowned, edited, or unremovable. */
+  preserved: string[];
+  /** Other `context-tree-*` directories, never ours to judge. */
+  foreign: string[];
+};
+
+/**
+ * Delete the `context-tree-*` Skills in one Skill directory that First Tree
+ * owns and has not seen edited. Mutates `owned` for what it removes.
+ */
+function retireOwnedSkills(
+  skillsRoot: string,
+  isKnownName: (name: string) => boolean,
+  owned: OwnedSkills,
+  packagedDigests: ReadonlyMap<string, string>,
+): RetireResult {
+  const result: RetireResult = { removed: [], preserved: [], foreign: [] };
+  let entries: Dirent[];
+  try {
+    // Never delete through a host directory redirected after installation.
+    if (realpathSync(skillsRoot) !== skillsRoot) return result;
+    entries = readdirSync(skillsRoot, { withFileTypes: true });
+  } catch {
+    return result; // No Skill directory here — nothing to clean up.
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith("context-tree-")) continue;
+    const target = join(skillsRoot, entry.name);
+    if (!isKnownName(entry.name)) {
+      result.foreign.push(target);
+      continue;
+    }
+    if (!isOwnedPristineSkill(target, entry.name, owned, packagedDigests)) {
+      result.preserved.push(target);
+      continue;
+    }
+    try {
+      rmSync(target, { recursive: true, force: true });
+      owned.delete(target);
+      result.removed.push(target);
+    } catch {
+      // Unremovable (permission, in use) — keep it and report, don't pretend.
+      result.preserved.push(target);
     }
   }
-  return true;
+  return result;
+}
+
+/** The external CLI's error code for an unreadable `~/.context-tree/connections.json`. */
+const CORRUPT_CONNECTION_CODE = "CORRUPT_CONNECTION";
+
+/**
+ * `@first-tree-ai/context-tree` 0.1.16 reads only its version-2 connection
+ * store and refuses the version-1 file earlier releases wrote, with no
+ * migration. The file is global and may hold connections First Tree did not
+ * make, so it is reported and never rewritten here.
+ */
+export const CONNECTION_STORE_REMEDY =
+  "~/.context-tree/connections.json is unreadable (likely written by context-tree before 0.1.16); move it aside, then run login again";
+
+/**
+ * Probe whether the external CLI can read its connection store.
+ *
+ * `resolve` loads the whole store before filtering by project, so any project
+ * path exercises it; `NO_CONNECTION` for that path is the healthy answer.
+ */
+export async function probeContextTreeConnectionStore(): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const result = await runContextTreeCommand(["resolve", "--project-path", homedir(), "--json"]);
+  if (result.ok || result.reasonCode !== CORRUPT_CONNECTION_CODE) return { ok: true };
+  return { ok: false, reason: CONNECTION_STORE_REMEDY };
 }
 
 /**
@@ -401,50 +586,25 @@ export async function removeContextTreeSkills(): Promise<ContextTreeSetupReport>
     return { ...base, reason: `${CONTEXT_TREE_PACKAGE} is not installed beside this CLI` };
   }
 
-  const packagedNames = readdirSync(packagedRoot, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => entry.name)
-    .filter((name) => name.startsWith("context-tree-"));
-
   let home: string;
+  let packagedDigests: Map<string, string>;
   try {
     home = realpathSync(homedir());
+    packagedDigests = packagedSkillDigests(packagedRoot);
   } catch {
     return { ...base, status: "failed", reason: "could not resolve the user home directory" };
   }
+  const knownNames = knownSkillNames(packagedDigests);
 
-  const ownedPaths = readOwnedSkillPaths();
+  const owned = readOwnedSkills();
   const removedSkillPaths: string[] = [];
   const preservedSkillPaths: string[] = [];
-  for (const [, relative] of HOST_SKILL_DIRS) {
+  for (const [, relative] of [...HOST_SKILL_DIRS, ...LEGACY_HOST_SKILL_DIRS]) {
     const skillsRoot = join(home, relative);
-    let entries: Dirent[];
-    try {
-      // Never delete through a host directory redirected after installation.
-      if (realpathSync(skillsRoot) !== skillsRoot) continue;
-      entries = readdirSync(skillsRoot, { withFileTypes: true });
-    } catch {
-      continue; // No Skill directory for this host — nothing to clean up.
-    }
-    for (const entry of entries) {
-      if (!entry.isDirectory() || !entry.name.startsWith("context-tree-")) continue;
-      const target = join(skillsRoot, entry.name);
-      if (
-        !ownedPaths.has(target) ||
-        !packagedNames.includes(entry.name) ||
-        !directoriesEqual(target, join(packagedRoot, entry.name))
-      ) {
-        preservedSkillPaths.push(target);
-        continue;
-      }
-      try {
-        rmSync(target, { recursive: true, force: true });
-        removedSkillPaths.push(target);
-      } catch {
-        // Unremovable (permission, in use) — keep it and report, don't pretend.
-        preservedSkillPaths.push(target);
-      }
-    }
+    const result = retireOwnedSkills(skillsRoot, (name) => knownNames.has(name), owned, packagedDigests);
+    removedSkillPaths.push(...result.removed);
+    // Every remaining prefixed directory is reported, owned by us or not.
+    preservedSkillPaths.push(...result.preserved, ...result.foreign);
   }
 
   const binDir = channelCliBinDir();
@@ -459,7 +619,7 @@ export async function removeContextTreeSkills(): Promise<ContextTreeSetupReport>
   }
 
   try {
-    unlinkSync(join(defaultDataDir(), "context-tree-owned-skills.json"));
+    unlinkSync(join(defaultDataDir(), OWNED_SKILLS_FILENAME));
   } catch {
     // No ownership record may exist; preserved copies are no longer owned.
   }
@@ -511,27 +671,26 @@ export async function ensureContextTreeSkills(): Promise<ContextTreeSetupReport>
     return { ...base, reason: `${CONTEXT_TREE_PACKAGE} is not installed beside this CLI` };
   }
 
-  const ownedPaths = readOwnedSkillPaths();
-  const newPaths: string[] = [];
+  const owned = readOwnedSkills();
   const installHosts: string[] = [];
   const preservedSkillPaths: string[] = [];
   const installFailures: ContextTreeConnectFailure[] = [];
+  let home: string;
+  let packagedDigests: Map<string, string>;
   try {
     const packagedRoot = packagedSkillsRoot();
     if (packagedRoot === null) return { ...base, status: "failed", reason: "Packaged Skills are missing" };
-    const home = realpathSync(homedir());
+    home = realpathSync(homedir());
+    packagedDigests = packagedSkillDigests(packagedRoot);
     for (const [host, relative] of HOST_SKILL_DIRS) {
       const protectedPaths: string[] = [];
-      for (const entry of readdirSync(packagedRoot, { withFileTypes: true })) {
-        if (!entry.isDirectory() || !entry.name.startsWith("context-tree-")) continue;
-        const target = join(home, relative, entry.name);
+      for (const name of packagedDigests.keys()) {
+        const target = join(home, relative, name);
         const existing = lstatSync(target, { throwIfNoEntry: false });
-        if (existing === undefined) newPaths.push(target);
-        else if (
-          !ownedPaths.has(target) ||
-          !existing.isDirectory() ||
-          !directoriesEqual(target, join(packagedRoot, entry.name))
-        ) {
+        if (existing === undefined) continue;
+        // An owned copy written by this or an earlier bundled release may be
+        // replaced; anything else is the operator's and blocks the host.
+        if (!existing.isDirectory() || !isOwnedPristineSkill(target, name, owned, packagedDigests)) {
           protectedPaths.push(target);
         }
       }
@@ -559,14 +718,31 @@ export async function ensureContextTreeSkills(): Promise<ContextTreeSetupReport>
   }
 
   try {
-    for (const path of newPaths) {
-      if (lstatSync(path, { throwIfNoEntry: false })?.isDirectory()) ownedPaths.add(path);
+    // Every packaged destination of an installed host was absent or owned
+    // before the install, so the bytes now there are First Tree's.
+    for (const [host, relative] of HOST_SKILL_DIRS) {
+      if (!installedHosts.includes(host)) continue;
+      for (const name of packagedDigests.keys()) {
+        const target = join(home, relative, name);
+        const digest = skillTreeDigest(target);
+        if (digest !== null) owned.set(target, digest);
+      }
     }
-    mkdirSync(defaultDataDir(), { recursive: true });
-    writeFileSync(
-      join(defaultDataDir(), "context-tree-owned-skills.json"),
-      JSON.stringify({ schemaVersion: 1, paths: [...ownedPaths] }),
-    );
+    // Retire copies an earlier bundled release wrote to a destination the host
+    // no longer reads from, so the host does not load two Skill families.
+    const knownNames = knownSkillNames(packagedDigests);
+    for (const [host, relative] of LEGACY_HOST_SKILL_DIRS) {
+      if (!installedHosts.includes(host)) continue;
+      const result = retireOwnedSkills(join(home, relative), (name) => knownNames.has(name), owned, packagedDigests);
+      if (result.preserved.length > 0) {
+        preservedSkillPaths.push(...result.preserved);
+        installFailures.push({
+          workspace: host,
+          reason: `${host} legacy Skills preserved at ${result.preserved.join(", ")}; remove them to avoid duplicate context-tree-* Skills`,
+        });
+      }
+    }
+    writeOwnedSkills(owned);
   } catch (error) {
     return { ...base, status: "failed", reason: `Could not record Skill ownership: ${String(error)}` };
   }
@@ -588,10 +764,35 @@ export async function ensureContextTreeSkills(): Promise<ContextTreeSetupReport>
     report.failures.push({ workspace: "context-tree shim", reason: shim.reason });
   }
 
+  // `connect` clones before it touches the store, so probe the store first
+  // instead of cloning once per workspace only to fail on the same file.
+  const store = await probeContextTreeConnectionStore();
+  if (!store.ok) {
+    report.failures.push({
+      workspace: "context-tree connections",
+      reason: store.reason,
+      reasonCode: CORRUPT_CONNECTION_CODE,
+    });
+    return report;
+  }
+
   for (const workspace of existingWorkspacePaths()) {
     const connect = await runContextTreeCommand(["connect", repository, "--project-path", workspace, "--json"]);
-    if (connect.ok) report.connectedWorkspaces.push(workspace);
-    else report.failures.push({ workspace, reason: connect.reason, reasonCode: connect.reasonCode });
+    if (connect.ok) {
+      report.connectedWorkspaces.push(workspace);
+      continue;
+    }
+    if (connect.reasonCode === CORRUPT_CONNECTION_CODE) {
+      // The store is global, so every further workspace would fail the same
+      // way. Report it once, with the remedy, and never rewrite the file.
+      report.failures.push({
+        workspace: "context-tree connections",
+        reason: CONNECTION_STORE_REMEDY,
+        reasonCode: connect.reasonCode,
+      });
+      break;
+    }
+    report.failures.push({ workspace, reason: connect.reason, reasonCode: connect.reasonCode });
   }
 
   return report;

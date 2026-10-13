@@ -127,6 +127,7 @@ describe("packaged Context Tree dependency", () => {
     expect(output).toContain("run `context-tree install`");
     expect(existsSync(join(home, ".claude", "skills"))).toBe(false);
     expect(existsSync(join(home, ".codex", "skills"))).toBe(false);
+    expect(existsSync(join(home, ".agents", "skills"))).toBe(false);
   });
 });
 
@@ -303,8 +304,9 @@ describe("ensureContextTreeSkills switched back off", () => {
     const report = await ensureContextTreeSkills();
     expect(report.status).toBe("removed");
     expect(report.removedSkillPaths).toEqual([]);
-    for (const host of [".claude", ".codex"]) {
-      const skill = join(realpathSync(home), host, "skills", "context-tree-read");
+    // Since 0.1.16 the Codex host installs into ~/.agents/skills.
+    for (const skillsDir of [join(".claude", "skills"), join(".agents", "skills")]) {
+      const skill = join(realpathSync(home), skillsDir, "context-tree-read");
       expect(report.preservedSkillPaths).toContain(skill);
       expect(existsSync(skill)).toBe(true);
     }
@@ -431,5 +433,156 @@ describe("ensureContextTreeSkills switched back off", () => {
     // Skill whose contents do not match the packaged payload.
     expect(existsSync(museum)).toBe(true);
     expect(report.preservedSkillPaths).toContain(join(realpathSync(home), ".claude", "skills", "context-tree-read"));
+  });
+});
+
+/** The ownership ledger as written to disk, keyed by path. */
+function readLedger(home: string): Map<string, string | undefined> {
+  const value = JSON.parse(readFileSync(join(home, "data", "context-tree-owned-skills.json"), "utf8"));
+  expect(value.schemaVersion).toBe(2);
+  return new Map(value.skills.map((entry: { path: string; digest?: string }) => [entry.path, entry.digest]));
+}
+
+describe("upgrading the bundled context-tree CLI", () => {
+  it("installs Codex Skills into ~/.agents/skills and records a digest for each owned Skill", async () => {
+    const home = scratchHome("acme/context");
+    scratchBinDir("first-tree-test");
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    mkdirSync(join(home, ".codex"), { recursive: true });
+
+    const { ensureContextTreeSkills, skillTreeDigest } = await loadModule();
+    const report = await ensureContextTreeSkills();
+
+    expect(report.installedHosts).toEqual(expect.arrayContaining(["claude", "codex"]));
+    const realHome = realpathSync(home);
+    const codexSkill = join(realHome, ".agents", "skills", "context-tree-read");
+    expect(existsSync(codexSkill)).toBe(true);
+    expect(existsSync(join(home, ".codex", "skills"))).toBe(false);
+    const ledger = readLedger(home);
+    expect(ledger.get(codexSkill)).toBe(skillTreeDigest(codexSkill));
+    expect(ledger.get(join(realHome, ".claude", "skills", "context-tree-read"))).toBe(
+      skillTreeDigest(join(realHome, ".claude", "skills", "context-tree-read")),
+    );
+  });
+
+  it("replaces an owned copy whose bytes still match the digest recorded when it was installed", async () => {
+    const home = scratchHome("acme/context");
+    scratchBinDir("first-tree-test");
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    const { ensureContextTreeSkills, skillTreeDigest } = await loadModule();
+    expect((await ensureContextTreeSkills()).status).toBe("installed");
+
+    // Stand in for a payload an earlier release wrote: different bytes, but the
+    // ledger recorded exactly these bytes, so they are not a user edit.
+    const skill = join(realpathSync(home), ".claude", "skills", "context-tree-read");
+    writeFileSync(join(skill, "SKILL.md"), "# payload of an earlier release\n");
+    const ledgerPath = join(home, "data", "context-tree-owned-skills.json");
+    const ledger = JSON.parse(readFileSync(ledgerPath, "utf8"));
+    for (const entry of ledger.skills) if (entry.path === skill) entry.digest = skillTreeDigest(skill);
+    writeFileSync(ledgerPath, JSON.stringify(ledger));
+
+    const report = await ensureContextTreeSkills();
+    expect(report.installedHosts).toContain("claude");
+    expect(report.preservedSkillPaths).not.toContain(skill);
+    expect(readFileSync(join(skill, "SKILL.md"), "utf8")).not.toBe("# payload of an earlier release\n");
+  });
+
+  it("retires owned copies from the legacy ~/.codex/skills directory recorded by a version-1 ledger", async () => {
+    const home = scratchHome("acme/context");
+    scratchBinDir("first-tree-test");
+    mkdirSync(join(home, ".codex"), { recursive: true });
+    const realHome = realpathSync(home);
+    const packaged = await packagedSkillsRoot();
+    const legacy = join(realHome, ".codex", "skills", "context-tree-read");
+    cpSync(join(packaged, "context-tree-read"), legacy, { recursive: true });
+    const edited = join(realHome, ".codex", "skills", "context-tree-write");
+    cpSync(join(packaged, "context-tree-write"), edited, { recursive: true });
+    writeFileSync(join(edited, "SKILL.md"), "# edited\n");
+    mkdirSync(join(home, "data"), { recursive: true });
+    writeFileSync(
+      join(home, "data", "context-tree-owned-skills.json"),
+      JSON.stringify({ schemaVersion: 1, paths: [legacy, edited] }),
+    );
+
+    const { ensureContextTreeSkills, formatContextTreeSetupReport } = await loadModule();
+    const report = await ensureContextTreeSkills();
+
+    expect(report.installedHosts).toContain("codex");
+    expect(existsSync(join(realHome, ".agents", "skills", "context-tree-read"))).toBe(true);
+    // The unedited owned copy is gone, so Codex sees one context-tree-read.
+    expect(existsSync(legacy)).toBe(false);
+    // The edited one is the user's now: kept and reported.
+    expect(existsSync(edited)).toBe(true);
+    expect(report.preservedSkillPaths).toContain(edited);
+    expect(formatContextTreeSetupReport(report)).toContain("legacy Skills preserved");
+    expect(readLedger(home).has(legacy)).toBe(false);
+  });
+
+  it("removes owned Skills from both the current and the legacy Codex directory when switched off", async () => {
+    const home = scratchHome();
+    mkdirSync(join(home, ".codex"), { recursive: true });
+    const realHome = realpathSync(home);
+    const packaged = await packagedSkillsRoot();
+    const legacy = join(realHome, ".codex", "skills", "context-tree-read");
+    const current = join(realHome, ".agents", "skills", "context-tree-read");
+    cpSync(join(packaged, "context-tree-read"), legacy, { recursive: true });
+    cpSync(join(packaged, "context-tree-read"), current, { recursive: true });
+    mkdirSync(join(home, "data"), { recursive: true });
+    writeFileSync(
+      join(home, "data", "context-tree-owned-skills.json"),
+      JSON.stringify({ schemaVersion: 1, paths: [legacy, current] }),
+    );
+
+    const { ensureContextTreeSkills } = await loadModule();
+    const report = await ensureContextTreeSkills();
+
+    expect(report.status).toBe("removed");
+    expect(report.removedSkillPaths).toEqual(expect.arrayContaining([legacy, current]));
+    expect(existsSync(legacy)).toBe(false);
+    expect(existsSync(current)).toBe(false);
+  });
+});
+
+describe("pre-0.1.16 connection store", () => {
+  const legacyStore = (projectPath: string): string =>
+    `${JSON.stringify({
+      schemaVersion: 1,
+      connections: [{ projectPath, tree: { kind: "local", path: join(projectPath, "tree") } }],
+    })}\n`;
+
+  it("is reported once with the remedy and never rewritten", async () => {
+    const home = scratchHome("acme/context");
+    scratchBinDir("first-tree-test");
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    const workspaces = join(home, "data", "workspaces");
+    mkdirSync(join(workspaces, "alpha"), { recursive: true });
+    mkdirSync(join(workspaces, "beta"), { recursive: true });
+    const store = join(home, ".context-tree", "connections.json");
+    mkdirSync(dirname(store), { recursive: true });
+    const original = legacyStore(join(workspaces, "alpha"));
+    writeFileSync(store, original);
+
+    const { ensureContextTreeSkills, formatContextTreeSetupReport, CONNECTION_STORE_REMEDY } = await loadModule();
+    const report = await ensureContextTreeSkills();
+
+    expect(report.status).toBe("installed");
+    expect(report.connectedWorkspaces).toEqual([]);
+    const storeFailures = report.failures.filter((failure) => failure.reasonCode === "CORRUPT_CONNECTION");
+    expect(storeFailures).toEqual([
+      { workspace: "context-tree connections", reason: CONNECTION_STORE_REMEDY, reasonCode: "CORRUPT_CONNECTION" },
+    ]);
+    expect(formatContextTreeSetupReport(report)).toContain("connections.json");
+    expect(readFileSync(store, "utf8")).toBe(original);
+  });
+
+  it("is detected by the connection-store probe", async () => {
+    const home = scratchHome("acme/context");
+    const { probeContextTreeConnectionStore } = await loadModule();
+    expect(await probeContextTreeConnectionStore()).toEqual({ ok: true });
+
+    const store = join(home, ".context-tree", "connections.json");
+    mkdirSync(dirname(store), { recursive: true });
+    writeFileSync(store, legacyStore(join(home, "project")));
+    expect(await probeContextTreeConnectionStore()).toMatchObject({ ok: false });
   });
 });
