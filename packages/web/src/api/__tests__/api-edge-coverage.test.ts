@@ -74,6 +74,34 @@ describe("attachment API helpers", () => {
     await expect(new Response(init.body).text()).resolves.toBe("abc");
   });
 
+  it("rejects overlong attachment filenames before upload transport", async () => {
+    const { uploadAttachment } = await import("../attachments.js");
+    await expect(uploadAttachment(new Blob(["x"]), ";".repeat(256))).rejects.toThrow(
+      "Attachment filename exceeds maximum length",
+    );
+    expect(rawMock).not.toHaveBeenCalled();
+  });
+
+  it("validates and encodes the trimmed attachment filename", async () => {
+    const { uploadAttachment } = await import("../attachments.js");
+    rawMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          id: "123e4567-e89b-12d3-a456-426614174000",
+          mimeType: "text/plain",
+          filename: "padded.txt",
+          sizeBytes: 1,
+          uploadedBy: "agent-1",
+          createdAt: "2026-07-09T00:00:00.000Z",
+        }),
+      ),
+    );
+
+    await uploadAttachment(new Blob(["x"]), `${" ".repeat(6000)}padded.txt `);
+    const [, init] = rawMock.mock.calls[0] ?? [];
+    expect(init?.headers).toMatchObject({ [ATTACHMENT_FILENAME_HEADER]: "padded.txt" });
+  });
+
   it("downloads attachment bytes as base64, text, and a browser save", async () => {
     rawMock
       .mockResolvedValueOnce(new Response(new Blob(["hello"], { type: "text/plain" })))
