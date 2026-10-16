@@ -31,6 +31,13 @@ function string(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+type TextField = { kind: "missing" } | { kind: "invalid" } | { kind: "value"; text: string };
+
+function textField(value: Record<string, unknown> | null): TextField {
+  if (!value || !Object.hasOwn(value, "text")) return { kind: "missing" };
+  return typeof value.text === "string" ? { kind: "value", text: value.text } : { kind: "invalid" };
+}
+
 function number(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -88,9 +95,16 @@ export function parseOpenCodeStreamLine(line: string): OpenCodeStreamEvent[] {
 
   switch (string(row.type)) {
     case "text": {
-      const text = string(part?.text) ?? string(row.text);
-      if (!text) events.push({ kind: "unknown", note: "text event missing text" });
-      else events.push({ kind: "text", text });
+      // OpenCode stores an empty text part for assistant steps that only call
+      // tools, and re-emits stored parts (including empty ones) when a session
+      // is resumed. An explicitly empty string is therefore normal, not a
+      // protocol violation — skip it instead of failing the turn. Missing or
+      // non-string fields remain protocol violations. The row-level text
+      // fallback is retained only when the part has no text field.
+      const partText = textField(part);
+      const text = partText.kind === "missing" ? textField(row) : partText;
+      if (text.kind !== "value") events.push({ kind: "unknown", note: "text event missing text" });
+      else if (text.text) events.push({ kind: "text", text: text.text });
       break;
     }
     case "tool_use": {

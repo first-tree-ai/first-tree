@@ -48,8 +48,33 @@ describe("OpenCode JSONL parser", () => {
     expect(parseOpenCodeStreamLine(JSON.stringify({ type: "future", sessionID: "ses_1" }))).toContainEqual(
       expect.objectContaining({ kind: "unknown" }),
     );
-    expect(parseOpenCodeStreamLine(JSON.stringify({ type: "text", sessionID: "ses_1", part: {} }))).toContainEqual(
-      expect.objectContaining({ kind: "unknown" }),
-    );
+  });
+
+  it("skips explicitly empty text events stored by tool-only steps", () => {
+    const events = parseOpenCodeStreamLine(JSON.stringify({ type: "text", sessionID: "ses_1", part: { text: "" } }));
+    expect(events).toContainEqual({ kind: "session", sessionId: "ses_1" });
+    expect(events).not.toContainEqual(expect.objectContaining({ kind: "unknown" }));
+    expect(events).not.toContainEqual(expect.objectContaining({ kind: "text" }));
+  });
+
+  it("keeps malformed text fields as protocol violations", () => {
+    for (const part of [{}, { text: 123 }]) {
+      expect(parseOpenCodeStreamLine(JSON.stringify({ type: "text", sessionID: "ses_1", part }))).toContainEqual({
+        kind: "unknown",
+        note: "text event missing text",
+      });
+    }
+  });
+
+  it("uses the row-level text fallback only when the part has no text field", () => {
+    expect(
+      parseOpenCodeStreamLine(JSON.stringify({ type: "text", sessionID: "ses_1", text: "legacy" })),
+    ).toContainEqual({ kind: "text", text: "legacy" });
+    expect(
+      parseOpenCodeStreamLine(JSON.stringify({ type: "text", sessionID: "ses_1", text: "legacy", part: {} })),
+    ).toContainEqual({ kind: "text", text: "legacy" });
+    expect(
+      parseOpenCodeStreamLine(JSON.stringify({ type: "text", sessionID: "ses_1", text: "legacy", part: { text: "" } })),
+    ).not.toContainEqual(expect.objectContaining({ kind: "text" }));
   });
 });
