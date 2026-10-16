@@ -3,6 +3,7 @@ import type { MessageFormat } from "@first-tree/shared";
 import type { Command } from "commander";
 import { fail, success } from "../../cli/output.js";
 import { captureOutboundDocs } from "../../core/doc-capture.js";
+import { checkFeishuChatContext } from "../../core/feishu-chat-context.js";
 import { createSdk, handleSdkError } from "../_shared/local-agent.js";
 import { guardInlineDescription, readStdin } from "./_shared/io.js";
 import { buildRequestMetadata } from "./_shared/request.js";
@@ -147,6 +148,33 @@ export function registerChatCreateCommand(chat: Command): void {
         }
 
         const sdk = createSdk(options.agent);
+
+        // The server cannot enforce this one: `POST /agent/chats` never
+        // receives the originating chat. Refuse client-side so a Feishu-bound
+        // session does not spawn a First Tree chat its humans cannot see.
+        //
+        // The origin lookup deliberately runs under the SESSION identity
+        // (`createSdk()` resolves from FIRST_TREE_AGENT_ID), never under
+        // `--agent`. `--agent` picks who creates the new chat; it must not pick
+        // who answers "is the chat I am sitting in bridged?" — an overridden
+        // agent that is not a member of the origin chat gets a 403, and reading
+        // that as "not a Feishu chat" was a straight bypass of this refusal.
+        // Requiring the session agent here also keeps an unrelated agent's
+        // membership from becoming a precondition for ordinary creates.
+        //
+        // The whole decision lives in `checkFeishuChatContext`: no chat id at
+        // all is an operator terminal and proceeds without a lookup, while a
+        // chat id whose bridged-ness cannot be established — no session agent
+        // to read it as, an unreachable or older server, an unrecognised
+        // value — refuses. A half-configured environment must not be the
+        // cheapest way past the guard.
+        const refusal = await checkFeishuChatContext(
+          () => createSdk(),
+          { chatId: process.env.FIRST_TREE_CHAT_ID, agentId: process.env.FIRST_TREE_AGENT_ID },
+          "create",
+        );
+        if (refusal) fail(refusal.code, refusal.message, 2);
+
         // KNOWN GAP (follow-up #1069), out of scope for this PR: no chat exists
         // yet, so the upload org can't be resolved from a chat — doc capture is a
         // pass-through for `chat create`'s initial message (doc mentions render as

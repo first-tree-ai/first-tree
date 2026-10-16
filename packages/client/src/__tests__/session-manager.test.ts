@@ -6,7 +6,6 @@ import {
   type AgentRuntimeConfig,
   encodeProviderRetryEventMessage,
   parseProviderRetryEventMessage,
-  RUNTIME_NOTICE_METADATA_KEY,
   type RuntimeState,
   type SessionEvent,
 } from "@first-tree/shared";
@@ -38,6 +37,7 @@ function mockSdk(): FirstTreeHubSDK {
   return {
     register: vi.fn(),
     sendMessage: vi.fn().mockResolvedValue({ id: "msg-reply" }),
+    postRuntimeNotice: vi.fn().mockResolvedValue({ id: "runtime-notice" }),
     sendToAgent: vi.fn().mockResolvedValue({ id: "msg-dm" }),
   } as unknown as FirstTreeHubSDK;
 }
@@ -2212,10 +2212,11 @@ describe("SessionRuntime ackEntry callback (deferred ack)", () => {
 
   it("posts a durable runtime notice before ACKing a terminal provider failure", async () => {
     const ackEntry = vi.fn().mockResolvedValue(undefined);
-    const sendMessage = vi.fn().mockResolvedValue({ id: "runtime-notice" });
+    const postRuntimeNotice = vi.fn().mockResolvedValue({ id: "runtime-notice" });
     const sdk = {
       register: vi.fn(),
-      sendMessage,
+      sendMessage: vi.fn().mockResolvedValue({ id: "msg-reply" }),
+      postRuntimeNotice,
       sendToAgent: vi.fn().mockResolvedValue({ id: "msg-dm" }),
     } as unknown as FirstTreeHubSDK;
     let capturedCtx: SessionContext | undefined;
@@ -2251,22 +2252,17 @@ describe("SessionRuntime ackEntry callback (deferred ack)", () => {
     });
 
     expect(completionDisposition).toBe("settled");
-    expect(sendMessage).toHaveBeenCalledTimes(1);
-    expect(sendMessage).toHaveBeenCalledWith(
-      "chat-provider-terminal",
-      expect.objectContaining({
-        source: "api",
-        format: "text",
-        metadata: { [RUNTIME_NOTICE_METADATA_KEY]: true },
-        purpose: "agent-final-text",
-      }),
-    );
-    const notice = String(sendMessage.mock.calls[0]?.[1].content);
+    // The notice goes out through the dedicated runtime-notice endpoint, which
+    // authors the delivery profile and the stored marker server-side; only the
+    // chat id and the text travel from here.
+    expect(postRuntimeNotice).toHaveBeenCalledTimes(1);
+    expect(postRuntimeNotice).toHaveBeenCalledWith("chat-provider-terminal", expect.any(String));
+    const notice = String(postRuntimeNotice.mock.calls[0]?.[1]);
     expect(notice).toContain("Codex could not run this turn");
     expect(notice).toContain("credentials need attention");
     expect(notice).toContain("refresh token was revoked");
     expect(ackEntry).toHaveBeenCalledWith(21);
-    const [noticeOrder] = sendMessage.mock.invocationCallOrder;
+    const [noticeOrder] = postRuntimeNotice.mock.invocationCallOrder;
     const [ackOrder] = ackEntry.mock.invocationCallOrder;
     if (noticeOrder === undefined || ackOrder === undefined) throw new Error("expected notice and ack order");
     expect(noticeOrder).toBeLessThan(ackOrder);
@@ -2276,10 +2272,11 @@ describe("SessionRuntime ackEntry callback (deferred ack)", () => {
 
   it("posts a durable Pi auth/capability notice before ACKing terminal failure", async () => {
     const ackEntry = vi.fn().mockResolvedValue(undefined);
-    const sendMessage = vi.fn().mockResolvedValue({ id: "runtime-notice-pi" });
+    const postRuntimeNotice = vi.fn().mockResolvedValue({ id: "runtime-notice-pi" });
     const sdk = {
       register: vi.fn(),
-      sendMessage,
+      sendMessage: vi.fn().mockResolvedValue({ id: "msg-reply" }),
+      postRuntimeNotice,
       sendToAgent: vi.fn().mockResolvedValue({ id: "msg-dm" }),
     } as unknown as FirstTreeHubSDK;
     let capturedCtx: SessionContext | undefined;
@@ -2312,15 +2309,15 @@ describe("SessionRuntime ackEntry callback (deferred ack)", () => {
     });
 
     expect(completionDisposition).toBe("settled");
-    expect(sendMessage).toHaveBeenCalledTimes(1);
-    const notice = String(sendMessage.mock.calls[0]?.[1].content);
+    expect(postRuntimeNotice).toHaveBeenCalledTimes(1);
+    const notice = String(postRuntimeNotice.mock.calls[0]?.[1]);
     expect(notice).toContain("Pi could not run this turn");
     expect(notice).toContain("credentials need attention");
     expect(notice).toContain("run `pi`");
     expect(notice).toContain("`/login`");
     expect(notice).toContain("missing credentials");
     expect(ackEntry).toHaveBeenCalledWith(31);
-    const [noticeOrder] = sendMessage.mock.invocationCallOrder;
+    const [noticeOrder] = postRuntimeNotice.mock.invocationCallOrder;
     const [ackOrder] = ackEntry.mock.invocationCallOrder;
     if (noticeOrder === undefined || ackOrder === undefined) throw new Error("expected notice and ack order");
     expect(noticeOrder).toBeLessThan(ackOrder);
@@ -2330,10 +2327,11 @@ describe("SessionRuntime ackEntry callback (deferred ack)", () => {
 
   it("posts a durable runtime notice before ACKing a Codex retry-exhausted turn once", async () => {
     const ackEntry = vi.fn().mockResolvedValue(undefined);
-    const sendMessage = vi.fn().mockResolvedValue({ id: "runtime-notice" });
+    const postRuntimeNotice = vi.fn().mockResolvedValue({ id: "runtime-notice" });
     const sdk = {
       register: vi.fn(),
-      sendMessage,
+      sendMessage: vi.fn().mockResolvedValue({ id: "msg-reply" }),
+      postRuntimeNotice,
       sendToAgent: vi.fn().mockResolvedValue({ id: "msg-dm" }),
     } as unknown as FirstTreeHubSDK;
     let capturedCtx: SessionContext | undefined;
@@ -2367,10 +2365,10 @@ describe("SessionRuntime ackEntry callback (deferred ack)", () => {
       reason: "provider_retry_exhausted",
     });
 
-    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(postRuntimeNotice).toHaveBeenCalledTimes(1);
     expect(ackEntry).toHaveBeenCalledTimes(1);
     expect(ackEntry).toHaveBeenCalledWith(27);
-    const [noticeOrder] = sendMessage.mock.invocationCallOrder;
+    const [noticeOrder] = postRuntimeNotice.mock.invocationCallOrder;
     const [ackOrder] = ackEntry.mock.invocationCallOrder;
     if (noticeOrder === undefined || ackOrder === undefined) throw new Error("expected notice and ack order");
     expect(noticeOrder).toBeLessThan(ackOrder);
@@ -2380,10 +2378,11 @@ describe("SessionRuntime ackEntry callback (deferred ack)", () => {
 
   it("posts a durable runtime notice for Claude provider-turn terminal failures", async () => {
     const ackEntry = vi.fn().mockResolvedValue(undefined);
-    const sendMessage = vi.fn().mockResolvedValue({ id: "runtime-notice" });
+    const postRuntimeNotice = vi.fn().mockResolvedValue({ id: "runtime-notice" });
     const sdk = {
       register: vi.fn(),
-      sendMessage,
+      sendMessage: vi.fn().mockResolvedValue({ id: "msg-reply" }),
+      postRuntimeNotice,
       sendToAgent: vi.fn().mockResolvedValue({ id: "msg-dm" }),
     } as unknown as FirstTreeHubSDK;
     let capturedCtx: SessionContext | undefined;
@@ -2420,14 +2419,14 @@ describe("SessionRuntime ackEntry callback (deferred ack)", () => {
     });
 
     expect(completionDisposition).toBe("settled");
-    expect(sendMessage).toHaveBeenCalledTimes(1);
-    const notice = String(sendMessage.mock.calls[0]?.[1].content);
+    expect(postRuntimeNotice).toHaveBeenCalledTimes(1);
+    const notice = String(postRuntimeNotice.mock.calls[0]?.[1]);
     expect(notice).toContain("Claude Code could not run this turn");
     expect(notice).toContain("before authentication");
     expect(notice).toContain("daemon.env");
     expect(notice).not.toContain("rejected the local Claude authentication");
     expect(ackEntry).toHaveBeenCalledWith(24);
-    const [noticeOrder] = sendMessage.mock.invocationCallOrder;
+    const [noticeOrder] = postRuntimeNotice.mock.invocationCallOrder;
     const [ackOrder] = ackEntry.mock.invocationCallOrder;
     if (noticeOrder === undefined || ackOrder === undefined) throw new Error("expected notice and ack order");
     expect(noticeOrder).toBeLessThan(ackOrder);
@@ -2437,10 +2436,11 @@ describe("SessionRuntime ackEntry callback (deferred ack)", () => {
 
   it("posts a durable runtime notice for Claude retry-exhausted provider-turn failures", async () => {
     const ackEntry = vi.fn().mockResolvedValue(undefined);
-    const sendMessage = vi.fn().mockResolvedValue({ id: "runtime-notice" });
+    const postRuntimeNotice = vi.fn().mockResolvedValue({ id: "runtime-notice" });
     const sdk = {
       register: vi.fn(),
-      sendMessage,
+      sendMessage: vi.fn().mockResolvedValue({ id: "msg-reply" }),
+      postRuntimeNotice,
       sendToAgent: vi.fn().mockResolvedValue({ id: "msg-dm" }),
     } as unknown as FirstTreeHubSDK;
     let capturedCtx: SessionContext | undefined;
@@ -2479,8 +2479,8 @@ describe("SessionRuntime ackEntry callback (deferred ack)", () => {
       reason: "retry_exhausted_notice_posted",
     });
 
-    expect(sendMessage).toHaveBeenCalledTimes(1);
-    const notice = String(sendMessage.mock.calls[0]?.[1].content);
+    expect(postRuntimeNotice).toHaveBeenCalledTimes(1);
+    const notice = String(postRuntimeNotice.mock.calls[0]?.[1]);
     expect(notice).toContain("provider API connection failed after retry handling");
     expect(notice).toContain("socket connection was closed unexpectedly");
     expect(ackEntry).toHaveBeenCalledWith(25);
@@ -2490,10 +2490,11 @@ describe("SessionRuntime ackEntry callback (deferred ack)", () => {
 
   it("posts a durable runtime notice before ACKing Claude auto-resume failures", async () => {
     const ackEntry = vi.fn().mockResolvedValue(undefined);
-    const sendMessage = vi.fn().mockResolvedValue({ id: "runtime-notice" });
+    const postRuntimeNotice = vi.fn().mockResolvedValue({ id: "runtime-notice" });
     const sdk = {
       register: vi.fn(),
-      sendMessage,
+      sendMessage: vi.fn().mockResolvedValue({ id: "msg-reply" }),
+      postRuntimeNotice,
       sendToAgent: vi.fn().mockResolvedValue({ id: "msg-dm" }),
     } as unknown as FirstTreeHubSDK;
     let capturedCtx: SessionContext | undefined;
@@ -2531,13 +2532,13 @@ describe("SessionRuntime ackEntry callback (deferred ack)", () => {
       reason: "auto_resume_failed_notice_posted",
     });
 
-    expect(sendMessage).toHaveBeenCalledTimes(1);
-    const notice = String(sendMessage.mock.calls[0]?.[1].content);
+    expect(postRuntimeNotice).toHaveBeenCalledTimes(1);
+    const notice = String(postRuntimeNotice.mock.calls[0]?.[1]);
     expect(notice).toContain("provider API connection failed after retry handling");
     expect(notice).toContain("initial sdk transport crash");
     expect(notice).toContain("respawn build failed");
     expect(ackEntry).toHaveBeenCalledWith(26);
-    const [noticeOrder] = sendMessage.mock.invocationCallOrder;
+    const [noticeOrder] = postRuntimeNotice.mock.invocationCallOrder;
     const [ackOrder] = ackEntry.mock.invocationCallOrder;
     if (noticeOrder === undefined || ackOrder === undefined) throw new Error("expected notice and ack order");
     expect(noticeOrder).toBeLessThan(ackOrder);
@@ -2549,10 +2550,11 @@ describe("SessionRuntime ackEntry callback (deferred ack)", () => {
     const ackEntry = vi.fn().mockResolvedValue(undefined);
     const recoverChat = vi.fn().mockResolvedValue(undefined);
     const recoverRuntimeSessionProof = vi.fn().mockRejectedValue(new Error("bind temporarily rejected"));
-    const sendMessage = vi.fn().mockResolvedValue({ id: "must-not-post" });
+    const postRuntimeNotice = vi.fn().mockResolvedValue({ id: "must-not-post" });
     const sdk = {
       register: vi.fn(),
-      sendMessage,
+      sendMessage: vi.fn().mockResolvedValue({ id: "msg-reply" }),
+      postRuntimeNotice,
       sendToAgent: vi.fn().mockResolvedValue({ id: "msg-dm" }),
     } as unknown as FirstTreeHubSDK;
     let capturedCtx: SessionContext | undefined;
@@ -2593,7 +2595,7 @@ describe("SessionRuntime ackEntry callback (deferred ack)", () => {
     // for bind recovery), so the completion disposition must be "retry",
     // never "settled".
     expect(heldDisposition).toBe("retry");
-    expect(sendMessage).not.toHaveBeenCalled();
+    expect(postRuntimeNotice).not.toHaveBeenCalled();
     expect(ackEntry).not.toHaveBeenCalled();
     expect(recoverChat).not.toHaveBeenCalled();
     expect(recoverRuntimeSessionProof).toHaveBeenCalledTimes(1);
@@ -2648,7 +2650,7 @@ describe("SessionRuntime ackEntry callback (deferred ack)", () => {
     expect(recoverRuntimeSessionProof).toHaveBeenCalledWith("runtime_session_invalid");
     expect(recoverChat).not.toHaveBeenCalled();
     expect(ackEntry).not.toHaveBeenCalled();
-    expect(vi.mocked(sdk.sendMessage)).not.toHaveBeenCalled();
+    expect(vi.mocked(sdk.postRuntimeNotice)).not.toHaveBeenCalled();
 
     await sm.shutdown();
   });
@@ -2657,14 +2659,15 @@ describe("SessionRuntime ackEntry callback (deferred ack)", () => {
     const ackEntry = vi.fn().mockResolvedValue(undefined);
     const recoverChat = vi.fn().mockResolvedValue(undefined);
     const recoverRuntimeSessionProof = vi.fn().mockResolvedValue(undefined);
-    const sendMessage = vi.fn().mockRejectedValue(
+    const postRuntimeNotice = vi.fn().mockRejectedValue(
       new SdkError(403, "Missing x-agent-runtime-session header", {
         code: AGENT_RUNTIME_SESSION_ERROR_CODES.MISSING,
       }),
     );
     const sdk = {
       register: vi.fn(),
-      sendMessage,
+      sendMessage: vi.fn().mockResolvedValue({ id: "msg-reply" }),
+      postRuntimeNotice,
       sendToAgent: vi.fn().mockResolvedValue({ id: "msg-dm" }),
     } as unknown as FirstTreeHubSDK;
     let capturedCtx: SessionContext | undefined;
@@ -2700,7 +2703,7 @@ describe("SessionRuntime ackEntry callback (deferred ack)", () => {
       reason: "provider_credential_required",
     });
 
-    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(postRuntimeNotice).toHaveBeenCalledTimes(1);
     expect(recoverRuntimeSessionProof).toHaveBeenCalledWith("runtime_session_missing");
     expect(recoverChat).not.toHaveBeenCalled();
     expect(ackEntry).not.toHaveBeenCalled();
@@ -2711,10 +2714,11 @@ describe("SessionRuntime ackEntry callback (deferred ack)", () => {
   it("does not ACK a terminal provider failure when the durable runtime notice cannot be posted", async () => {
     const ackEntry = vi.fn().mockResolvedValue(undefined);
     const recoverChat = vi.fn().mockResolvedValue(undefined);
-    const sendMessage = vi.fn().mockRejectedValue(new Error("send failed"));
+    const postRuntimeNotice = vi.fn().mockRejectedValue(new Error("notice post failed"));
     const sdk = {
       register: vi.fn(),
-      sendMessage,
+      sendMessage: vi.fn().mockResolvedValue({ id: "msg-reply" }),
+      postRuntimeNotice,
       sendToAgent: vi.fn().mockResolvedValue({ id: "msg-dm" }),
     } as unknown as FirstTreeHubSDK;
     const emitted: SessionEvent[] = [];
@@ -2752,7 +2756,7 @@ describe("SessionRuntime ackEntry callback (deferred ack)", () => {
     });
 
     expect(failedNoticeCompletionDisposition).toBe("retry");
-    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(postRuntimeNotice).toHaveBeenCalledTimes(1);
     expect(ackEntry).not.toHaveBeenCalled();
     expect(recoverChat).toHaveBeenCalledWith("chat-provider-notice-fail");
     expect(
@@ -2763,25 +2767,26 @@ describe("SessionRuntime ackEntry callback (deferred ack)", () => {
           event.payload.message.includes("runtime failure notice delivery failed"),
       ),
     ).toBe(true);
-    sendMessage.mockReset();
-    sendMessage.mockResolvedValue({ id: "later-runtime-notice" });
+    postRuntimeNotice.mockReset();
+    postRuntimeNotice.mockResolvedValue({ id: "later-runtime-notice" });
     await capturedCtx.finishTurn(capturedMessage, {
       status: "error",
       terminal: true,
       completion: "consumed",
       reason: "forward_failed",
     });
-    expect(sendMessage).not.toHaveBeenCalled();
+    expect(postRuntimeNotice).not.toHaveBeenCalled();
 
     await sm.shutdown();
   });
 
   it("clears stale terminal provider notices when the delivery is retried instead of consumed", async () => {
     const ackEntry = vi.fn().mockResolvedValue(undefined);
-    const sendMessage = vi.fn().mockResolvedValue({ id: "runtime-notice" });
+    const postRuntimeNotice = vi.fn().mockResolvedValue({ id: "runtime-notice" });
     const sdk = {
       register: vi.fn(),
-      sendMessage,
+      sendMessage: vi.fn().mockResolvedValue({ id: "msg-reply" }),
+      postRuntimeNotice,
       sendToAgent: vi.fn().mockResolvedValue({ id: "msg-dm" }),
     } as unknown as FirstTreeHubSDK;
     let capturedCtx: SessionContext | undefined;
@@ -2815,7 +2820,7 @@ describe("SessionRuntime ackEntry callback (deferred ack)", () => {
       reason: "forward_failed",
     });
 
-    expect(sendMessage).not.toHaveBeenCalled();
+    expect(postRuntimeNotice).not.toHaveBeenCalled();
     expect(ackEntry).not.toHaveBeenCalled();
 
     await sm.shutdown();

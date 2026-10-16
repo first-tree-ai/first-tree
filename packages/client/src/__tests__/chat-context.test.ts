@@ -39,6 +39,7 @@ function mkChatDetail(overrides?: Partial<ChatDetail>): ChatDetail {
     viewerMembershipKind: "participant",
     descriptionUpdatedAt: null,
     lastReadAt: null,
+    externalChannel: null,
     ...overrides,
   };
 }

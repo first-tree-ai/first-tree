@@ -33,6 +33,7 @@ function mockSdk(overrides: Record<string, unknown> = {}): FirstTreeHubSDK {
   return {
     register: vi.fn(),
     sendMessage: vi.fn().mockResolvedValue({ id: "msg-reply" }),
+    postRuntimeNotice: vi.fn().mockResolvedValue({ id: "runtime-notice" }),
     sendToAgent: vi.fn().mockResolvedValue({ id: "msg-dm" }),
     getChatDetail: vi.fn().mockResolvedValue({ organizationId: "org-1" }),
     ...overrides,
@@ -617,8 +618,8 @@ describe("SessionRuntime additional delivery token and payload coverage", () => 
   it("retries terminalRejected instead of ACKing when the durable runtime notice cannot be posted", async () => {
     const ackEntry = mockAckEntry();
     const recoverChat = vi.fn<(chatId: string) => Promise<void>>().mockResolvedValue(undefined);
-    const sendMessage = vi.fn().mockRejectedValue(new Error("notice write failed"));
-    const sdk = mockSdk({ sendMessage });
+    const postRuntimeNotice = vi.fn().mockRejectedValue(new Error("notice write failed"));
+    const sdk = mockSdk({ postRuntimeNotice });
     let capturedCtx: SessionContext | undefined;
     let capturedToken: DeliveryToken | undefined;
     let capturedMessage: SessionMessage | undefined;
@@ -664,7 +665,7 @@ describe("SessionRuntime additional delivery token and payload coverage", () => 
       messageId: "runtime-notice-error",
     });
 
-    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(postRuntimeNotice).toHaveBeenCalledTimes(1);
     expect(ackEntry).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(recoverChat).toHaveBeenCalledWith("chat-terminal-notice-fail"));
     expect(
@@ -681,8 +682,8 @@ describe("SessionRuntime additional delivery token and payload coverage", () => 
 
   it("ignores malformed provider retry event payloads when completing a consumed error", async () => {
     const ackEntry = mockAckEntry();
-    const sendMessage = vi.fn().mockResolvedValue({ id: "runtime-notice" });
-    const sdk = mockSdk({ sendMessage });
+    const postRuntimeNotice = vi.fn().mockResolvedValue({ id: "runtime-notice" });
+    const sdk = mockSdk({ postRuntimeNotice });
     let capturedCtx: SessionContext | undefined;
     let capturedToken: DeliveryToken | undefined;
     let capturedMessage: SessionMessage | undefined;
@@ -707,7 +708,7 @@ describe("SessionRuntime additional delivery token and payload coverage", () => 
       reason: "provider_clean_error",
     });
 
-    expect(sendMessage).not.toHaveBeenCalled();
+    expect(postRuntimeNotice).not.toHaveBeenCalled();
     expect(ackEntry).toHaveBeenCalledTimes(1);
     expect(ackEntry).toHaveBeenCalledWith(403);
 
