@@ -328,27 +328,35 @@ describe("small API route handlers", () => {
   });
 
   it("returns health and healthz success and degraded responses", async () => {
-    const { healthRoutes } = await import("../api/health.js");
-    const { healthzRoutes } = await import("../api/healthz.js");
-    const execute = vi.fn().mockResolvedValue(undefined);
-    const { app, routes } = makeApp({ db: { execute } });
+    vi.useFakeTimers();
+    try {
+      const { healthRoutes } = await import("../api/health.js");
+      const { healthzRoutes } = await import("../api/healthz.js");
+      const execute = vi.fn().mockResolvedValue(undefined);
+      const { app, routes } = makeApp({ db: { execute } });
 
-    await healthRoutes(app as never);
-    await healthzRoutes(app as never);
-    await expect(route(routes, "GET", "/health").handler()).resolves.toEqual({ db: "connected", status: "ok" });
+      await healthRoutes(app as never);
+      await healthzRoutes(app as never);
+      await expect(route(routes, "GET", "/health").handler()).resolves.toEqual({ db: "connected", status: "ok" });
 
-    const okReply = makeReply();
-    await route(routes, "GET", "/healthz").handler({}, okReply);
-    expect(okReply).toMatchObject({ body: { status: "ok" }, code: 200 });
+      const okReply = makeReply();
+      await route(routes, "GET", "/healthz").handler({}, okReply);
+      expect(okReply).toMatchObject({ body: { status: "ok" }, code: 200 });
 
-    execute.mockRejectedValueOnce(new Error("db down")).mockRejectedValueOnce(new Error("db down"));
-    await expect(route(routes, "GET", "/health").handler()).resolves.toEqual({
-      db: "disconnected",
-      status: "degraded",
-    });
-    const degradedReply = makeReply();
-    await route(routes, "GET", "/healthz").handler({}, degradedReply);
-    expect(degradedReply).toMatchObject({ body: { message: "database unreachable", status: "error" }, code: 503 });
+      execute.mockRejectedValueOnce(new Error("db down")).mockRejectedValueOnce(new Error("db down"));
+      await expect(route(routes, "GET", "/health").handler()).resolves.toEqual({
+        db: "disconnected",
+        status: "degraded",
+      });
+      // /healthz caches its probe briefly; move past the TTL so the degraded
+      // path re-probes and consumes the second rejection.
+      vi.advanceTimersByTime(1_001);
+      const degradedReply = makeReply();
+      await route(routes, "GET", "/healthz").handler({}, degradedReply);
+      expect(degradedReply).toMatchObject({ body: { message: "database unreachable", status: "error" }, code: 503 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("serves agent runtime config and context tree info", async () => {
