@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { defaultDataDir, normalizeContextTreeRef, readContextTreeRefSetting } from "@first-tree/shared/config";
 import { getChildProcessRegistry } from "./child-process-registry.js";
 import { retireLegacyContextTreeInstallOnce } from "./external-context-tree-legacy.js";
@@ -77,6 +77,10 @@ export type ExternalContextTreeWorkspaceResult =
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function describeError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /**
@@ -520,6 +524,7 @@ function installWorkspaceSkills(workspace: string): SkillInstallResult {
   const written: Record<string, string> = {};
   const disowned: string[] = [];
   const preserved: string[] = [];
+  let failure: string | undefined;
   try {
     for (const relative of WORKSPACE_SKILL_ROOTS) {
       const root = realSkillRoot(workspace, relative);
@@ -550,29 +555,64 @@ function installWorkspaceSkills(workspace: string): SkillInstallResult {
       }
     }
   } catch (err) {
-    return {
-      ok: false,
-      reason: `could not install Context Tree Skills in ${workspace}: ${err instanceof Error ? err.message : String(err)}`,
-    };
-  } finally {
-    // Record what was written even when a later target failed, so revert can find it.
+    failure = `could not install Context Tree Skills in ${workspace}: ${describeError(err)}`;
+  }
+  // Record what was written even when a later target failed, so revert can find it.
+  try {
     updateWorkspaceRecord(workspace, (current) => {
       for (const key of disowned) delete current.skills[key];
       return { ...current, skills: { ...current.skills, ...written } };
     });
+  } catch (err) {
+    failure ??= `could not record Context Tree Skills for ${workspace}: ${describeError(err)}`;
   }
+  if (failure !== undefined) return { ok: false, reason: failure };
   installedSkills.set(workspace, version);
   return { ok: true, preserved };
 }
 
-/** Remove the Skill directories the record proves First Tree wrote and nobody edited since. */
+/**
+ * The on-disk path of a recorded Skill target, or null when it cannot be
+ * proven to still live inside the workspace.
+ *
+ * A digest match alone does not prove that: if `.claude` or `.claude/skills`
+ * has been replaced by a symlink since, the same bytes may now sit outside the
+ * workspace. So the key must name one of the Skill roots plus a single plain
+ * segment, and the workspace and every directory down to the Skill root must
+ * be real directories — the same rule {@link realSkillRoot} applies on install.
+ */
+function containedSkillTarget(workspace: string, key: string): string | null {
+  const root = WORKSPACE_SKILL_ROOTS.find((candidate) => key.startsWith(`${candidate}${sep}`));
+  if (root === undefined) return null;
+  const name = key.slice(root.length + 1);
+  if (name.length === 0 || name === "." || name === ".." || /[\\/]/u.test(name)) return null;
+  let current = workspace;
+  for (const segment of ["", ...root.split(/[\\/]/u)]) {
+    current = segment === "" ? current : join(current, segment);
+    const entry = lstatSync(current, { throwIfNoEntry: false });
+    if (entry === undefined || entry.isSymbolicLink() || !entry.isDirectory()) return null;
+  }
+  return join(current, name);
+}
+
+/**
+ * Remove the Skill directories the record proves First Tree wrote and nobody
+ * edited since, and that still live inside the workspace. Anything else is
+ * preserved and reported.
+ */
 function removeWorkspaceSkills(workspace: string): { removed: string[]; preserved: string[] } {
   installedSkills.delete(workspace);
   const removed: string[] = [];
   const preserved: string[] = [];
   const skills = readWorkspaceRecords().get(workspace)?.skills ?? {};
   for (const [key, digest] of Object.entries(skills)) {
-    const target = join(workspace, key);
+    const target = containedSkillTarget(workspace, key);
+    if (target === null) {
+      // A redirected or invalid Skill root: whatever is there is not provably ours.
+      if (lstatSync(join(workspace, key), { throwIfNoEntry: false }) !== undefined)
+        preserved.push(join(workspace, key));
+      continue;
+    }
     if (lstatSync(target, { throwIfNoEntry: false }) === undefined) continue;
     if (skillTreeDigest(target) !== digest) {
       preserved.push(target);
@@ -620,6 +660,19 @@ export async function ensureExternalContextTreeWorkspace(
   workspace: string,
   target: ExternalContextTreeTarget,
 ): Promise<ExternalContextTreeWorkspaceResult> {
+  try {
+    return await ensureWorkspace(workspace, target);
+  } catch (err) {
+    // Persistence or filesystem errors stay a per-workspace failure: login
+    // carries on with the next workspace and a session still starts.
+    return { ok: false, reason: `could not prepare Context Tree for ${workspace}: ${describeError(err)}` };
+  }
+}
+
+async function ensureWorkspace(
+  workspace: string,
+  target: ExternalContextTreeTarget,
+): Promise<ExternalContextTreeWorkspaceResult> {
   if (!resolveContextTreeCli())
     return { ok: false, reason: `${CONTEXT_TREE_PACKAGE} is not installed beside this CLI` };
   const shim = writeContextTreeShim();
@@ -656,6 +709,16 @@ export async function ensureExternalContextTreeWorkspace(
 export async function removeExternalContextTreeWorkspace(
   workspace: string,
 ): Promise<{ ok: true; preservedSkillPaths: string[] } | { ok: false; reason: string }> {
+  try {
+    return await removeWorkspace(workspace);
+  } catch (err) {
+    return { ok: false, reason: `could not revert Context Tree for ${workspace}: ${describeError(err)}` };
+  }
+}
+
+async function removeWorkspace(
+  workspace: string,
+): Promise<{ ok: true; preservedSkillPaths: string[] } | { ok: false; reason: string }> {
   if (!resolveContextTreeCli())
     return { ok: false, reason: `${CONTEXT_TREE_PACKAGE} is not installed beside this CLI` };
   const { preserved } = removeWorkspaceSkills(workspace);
@@ -686,6 +749,14 @@ export async function prepareExternalContextTreeForSession(
   repository: string,
   log: (message: string) => void,
 ): Promise<void> {
+  try {
+    await prepareForSession(workspace, repository, log);
+  } catch (err) {
+    log(`Context Tree: could not prepare ${repository}: ${describeError(err)}`);
+  }
+}
+
+async function prepareForSession(workspace: string, repository: string, log: (message: string) => void): Promise<void> {
   retireLegacyContextTreeInstallOnce(log);
   const { raw, ref: configuredRef } = readContextTreeRefSetting();
   if (raw !== null && configuredRef === null) {

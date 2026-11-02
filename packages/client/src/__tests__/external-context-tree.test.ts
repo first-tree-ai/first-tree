@@ -10,6 +10,7 @@ import {
   contextTreeShimDir,
   ensureExternalContextTreeWorkspace,
   packagedContextTreeSkillNames,
+  prepareExternalContextTreeForSession,
   recordedExternalContextTreeWorkspaces,
   removeExternalContextTreeWorkspace,
   resolveContextTreeRef,
@@ -101,6 +102,24 @@ describe("workspace Skills", () => {
     expect(readFileSync(join(core, "SKILL.md"), "utf8")).toBe("keep\n");
     expect(readFileSync(join(team, "SKILL.md"), "utf8")).toBe("keep\n");
     expect(recordedExternalContextTreeWorkspaces()).toEqual([]);
+  });
+});
+
+describe("best-effort boundaries", () => {
+  it("reports a failed ownership-record write instead of rejecting session preparation", async () => {
+    const workspace = join(home, "data", "workspaces", "ledger");
+    mkdirSync(workspace, { recursive: true });
+    // The record path is a directory, so every write fails with EISDIR.
+    mkdirSync(join(home, "data", "context-tree-connections.json"), { recursive: true });
+
+    const result = await ensureExternalContextTreeWorkspace(workspace, { repository: "acme/ledger", ref: "main" });
+    expect(result.ok).toBe(false);
+
+    const logs: string[] = [];
+    await expect(
+      prepareExternalContextTreeForSession(workspace, "acme/ledger", (message) => logs.push(message)),
+    ).resolves.toBeUndefined();
+    expect(logs.some((message) => message.startsWith("Context Tree:"))).toBe(true);
   });
 });
 

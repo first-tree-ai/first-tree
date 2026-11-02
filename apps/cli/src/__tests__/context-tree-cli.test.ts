@@ -1,5 +1,15 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { setCliBinding } from "@first-tree/client";
@@ -316,6 +326,25 @@ describe("ensureContextTreeSkills", () => {
     expect(report.preservedSkillPaths).toEqual([join(ws, ".agents", "skills", "context-tree-write")]);
     expect(readFileSync(edited, "utf8")).toBe("edited by the operator\n");
     expect(existsSync(join(ws, ".claude", "skills", "context-tree-write"))).toBe(false);
+  });
+
+  it("never deletes through a Skill root redirected outside the workspace on revert", async () => {
+    createRemoteTree("acme/redirected");
+    writeConfig({ repository: "acme/redirected", ref: "trunk" });
+    const ws = workspace("redirected");
+    const { ensureContextTreeSkills } = await loadModule();
+    expect((await ensureContextTreeSkills()).failures).toEqual([]);
+    const outside = join(mkdtempSync(join(tmpdir(), "ft-context-tree-outside-")), "claude");
+    renameSync(join(ws, ".claude"), outside);
+    symlinkSync(outside, join(ws, ".claude"));
+
+    writeConfig();
+    const report = await ensureContextTreeSkills();
+    expect(report.status).toBe("removed");
+    expect(existsSync(join(outside, "skills", "context-tree-read", "SKILL.md"))).toBe(true);
+    expect(report.preservedSkillPaths).toContain(join(ws, ".claude", "skills", "context-tree-read"));
+    // The real root is still cleaned.
+    expect(existsSync(join(ws, ".agents", "skills", "context-tree-read"))).toBe(false);
   });
 
   it("removes its own legacy channel shim and never a user's global context-tree", async () => {
