@@ -31,6 +31,7 @@ import {
   runSourcePublicationTestHook,
   withSourcePublicationLock,
 } from "../context-source.js";
+import { prepareExternalContextTreeForSession } from "../external-context-tree.js";
 import type { SessionContext } from "../handler.js";
 import {
   allowedTargetRootsFromProjection,
@@ -932,6 +933,12 @@ export async function projectManagedWorkspace(
           : null,
         verified ? verified.resourceConfigVersion : null,
       );
+    }
+
+    // After the reconcile above, so the superseded Core Skills are already gone
+    // and the external `context-tree-*` Skills land beside a settled ledger.
+    if (requestedKind === "external" && contextTree.repository) {
+      await prepareExternalContextTreeForSession(trustedTarget, contextTree.repository, sessionCtx.log);
     }
 
     if (beforeBriefing) {

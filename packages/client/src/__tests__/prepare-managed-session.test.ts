@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -29,6 +29,9 @@ const TEST_PROVIDER_SKILL_ROOTS = Object.freeze({
 });
 
 const reconcileManagedSkillsForConfig = vi.fn();
+const prepareExternalContextTreeForSession = vi.fn(
+  async (_workspace: string, _repository: string, _log: (message: string) => void) => undefined,
+);
 const teamSkillBundleResolverFromSdk = vi.fn(() => vi.fn());
 const buildAgentBriefing = vi.fn();
 const ensureAgentBootstrap = vi.fn();
@@ -101,6 +104,11 @@ vi.mock("../runtime/managed-skills.js", async (importOriginal) => ({
   verifyManagedSkillsProjectionForAdmission: vi.fn(async () => ({ resourceConfigVersion: 0, teamSkills: [] })),
   isManagedSkillsUnsafeDiscoveryError: () => false,
   ManagedSkillsUnsafeDiscoveryError: class ManagedSkillsUnsafeDiscoveryError extends Error {},
+}));
+
+vi.mock("../runtime/external-context-tree.js", () => ({
+  prepareExternalContextTreeForSession: (workspace: string, repository: string, log: (message: string) => void) =>
+    prepareExternalContextTreeForSession(workspace, repository, log),
 }));
 
 vi.mock("../runtime/team-skill-bundle-resolver.js", () => ({
@@ -338,6 +346,16 @@ describe("prepareManagedSession", () => {
       // gone in this mode.
       expect(kinds).toContain("external");
       expect(kinds).not.toContain("remote");
+      // The workspace receives the `context-tree-*` Skills and its connection
+      // after the reconcile has stood the superseded Core Skills down.
+      expect(prepareExternalContextTreeForSession).toHaveBeenCalledTimes(1);
+      expect(prepareExternalContextTreeForSession.mock.calls[0]?.slice(0, 2)).toEqual([
+        realpathSync(workspaceRoot),
+        "acme/context",
+      ]);
+      expect(prepareExternalContextTreeForSession.mock.invocationCallOrder[0]).toBeGreaterThan(
+        reconcileManagedSkillsForConfig.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+      );
     } else {
       // `none` collapses to the ordinary full-Skill mode on the way into the
       // reconciler, which is the point: this provider keeps
@@ -345,6 +363,7 @@ describe("prepareManagedSession", () => {
       // `context-tree-*` Skills that were never installed for it.
       expect(kinds).not.toContain("external");
       expect(kinds).toContain("remote");
+      expect(prepareExternalContextTreeForSession).not.toHaveBeenCalled();
     }
 
     // Either way no workspace tree is owned, so no manifest names one.

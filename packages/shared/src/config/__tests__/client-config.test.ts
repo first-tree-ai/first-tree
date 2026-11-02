@@ -4,7 +4,9 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clientConfigSchema,
+  normalizeContextTreeRef,
   normalizeContextTreeRepository,
+  readContextTreeRefSetting,
   readContextTreeRepository,
   readContextTreeRepositorySetting,
 } from "../client-config.js";
@@ -123,5 +125,48 @@ describe("normalizeContextTreeRepository", () => {
     `owner/${"r".repeat(101)}`,
   ])("rejects %s", (value) => {
     expect(normalizeContextTreeRepository(value)).toBeNull();
+  });
+});
+
+describe("context_tree.ref", () => {
+  it.each([
+    ["main", "main"],
+    ["release/2026-10", "release/2026-10"],
+    [" refs/heads/master ", "master"],
+  ])("accepts %j as %j", (value, expected) => {
+    expect(normalizeContextTreeRef(value)).toBe(expected);
+  });
+
+  it.each([
+    "",
+    "bad..ref",
+    "-x",
+    "a b",
+    "trailing/",
+    "x.lock",
+    "a//b",
+    "a:b",
+    "@",
+    "/lead",
+    "a/.hidden",
+  ])("refuses %j", (value) => {
+    expect(normalizeContextTreeRef(value)).toBeNull();
+  });
+
+  it("reads unset as the repository's default branch", () => {
+    writeClientConfig("server:\n  url: http://localhost:8000\ncontext_tree:\n  repository: acme/context\n");
+    expect(readContextTreeRefSetting()).toEqual({ raw: null, ref: null });
+  });
+
+  it("reads a configured branch and keeps an unusable one for diagnostics", () => {
+    writeClientConfig("server:\n  url: http://localhost:8000\ncontext_tree:\n  ref: refs/heads/main\n");
+    expect(readContextTreeRefSetting()).toEqual({ raw: "refs/heads/main", ref: "main" });
+    writeClientConfig("server:\n  url: http://localhost:8000\ncontext_tree:\n  ref: bad..ref\n");
+    expect(readContextTreeRefSetting()).toEqual({ raw: "bad..ref", ref: null });
+  });
+
+  it("canonicalizes through the field schema", () => {
+    expect(clientConfigSchema.context_tree.ref.schema.parse("refs/heads/main")).toBe("main");
+    expect(() => clientConfigSchema.context_tree.ref.schema.parse("bad..ref")).toThrow();
   });
 });

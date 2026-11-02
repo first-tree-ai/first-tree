@@ -1296,7 +1296,13 @@ describe("buildAgentBriefing — external Context Tree mode", () => {
       expect(section).toContain("context-tree-read");
       expect(section).toContain("context-tree-write");
     }
-    expect(tree).toContain("context-tree-setup");
+    // 1.x ships no `context-tree-setup`: setup routes to init / connect, and a
+    // settled write is authorized to publish.
+    expect(briefing).not.toContain("context-tree-setup");
+    expect(skills).toContain("context-tree-init");
+    expect(skills).toContain("context-tree-connect");
+    expect(tree).toContain("--publish");
+    expect(tree).toContain(".context-tree.json");
     expect(tree).toContain("acme/context");
 
     // The whole point of external mode: the Agent is never *directed* to a Skill

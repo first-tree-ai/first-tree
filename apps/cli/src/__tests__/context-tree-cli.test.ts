@@ -1,7 +1,6 @@
 import { execFileSync } from "node:child_process";
 import {
   chmodSync,
-  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -12,57 +11,76 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, join } from "node:path";
 import { setCliBinding } from "@first-tree/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 /**
- * Two independent homes are in play and both must be redirected.
+ * Everything here runs the real bundled `@first-tree-ai/context-tree` 1.x CLI.
  *
- * `FIRST_TREE_HOME` is where `resolveConfigReadonly` finds `client.yaml`, so it
- * decides whether external mode is on. The external CLI, however, resolves its
- * own Skill host directories and `~/.context-tree` state from `os.homedir()`
- * (`context-tree/src/core/install.ts`), which honours `HOME` / `USERPROFILE`.
- * The child process inherits `process.env`, so overriding those here is what
- * keeps `context-tree install` out of the developer's real `~/.claude/skills`.
+ * Three things are redirected so nothing reaches the developer's machine or the
+ * network:
+ * - `FIRST_TREE_HOME` decides where `client.yaml` and First Tree's data dir
+ *   (workspaces, shim, records) live;
+ * - `HOME` / `USERPROFILE` decide where the external CLI keeps snapshots and
+ *   where legacy account-level Skills are looked for;
+ * - a Git `url.<base>.insteadOf` rule passed through `GIT_CONFIG_*` turns
+ *   `https://github.com/OWNER/REPO.git` into a local bare repository, so
+ *   `connect` and the default-branch lookup run offline.
  */
-function scratchHome(repository?: string): string {
-  const home = mkdtempSync(join(tmpdir(), "ft-context-tree-cli-"));
-  const configDir = join(home, "config");
-  mkdirSync(configDir, { recursive: true });
+const ENV_VARS = [
+  "FIRST_TREE_HOME",
+  "HOME",
+  "USERPROFILE",
+  "PATH",
+  "GIT_CONFIG_COUNT",
+  "GIT_CONFIG_KEY_0",
+  "GIT_CONFIG_VALUE_0",
+] as const;
+const originalEnv = new Map<string, string | undefined>();
+
+let home: string;
+let remotes: string;
+
+function writeConfig(context?: { repository?: string; ref?: string }): void {
+  const lines = ["server:", "  url: http://localhost:8000"];
+  if (context) {
+    lines.push("context_tree:");
+    if (context.repository !== undefined) lines.push(`  repository: ${context.repository}`);
+    if (context.ref !== undefined) lines.push(`  ref: ${context.ref}`);
+  }
+  writeFileSync(join(home, "config", "client.yaml"), `${lines.join("\n")}\n`, "utf8");
+}
+
+/** A valid 1.x tree in a bare repository served as `https://github.com/<repository>.git`. */
+function createRemoteTree(repository: string, branches: readonly string[] = ["trunk"]): void {
+  const source = mkdtempSync(join(tmpdir(), "ft-context-tree-src-"));
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd: source });
+  git("init", "-q", "-b", branches[0] ?? "trunk");
   writeFileSync(
-    join(configDir, "client.yaml"),
-    repository === undefined
-      ? "server:\n  url: http://localhost:8000\n"
-      : `server:\n  url: http://localhost:8000\ncontext_tree:\n  repository: ${repository}\n`,
-    "utf8",
+    join(source, "NODE.md"),
+    '---\nschemaVersion: 1\ntitle: "context"\n---\n\n# context\n\nFixture tree.\n',
   );
-  process.env.FIRST_TREE_HOME = home;
-  process.env.HOME = home;
-  process.env.USERPROFILE = home;
-  return home;
+  git("add", ".");
+  git("commit", "-qm", "init");
+  for (const branch of branches.slice(1)) git("branch", branch);
+  execFileSync("git", ["clone", "-q", "--bare", source, join(remotes, `${repository}.git`)]);
 }
 
-async function loadModule() {
-  // Fresh module per test: config resolution caches nothing here, but the import
-  // must observe the FIRST_TREE_HOME set by the current test.
-  return import("../core/context-tree-cli.js");
+function workspace(name: string): string {
+  const path = join(home, "data", "workspaces", name);
+  mkdirSync(path, { recursive: true });
+  return path;
 }
 
-/** The bundled package's `skills/` payload directory (what install/postinstall copy). */
-async function packagedSkillsRoot(): Promise<string> {
-  const entry = (await loadModule()).resolveContextTreeCli()?.args[0];
-  if (entry === undefined) throw new Error("context-tree CLI not resolvable");
-  // …/dist/cli/index.mjs -> …/skills
-  return join(dirname(dirname(dirname(entry))), "skills");
+function declaredTrees(ws: string): unknown[] {
+  return (JSON.parse(readFileSync(join(ws, ".context-tree.json"), "utf8")) as { trees: unknown[] }).trees;
 }
 
 /**
- * A scratch bin directory holding a fake channel CLI, placed on `PATH`.
- *
- * `writeContextTreeShim` writes beside whatever `getCliBinding().binName`
- * resolves to on `PATH`. Pointing that at a temp dir is what stops the shim
- * being written into the developer's real npm global bin.
+ * A scratch bin directory holding a fake channel CLI, placed first on `PATH`,
+ * so the legacy shim cleanup looks there and never at a real global bin.
  */
 function scratchBinDir(binName: string): string {
   const binDir = mkdtempSync(join(tmpdir(), "ft-context-tree-bin-"));
@@ -74,21 +92,26 @@ function scratchBinDir(binName: string): string {
   return binDir;
 }
 
-const HOME_VARS = ["FIRST_TREE_HOME", "HOME", "USERPROFILE", "PATH"] as const;
-const originalEnv = new Map<string, string | undefined>();
+async function loadModule() {
+  return import("../core/context-tree-cli.js");
+}
 
 beforeEach(() => {
-  for (const key of HOME_VARS) {
-    originalEnv.set(key, process.env[key]);
-    if (key !== "PATH") delete process.env[key];
-  }
-  // Nothing below should ever reach the real home, so default every test to an
-  // empty scratch one and let those that need config overwrite it.
-  scratchHome();
+  for (const key of ENV_VARS) originalEnv.set(key, process.env[key]);
+  home = realpathSync(mkdtempSync(join(tmpdir(), "ft-context-tree-cli-")));
+  remotes = realpathSync(mkdtempSync(join(tmpdir(), "ft-context-tree-remotes-")));
+  mkdirSync(join(home, "config"), { recursive: true });
+  process.env.FIRST_TREE_HOME = home;
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  process.env.GIT_CONFIG_COUNT = "1";
+  process.env.GIT_CONFIG_KEY_0 = `url.file://${remotes}/.insteadOf`;
+  process.env.GIT_CONFIG_VALUE_0 = "https://github.com/";
+  writeConfig();
 });
 
 afterEach(() => {
-  for (const key of HOME_VARS) {
+  for (const key of ENV_VARS) {
     const previous = originalEnv.get(key);
     if (previous === undefined) delete process.env[key];
     else process.env[key] = previous;
@@ -96,340 +119,288 @@ afterEach(() => {
 });
 
 describe("resolveContextTreeCli", () => {
-  it("resolves the packaged bin and invokes it through the current Node binary", async () => {
-    const { resolveContextTreeCli } = await loadModule();
+  it("resolves the packaged 1.x bin and invokes it through the current Node binary", async () => {
+    const { resolveContextTreeCli, inspectContextTreeCli } = await loadModule();
     const invocation = resolveContextTreeCli();
-    expect(invocation).not.toBeNull();
     expect(invocation?.command).toBe(process.execPath);
-    // Spawning the .mjs entry directly (rather than the bin shim) is what keeps
+    // Spawning the .mjs entry directly (rather than a bin shim) is what keeps
     // this working on Windows, where a `.cmd` shim raises EINVAL.
     expect(invocation?.args[0]).toMatch(/[/\\]context-tree[/\\]dist[/\\]cli[/\\]index\.mjs$/);
-  });
-});
-
-describe("packaged Context Tree dependency", () => {
-  it("does not install home Skills as a transitive global dependency", async () => {
-    const home = scratchHome();
-    mkdirSync(join(home, ".claude"), { recursive: true });
-    mkdirSync(join(home, ".codex"), { recursive: true });
-    const parent = join(home, "prefix", "lib", "node_modules", "first-tree");
-    const dependency = join(parent, "node_modules", "@first-tree-ai", "context-tree");
-    mkdirSync(join(dependency, "scripts"), { recursive: true });
-    writeFileSync(join(parent, "package.json"), '{"name":"first-tree"}');
-    cpSync(
-      join(await packagedSkillsRoot(), "..", "scripts", "postinstall.mjs"),
-      join(dependency, "scripts", "postinstall.mjs"),
-    );
-    const output = execFileSync(process.execPath, [join(dependency, "scripts", "postinstall.mjs")], {
-      env: { ...process.env, npm_config_global: "true" },
-      encoding: "utf8",
-    });
-    expect(output).toContain("run `context-tree install`");
-    expect(existsSync(join(home, ".claude", "skills"))).toBe(false);
-    expect(existsSync(join(home, ".codex", "skills"))).toBe(false);
+    expect(inspectContextTreeCli().version).toMatch(/^1\./);
   });
 });
 
 describe("runContextTreeCommand", () => {
   it("parses the JSON payload of a successful command", async () => {
+    createRemoteTree("acme/run-ok");
+    const ws = workspace("run-ok");
     const { runContextTreeCommand } = await loadModule();
-    const result = await runContextTreeCommand(["list", "--json"]);
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.payload).toMatchObject({ schemaVersion: 1 });
-  });
-
-  it("rejects text output when a text-default command omits --json", async () => {
-    const { runContextTreeCommand } = await loadModule();
-    const result = await runContextTreeCommand(["list"]);
-    expect(result).toMatchObject({ ok: false, reasonCode: "context_tree_bad_payload" });
+    const result = await runContextTreeCommand([
+      "connect",
+      "acme/run-ok",
+      "--ref",
+      "trunk",
+      "--project-path",
+      ws,
+      "--json",
+    ]);
+    expect(result).toMatchObject({ ok: true, payload: { schemaVersion: 3 } });
   });
 
   it("surfaces the CLI's own structured error code as the reasonCode", async () => {
     const { runContextTreeCommand } = await loadModule();
-    // A directory with no connection record: the CLI exits non-zero and prints
-    // {ok:false,error:{code:"NO_CONNECTION",...}} on stdout.
-    const project = mkdtempSync(join(tmpdir(), "ft-context-tree-unconnected-"));
-    const result = await runContextTreeCommand(["resolve", "--project-path", project, "--json"]);
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.reasonCode).toBe("NO_CONNECTION");
+    const result = await runContextTreeCommand(["read", "--project-path", workspace("unconnected"), "--json"]);
+    expect(result).toMatchObject({ ok: false, reasonCode: "NO_CONNECTION" });
   });
 });
 
 describe("ensureContextTreeSkills", () => {
-  it("inspects cleanup when external mode is off, installing nothing", async () => {
-    const home = scratchHome();
+  it("is a clean no-op revert when external mode was never on", async () => {
+    const ws = workspace("plain");
+    mkdirSync(join(ws, ".claude", "skills", "context-tree-read"), { recursive: true });
     const { ensureContextTreeSkills, formatContextTreeSetupReport } = await loadModule();
     const report = await ensureContextTreeSkills();
-    // Cleanup is what guarantees the two Skill families are never both live:
-    // an unconfigured machine keeps First Tree's own Context Tree Skills.
-    expect(report.status).toBe("removed");
-    expect(report.reason).toContain("context_tree.repository");
-    expect(report.installedHosts).toEqual([]);
-    expect(report.connectedWorkspaces).toEqual([]);
-    expect(formatContextTreeSetupReport(report)).toContain("removed");
-    expect(existsSync(join(home, ".claude", "skills"))).toBe(false);
+    expect(report).toMatchObject({ status: "removed", failures: [], removedSkillPaths: [] });
+    // Never recorded, so never touched — this might be a Team Skill.
+    expect(existsSync(join(ws, ".claude", "skills", "context-tree-read"))).toBe(true);
+    expect(formatContextTreeSetupReport(report)).toContain("external mode is off");
   });
 
-  it("installs Skills into the scratch home and connects only workspaces that already exist", async () => {
-    const home = scratchHome("acme/context");
-    const binDir = scratchBinDir("first-tree-test");
-    // A host config dir must exist for a home install to target it.
-    mkdirSync(join(home, ".claude"), { recursive: true });
-    // One existing agent home, so connect has exactly one candidate. The repo is
-    // unreachable from a test, so the connect is expected to fail — what matters
-    // is that install succeeded and no workspace was fabricated.
-    const workspaces = join(home, "data", "workspaces");
-    mkdirSync(join(workspaces, "alpha"), { recursive: true });
+  it("installs workspace Skills, connects every workspace, and writes First Tree's own shim", async () => {
+    createRemoteTree("acme/context");
+    writeConfig({ repository: "acme/context", ref: "trunk" });
+    const first = workspace("alpha");
+    const second = workspace("beta");
+    // A First Tree Core Skill sharing the prefix must survive the install.
+    const core = join(first, ".claude", "skills", "context-tree-review");
+    mkdirSync(core, { recursive: true });
+    writeFileSync(join(core, "SKILL.md"), "managed core skill\n");
 
-    const { ensureContextTreeSkills } = await loadModule();
+    const { ensureContextTreeSkills, formatContextTreeSetupReport } = await loadModule();
     const report = await ensureContextTreeSkills();
+    expect(report.failures).toEqual([]);
+    expect(report).toMatchObject({ status: "installed", ref: "trunk" });
+    expect(report.connectedWorkspaces.sort()).toEqual([first, second].sort());
 
-    expect(report.status).toBe("installed");
-    expect(report.installedHosts).toContain("claude");
-    // Isolation guard: the Skills landed under the scratch home, which is the
-    // only reason this test is safe to run on a developer machine.
-    expect(existsSync(join(home, ".claude", "skills", "context-tree-read"))).toBe(true);
-    // The shim is what makes the installed Skills runnable at all: every one of
-    // them invokes `context-tree` by name, which npm never puts on PATH for a
-    // transitive dependency.
-    expect(report.shimPath).toBe(join(binDir, "context-tree"));
-    expect(readFileSync(join(binDir, "context-tree"), "utf8")).toContain("index.mjs");
-    // The one existing workspace accounts for every non-shim outcome, and
-    // nothing else was invented alongside it.
-    const connectFailures = report.failures.filter((failure) => failure.workspace !== "context-tree shim");
-    expect(report.connectedWorkspaces.length + connectFailures.length).toBe(1);
-    for (const failure of connectFailures) {
-      expect(failure.workspace).toBe(join(workspaces, "alpha"));
+    for (const ws of [first, second]) {
+      for (const root of [join(".claude", "skills"), join(".agents", "skills")]) {
+        expect(existsSync(join(ws, root, "context-tree-read", "SKILL.md"))).toBe(true);
+        expect(existsSync(join(ws, root, "context-tree-write", "SKILL.md"))).toBe(true);
+      }
+      expect(declaredTrees(ws)).toEqual([{ kind: "git", repository: "acme/context", path: ".", ref: "trunk" }]);
     }
+    expect(readFileSync(join(core, "SKILL.md"), "utf8")).toBe("managed core skill\n");
+
+    const shim = join(home, "data", "context-tree", "bin", "context-tree");
+    expect(report.shimPath).toBe(shim);
+    expect(readFileSync(shim, "utf8")).toContain("first-tree-managed context-tree shim");
+    expect(formatContextTreeSetupReport(report)).toMatch(
+      /installed \(context-tree 1\.[^,]+, trunk\); linked 2 workspaces$/,
+    );
   });
 
-  it("leaves a context-tree the user installed globally in place", async () => {
-    const home = scratchHome("acme/context");
-    const binDir = scratchBinDir("first-tree-test");
-    mkdirSync(join(home, ".claude"), { recursive: true });
-    // A real `npm i -g @first-tree-ai/context-tree` puts its own bin in exactly
-    // this directory, and it already satisfies the Skills. Overwriting it would
-    // replace a binary this CLI does not own.
-    const theirs = "#!/bin/sh\n# installed by npm, not first-tree\nexit 0\n";
-    writeFileSync(join(binDir, "context-tree"), theirs, "utf8");
-
+  it("follows the repository's default branch when no ref is configured", async () => {
+    createRemoteTree("acme/default-branch", ["develop"]);
+    writeConfig({ repository: "acme/default-branch" });
+    const ws = workspace("default-branch");
     const { ensureContextTreeSkills } = await loadModule();
     const report = await ensureContextTreeSkills();
-
-    expect(report.status).toBe("installed");
-    expect(readFileSync(join(binDir, "context-tree"), "utf8")).toBe(theirs);
-
-    // And the revert path must not delete it either, so it was never recorded.
-    writeFileSync(join(home, "config", "client.yaml"), "server:\n  url: http://localhost:8000\n", "utf8");
-    expect((await ensureContextTreeSkills()).status).toBe("removed");
-    expect(existsSync(join(binDir, "context-tree"))).toBe(true);
+    expect(report).toMatchObject({ status: "installed", ref: "develop", failures: [] });
+    expect(declaredTrees(ws)).toEqual([{ kind: "git", repository: "acme/default-branch", path: ".", ref: "develop" }]);
   });
 
-  it("reports a shim it cannot write instead of failing the login", async () => {
-    const home = scratchHome("acme/context");
-    mkdirSync(join(home, ".claude"), { recursive: true });
-    // No channel CLI anywhere on PATH, so the bin directory cannot be located.
-    setCliBinding({ binName: "first-tree-absent", packageName: null });
-    process.env.PATH = mkdtempSync(join(tmpdir(), "ft-empty-bin-"));
+  it("replaces the tree it declared when the configured ref changes", async () => {
+    createRemoteTree("acme/moving", ["trunk", "release"]);
+    writeConfig({ repository: "acme/moving", ref: "trunk" });
+    const ws = workspace("moving");
+    const { ensureContextTreeSkills } = await loadModule();
+    expect((await ensureContextTreeSkills()).failures).toEqual([]);
+
+    writeConfig({ repository: "acme/moving", ref: "release" });
+    const report = await ensureContextTreeSkills();
+    expect(report.failures).toEqual([]);
+    expect(declaredTrees(ws)).toEqual([{ kind: "git", repository: "acme/moving", path: ".", ref: "release" }]);
+  });
+
+  it("reports an unusable ref without touching any workspace", async () => {
+    writeConfig({ repository: "acme/context", ref: "bad..ref" });
+    const ws = workspace("bad-ref");
+    const { ensureContextTreeSkills, formatContextTreeSetupReport } = await loadModule();
+    const report = await ensureContextTreeSkills();
+    expect(report.status).toBe("failed");
+    expect(formatContextTreeSetupReport(report)).toContain("context_tree.ref");
+    expect(existsSync(join(ws, ".claude", "skills"))).toBe(false);
+  });
+
+  it("reports a per-workspace connect failure and still installs the Skills", async () => {
+    writeConfig({ repository: "acme/missing", ref: "trunk" });
+    const ws = workspace("missing");
+    const { ensureContextTreeSkills, formatContextTreeSetupReport } = await loadModule();
+    const report = await ensureContextTreeSkills();
+    expect(report.status).toBe("installed");
+    expect(report.failures).toHaveLength(1);
+    expect(report.failures[0]?.workspace).toBe(ws);
+    expect(existsSync(join(ws, ".claude", "skills", "context-tree-read"))).toBe(true);
+    expect(formatContextTreeSetupReport(report)).toContain("1 failed");
+  });
+
+  it("reverts workspace Skills, declarations, and the shim when the key is unset", async () => {
+    createRemoteTree("acme/revert");
+    writeConfig({ repository: "acme/revert", ref: "trunk" });
+    const ws = workspace("revert");
+    const { ensureContextTreeSkills } = await loadModule();
+    expect((await ensureContextTreeSkills()).failures).toEqual([]);
+    const core = join(ws, ".agents", "skills", "context-tree-audit");
+    mkdirSync(core, { recursive: true });
+
+    writeConfig();
+    const report = await ensureContextTreeSkills();
+    expect(report).toMatchObject({ status: "removed", failures: [] });
+    for (const root of [join(".claude", "skills"), join(".agents", "skills")]) {
+      expect(existsSync(join(ws, root, "context-tree-read"))).toBe(false);
+    }
+    expect(existsSync(core)).toBe(true);
+    expect(declaredTrees(ws)).toEqual([]);
+    expect(existsSync(join(home, "data", "context-tree", "bin"))).toBe(false);
+  });
+
+  it("never adopts a matching declaration it did not create, so revert keeps it", async () => {
+    createRemoteTree("acme/manual");
+    writeConfig({ repository: "acme/manual", ref: "trunk" });
+    const ws = workspace("manual");
+    const { ensureContextTreeSkills, runContextTreeCommand } = await loadModule();
+    const manual = await runContextTreeCommand([
+      "connect",
+      "acme/manual",
+      "--ref",
+      "trunk",
+      "--project-path",
+      ws,
+      "--json",
+    ]);
+    expect(manual.ok).toBe(true);
+
+    const report = await ensureContextTreeSkills();
+    expect(report).toMatchObject({ status: "installed", failures: [] });
+    expect(report.connectedWorkspaces).toEqual([ws]);
+
+    writeConfig();
+    expect((await ensureContextTreeSkills()).failures).toEqual([]);
+    expect(declaredTrees(ws)).toEqual([{ kind: "git", repository: "acme/manual", path: ".", ref: "trunk" }]);
+  });
+
+  it("preserves and reports a same-name workspace Skill it did not write, even when connect fails", async () => {
+    writeConfig({ repository: "acme/unreachable", ref: "trunk" });
+    const ws = workspace("hand-maintained");
+    const handMade = join(ws, ".claude", "skills", "context-tree-read");
+    mkdirSync(handMade, { recursive: true });
+    writeFileSync(join(handMade, "SKILL.md"), "hand-maintained\n");
 
     const { ensureContextTreeSkills, formatContextTreeSetupReport } = await loadModule();
     const report = await ensureContextTreeSkills();
+    expect(report.failures).toHaveLength(1);
+    expect(report.preservedSkillPaths).toEqual([handMade]);
+    expect(readFileSync(join(handMade, "SKILL.md"), "utf8")).toBe("hand-maintained\n");
+    // The other targets were free, so they were installed.
+    expect(existsSync(join(ws, ".claude", "skills", "context-tree-write", "SKILL.md"))).toBe(true);
+    expect(existsSync(join(ws, ".agents", "skills", "context-tree-read", "SKILL.md"))).toBe(true);
+    expect(formatContextTreeSetupReport(report)).toContain("left 1 hand-installed or edited Skill in place");
 
-    // Degraded, not fatal: `login` must still succeed.
-    expect(report.status).toBe("installed");
-    expect(report.shimPath).toBeNull();
-    const shimFailure = report.failures.find((failure) => failure.workspace === "context-tree shim");
-    expect(shimFailure?.reason).toContain("bin directory");
-    expect(formatContextTreeSetupReport(report)).toContain("failed");
+    writeConfig();
+    await ensureContextTreeSkills();
+    expect(readFileSync(join(handMade, "SKILL.md"), "utf8")).toBe("hand-maintained\n");
+    expect(existsSync(join(ws, ".claude", "skills", "context-tree-write"))).toBe(false);
+  });
+
+  it("keeps a Skill it installed once it has been edited, on revert", async () => {
+    createRemoteTree("acme/edited");
+    writeConfig({ repository: "acme/edited", ref: "trunk" });
+    const ws = workspace("edited");
+    const { ensureContextTreeSkills } = await loadModule();
+    expect((await ensureContextTreeSkills()).failures).toEqual([]);
+    const edited = join(ws, ".agents", "skills", "context-tree-write", "SKILL.md");
+    writeFileSync(edited, "edited by the operator\n");
+
+    writeConfig();
+    const report = await ensureContextTreeSkills();
+    expect(report.preservedSkillPaths).toEqual([join(ws, ".agents", "skills", "context-tree-write")]);
+    expect(readFileSync(edited, "utf8")).toBe("edited by the operator\n");
+    expect(existsSync(join(ws, ".claude", "skills", "context-tree-write"))).toBe(false);
+  });
+
+  it("never deletes through a Skill root redirected outside the workspace on revert", async () => {
+    createRemoteTree("acme/redirected");
+    writeConfig({ repository: "acme/redirected", ref: "trunk" });
+    const ws = workspace("redirected");
+    const { ensureContextTreeSkills } = await loadModule();
+    expect((await ensureContextTreeSkills()).failures).toEqual([]);
+    const outside = join(mkdtempSync(join(tmpdir(), "ft-context-tree-outside-")), "claude");
+    renameSync(join(ws, ".claude"), outside);
+    symlinkSync(outside, join(ws, ".claude"));
+
+    writeConfig();
+    const report = await ensureContextTreeSkills();
+    expect(report.status).toBe("removed");
+    expect(existsSync(join(outside, "skills", "context-tree-read", "SKILL.md"))).toBe(true);
+    expect(report.preservedSkillPaths).toContain(join(ws, ".claude", "skills", "context-tree-read"));
+    // The real root is still cleaned.
+    expect(existsSync(join(ws, ".agents", "skills", "context-tree-read"))).toBe(false);
+  });
+
+  it("removes its own legacy channel shim and never a user's global context-tree", async () => {
+    createRemoteTree("acme/shim");
+    writeConfig({ repository: "acme/shim", ref: "trunk" });
+    const binDir = scratchBinDir("ft-legacy-shim");
+    const legacyShim = join(binDir, "context-tree");
+    writeFileSync(legacyShim, "#!/bin/sh\n# first-tree-managed context-tree shim\nexec node old.mjs\n");
+    const { ensureContextTreeSkills } = await loadModule();
+    await ensureContextTreeSkills();
+    expect(existsSync(legacyShim)).toBe(false);
+
+    writeFileSync(legacyShim, "#!/usr/bin/env node\n// a real global install\n");
+    await ensureContextTreeSkills();
+    expect(readFileSync(legacyShim, "utf8")).toContain("a real global install");
+  });
+
+  it("preserves and reports account-level Skills it cannot prove are its unedited 0.1 copies", async () => {
+    createRemoteTree("acme/legacy");
+    writeConfig({ repository: "acme/legacy", ref: "trunk" });
+    const owned = join(home, ".claude", "skills", "context-tree-setup");
+    const unowned = join(home, ".codex", "skills", "context-tree-read");
+    const unrelated = join(home, ".claude", "skills", "context-tree-mine");
+    for (const dir of [owned, unowned, unrelated]) {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "SKILL.md"), "edited\n");
+    }
+    mkdirSync(join(home, "data"), { recursive: true });
+    writeFileSync(
+      join(home, "data", "context-tree-owned-skills.json"),
+      JSON.stringify({ schemaVersion: 1, paths: [owned] }),
+    );
+
+    const { ensureContextTreeSkills, formatContextTreeSetupReport } = await loadModule();
+    const report = await ensureContextTreeSkills();
+    expect(report.removedSkillPaths).toEqual([]);
+    expect(report.preservedSkillPaths?.sort()).toEqual([owned, unowned].sort());
+    for (const dir of [owned, unowned, unrelated]) expect(existsSync(dir)).toBe(true);
+    // Provenance survives while anything it covers is still in place.
+    expect(existsSync(join(home, "data", "context-tree-owned-skills.json"))).toBe(true);
+    expect(formatContextTreeSetupReport(report)).toContain("left 2 hand-installed or edited Skills");
   });
 });
 
-describe("ensureContextTreeSkills switched back off", () => {
-  it("removes only unmodified packaged Skills and preserves hand-installed ones", async () => {
-    const home = scratchHome("acme/context");
-    const binDir = scratchBinDir("first-tree-test");
-    const realHome = realpathSync(home);
-    const skillsRoot = join(home, ".claude", "skills");
-    mkdirSync(join(home, ".claude"), { recursive: true });
-
-    const { ensureContextTreeSkills } = await loadModule();
-    expect((await ensureContextTreeSkills()).status).toBe("installed");
-    expect(existsSync(join(skillsRoot, "context-tree-read"))).toBe(true);
-    // A second login must retain ownership of directories created by the first.
-    expect((await ensureContextTreeSkills()).status).toBe("installed");
-
-    // A hand-authored Skill sharing the prefix and a customized copy of a
-    // packaged Skill must both survive the revert: prefix alone is not ownership.
-    const handAuthored = join(skillsRoot, "context-tree-personal");
-    mkdirSync(handAuthored, { recursive: true });
-    writeFileSync(join(handAuthored, "SKILL.md"), "# personal\n", "utf8");
-    const customized = join(skillsRoot, "context-tree-read");
-    writeFileSync(join(customized, "EXTRA.md"), "# extra\n", "utf8");
-    const foreign = join(skillsRoot, "mine");
-    mkdirSync(foreign, { recursive: true });
-    writeFileSync(join(foreign, "SKILL.md"), "# mine\n", "utf8");
-
-    // Now unset the key, keeping the same home and installed Skills.
-    writeFileSync(join(home, "config", "client.yaml"), "server:\n  url: http://localhost:8000\n", "utf8");
-    const report = await ensureContextTreeSkills();
-
-    expect(report.status).toBe("removed");
-    // The pristine packaged install was removed…
-    expect(existsSync(join(skillsRoot, "context-tree-publish"))).toBe(false);
-    // …while hand-installed and edited copies were reported and preserved.
-    expect(existsSync(handAuthored)).toBe(true);
-    expect(existsSync(customized)).toBe(true);
-    expect(existsSync(foreign)).toBe(true);
-    expect(report.preservedSkillPaths).toEqual(
-      expect.arrayContaining([
-        join(realHome, ".claude", "skills", "context-tree-personal"),
-        join(realHome, ".claude", "skills", "context-tree-read"),
-      ]),
-    );
-    // The shim and ownership record are cleared.
-    expect(existsSync(join(binDir, "context-tree"))).toBe(false);
-    expect(existsSync(join(home, "data", "context-tree-owned-skills.json"))).toBe(false);
-  });
-
-  it("preserves an independent unmodified official installation with no ownership record", async () => {
-    const home = scratchHome();
-    mkdirSync(join(home, ".claude"), { recursive: true });
-    mkdirSync(join(home, ".codex"), { recursive: true });
-    const { ensureContextTreeSkills, runContextTreeCommand } = await loadModule();
-    expect((await runContextTreeCommand(["install", "--host", "all"])).ok).toBe(true);
-
-    const report = await ensureContextTreeSkills();
-    expect(report.status).toBe("removed");
-    expect(report.removedSkillPaths).toEqual([]);
-    for (const host of [".claude", ".codex"]) {
-      const skill = join(realpathSync(home), host, "skills", "context-tree-read");
-      expect(report.preservedSkillPaths).toContain(skill);
-      expect(existsSync(skill)).toBe(true);
-    }
-  });
-
-  it("does not claim pre-existing official Skills when external mode is enabled", async () => {
-    const home = scratchHome("acme/context");
-    scratchBinDir("first-tree-test");
-    mkdirSync(join(home, ".claude"), { recursive: true });
-    const { ensureContextTreeSkills, runContextTreeCommand } = await loadModule();
-    expect((await runContextTreeCommand(["install", "--host", "all"])).ok).toBe(true);
-    expect((await ensureContextTreeSkills()).status).toBe("installed");
-    expect((await ensureContextTreeSkills()).status).toBe("installed");
-    writeFileSync(join(home, "config", "client.yaml"), "server:\n  url: http://localhost:8000\n");
-    const report = await ensureContextTreeSkills();
-    expect(report.removedSkillPaths).toEqual([]);
-    expect(existsSync(join(home, ".claude", "skills", "context-tree-read"))).toBe(true);
-  });
-
-  it.each([false, true])("preserves customized Skills on repeated login (owned: %s)", async (owned) => {
-    const home = scratchHome("acme/context");
-    scratchBinDir("first-tree-test");
-    mkdirSync(join(home, ".claude"), { recursive: true });
-    const { ensureContextTreeSkills, runContextTreeCommand, formatContextTreeSetupReport } = await loadModule();
-    if (!owned) expect((await runContextTreeCommand(["install", "--host", "all"])).ok).toBe(true);
-    await ensureContextTreeSkills();
-    const skill = join(realpathSync(home), ".claude", "skills", "context-tree-read");
-    writeFileSync(join(skill, "SKILL.md"), "# My custom instructions\n");
-    writeFileSync(join(skill, "personal.txt"), "keep this too");
-    mkdirSync(join(home, ".codex"), { recursive: true });
-
-    const report = await ensureContextTreeSkills();
-    expect(readFileSync(join(skill, "SKILL.md"), "utf8")).toBe("# My custom instructions\n");
-    expect(readFileSync(join(skill, "personal.txt"), "utf8")).toBe("keep this too");
-    expect(report.preservedSkillPaths).toContain(skill);
-    expect(report.installedHosts).toEqual(["codex"]);
-    expect(formatContextTreeSetupReport(report)).toContain("unowned or edited Skills preserved");
-    writeFileSync(join(home, "config", "client.yaml"), "server:\n  url: http://localhost:8000\n");
-    const removal = await ensureContextTreeSkills();
-    expect(removal.preservedSkillPaths).toContain(skill);
-    expect(readFileSync(join(skill, "SKILL.md"), "utf8")).toBe("# My custom instructions\n");
-  });
-
-  it("preserves a packaged-named Skill the user edited, with no ledger", async () => {
-    const home = scratchHome();
-    const packaged = await packagedSkillsRoot();
-    const customized = join(home, ".codex", "skills", "context-tree-read");
-    mkdirSync(customized, { recursive: true });
-    cpSync(join(packaged, "context-tree-read"), customized, { recursive: true });
-    // The user edited the copy, so it is no longer a verifiable packaged artifact.
-    writeFileSync(join(customized, "SKILL.md"), "# edited\n", "utf8");
-
-    const { ensureContextTreeSkills } = await loadModule();
-    const report = await ensureContextTreeSkills();
-
-    expect(report.status).toBe("removed");
-    expect(existsSync(customized)).toBe(true);
-    expect(report.preservedSkillPaths).toContain(join(realpathSync(home), ".codex", "skills", "context-tree-read"));
-  });
-
-  it("preserves installed Skills when ownership evidence is unreadable", async () => {
-    const home = scratchHome("acme/context");
-    scratchBinDir("first-tree-test");
-    mkdirSync(join(home, ".claude"), { recursive: true });
-    const { ensureContextTreeSkills } = await loadModule();
-    expect((await ensureContextTreeSkills()).status).toBe("installed");
-    writeFileSync(join(home, "data", "context-tree-owned-skills.json"), "invalid JSON");
-    writeFileSync(join(home, "config", "client.yaml"), "server:\n  url: http://localhost:8000\n");
-    expect((await ensureContextTreeSkills()).removedSkillPaths).toEqual([]);
-    expect(existsSync(join(home, ".claude", "skills", "context-tree-read"))).toBe(true);
-  });
-
-  it("does not remove Skills through a redirected host directory", async () => {
-    const home = scratchHome("acme/context");
-    scratchBinDir("first-tree-test");
-    mkdirSync(join(home, ".claude"), { recursive: true });
-    const { ensureContextTreeSkills } = await loadModule();
-    expect((await ensureContextTreeSkills()).status).toBe("installed");
-    renameSync(join(home, ".claude"), join(home, "independent-claude"));
-    symlinkSync(join(home, "independent-claude"), join(home, ".claude"), "dir");
-    writeFileSync(join(home, "config", "client.yaml"), "server:\n  url: http://localhost:8000\n");
-    expect((await ensureContextTreeSkills()).removedSkillPaths).toEqual([]);
-    expect(existsSync(join(home, "independent-claude", "skills", "context-tree-read"))).toBe(true);
-  });
-
-  it("leaves connections and managed trees alone", async () => {
-    const home = scratchHome();
-    const connections = join(home, ".context-tree", "connections.json");
-    const tree = join(home, ".context-tree", "trees", "mine");
-    mkdirSync(tree, { recursive: true });
-    writeFileSync(connections, "[]\n", "utf8");
-    mkdirSync(join(home, ".claude", "skills", "context-tree-read"), { recursive: true });
-
-    const { ensureContextTreeSkills } = await loadModule();
-    await ensureContextTreeSkills();
-
-    expect(readFileSync(connections, "utf8")).toBe("[]\n");
-    expect(existsSync(tree)).toBe(true);
-  });
-
-  it("reports removed with an empty list when installed hosts are already clean", async () => {
-    const home = scratchHome();
-    mkdirSync(join(home, ".claude", "skills"), { recursive: true });
-
-    const { ensureContextTreeSkills } = await loadModule();
-    const report = await ensureContextTreeSkills();
-
-    expect(report.status).toBe("removed");
-    expect(report.removedSkillPaths).toEqual([]);
-  });
-
-  it("reports a set-but-unusable repository while keeping external mode off", async () => {
-    const home = scratchHome("owner/.hidden");
-    const museum = join(home, ".claude", "skills", "context-tree-read");
-    mkdirSync(museum, { recursive: true });
-
-    const { ensureContextTreeSkills } = await loadModule();
-    const report = await ensureContextTreeSkills();
-
-    expect(report.status).toBe("failed");
-    expect(report.reason).toContain("owner/.hidden");
-    expect(report.reason).toContain("external mode is off");
-    // The unusable setting stands the new family down, but never deletes a user
-    // Skill whose contents do not match the packaged payload.
-    expect(existsSync(museum)).toBe(true);
-    expect(report.preservedSkillPaths).toContain(join(realpathSync(home), ".claude", "skills", "context-tree-read"));
+describe("skillTreeDigest", () => {
+  it("is stable across copies and changes with any byte", async () => {
+    const { skillTreeDigest } = await loadModule();
+    const make = (body: string) => {
+      const dir = mkdtempSync(join(tmpdir(), "ft-skill-digest-"));
+      mkdirSync(join(dir, "references"));
+      writeFileSync(join(dir, "SKILL.md"), body);
+      writeFileSync(join(dir, "references", "a.md"), "a\n");
+      return dir;
+    };
+    expect(skillTreeDigest(make("x\n"))).toBe(skillTreeDigest(make("x\n")));
+    expect(skillTreeDigest(make("x\n"))).not.toBe(skillTreeDigest(make("y\n")));
+    expect(skillTreeDigest(join(tmpdir(), "does-not-exist"))).toBeNull();
   });
 });

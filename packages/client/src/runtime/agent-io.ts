@@ -1,4 +1,4 @@
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, existsSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import {
   attachmentRefsFromMetadata,
@@ -16,6 +16,7 @@ import {
 import type { FirstTreeHubSDK } from "../cloud/sdk.js";
 import { findAttachmentFile } from "./attachment-store.js";
 import { getCliBinding } from "./cli-binding.js";
+import { contextTreeShimDir, contextTreeShimName } from "./external-context-tree.js";
 import type { AgentIdentity, SessionMessage } from "./handler.js";
 import { findImagePath } from "./image-store.js";
 import { ATTACHMENT_UNAVAILABLE_NOTE } from "./provider-support/attachment-availability.js";
@@ -42,7 +43,9 @@ import { ATTACHMENT_UNAVAILABLE_NOTE } from "./provider-support/attachment-avail
  *
  * `FIRST_TREE_HOME` is state/config storage, not a CLI install prefix. Only an
  * explicit `FIRST_TREE_CLI_BIN_DIR` asks this helper to put a channel-specific
- * CLI directory ahead of the parent PATH.
+ * CLI directory ahead of the parent PATH. First Tree's own `context-tree` shim
+ * directory, when the shim exists, goes ahead of everything so the external
+ * Context Tree Skills run the CLI release they were installed from.
  */
 export function buildAgentEnv(
   parentEnv: NodeJS.ProcessEnv,
@@ -89,7 +92,7 @@ export function buildAgentEnv(
     log?: (msg: string) => void;
   },
 ): NodeJS.ProcessEnv {
-  const env = withExplicitCliBinDirOnPath(parentEnv, ctx.log);
+  const env = withContextTreeShimDirOnPath(withExplicitCliBinDirOnPath(parentEnv, ctx.log));
   delete env.FIRST_TREE_RUNTIME_SESSION_TOKEN;
   delete env.FIRST_TREE_RUNTIME_SESSION_TOKEN_FILE;
   return {
@@ -144,6 +147,15 @@ function withExplicitCliBinDirOnPath(parentEnv: NodeJS.ProcessEnv, log?: (msg: s
   }
 
   return env;
+}
+
+/** Prepend the `context-tree` shim directory when external mode has written the shim. */
+export function withContextTreeShimDirOnPath(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const shimDir = contextTreeShimDir();
+  if (!existsSync(join(shimDir, contextTreeShimName()))) return env;
+  const pathKey = resolvePathKey(env);
+  const existing = (env[pathKey] ?? "").split(delimiter).filter((part) => part.length > 0 && part !== shimDir);
+  return { ...env, [pathKey]: [shimDir, ...existing].join(delimiter) };
 }
 
 function resolvePathKey(env: NodeJS.ProcessEnv): string {

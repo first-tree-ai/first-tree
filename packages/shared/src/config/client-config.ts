@@ -44,6 +44,19 @@ export function normalizeContextTreeRepository(value: string): string | null {
   return CONTEXT_TREE_REPOSITORY_PATTERN.test(repository) ? repository : null;
 }
 
+/**
+ * Canonical branch for the external CLI's `connect --ref`, or null when the value
+ * is not a usable branch name. Accepts `refs/heads/<branch>` and strips it, and
+ * otherwise mirrors the subset of `git check-ref-format --branch` a config typo
+ * can realistically hit.
+ */
+export function normalizeContextTreeRef(value: string): string | null {
+  const ref = value.trim().replace(/^refs\/heads\//u, "");
+  if (ref.length === 0 || ref.length > 255 || hasWhitespaceOrControl(ref)) return null;
+  if (/[~^:?*[\\]|\.\.|@\{|\/\/|\.lock$|\/$|^[-/.]|\/\./u.test(ref) || ref === "@") return null;
+  return ref;
+}
+
 export const clientConfigSchema = defineConfig({
   server: {
     url: field(z.string(), {
@@ -97,6 +110,20 @@ export const clientConfigSchema = defineConfig({
         .optional(),
       { env: "FIRST_TREE_CONTEXT_TREE_REPOSITORY" },
     ),
+    // Branch of `repository` to read and publish. Unset means the repository's
+    // default branch, looked up when a workspace is connected.
+    ref: field(
+      z
+        .string()
+        .transform((value, context) => {
+          const ref = normalizeContextTreeRef(value);
+          if (ref !== null) return ref;
+          context.addIssue({ code: "custom", message: "Context Tree ref must be a Git branch name such as main." });
+          return z.NEVER;
+        })
+        .optional(),
+      { env: "FIRST_TREE_CONTEXT_TREE_REF" },
+    ),
   },
   logLevel: field(logLevelSchema.default("info"), { env: "FIRST_TREE_LOG_LEVEL" }),
 });
@@ -141,4 +168,24 @@ export function readContextTreeRepositorySetting(): { raw: string | null; reposi
   const repository = (group as Record<string, unknown>).repository;
   if (typeof repository !== "string") return { raw: null, repository: null };
   return { raw: repository, repository: normalizeContextTreeRepository(repository) };
+}
+
+/**
+ * Raw and canonical `context_tree.ref` settings, read like
+ * {@link readContextTreeRepositorySetting}: never throws, and keeps a set-but-
+ * unusable value for diagnostics. `ref: null` with `raw: null` means "use the
+ * repository's default branch".
+ */
+export function readContextTreeRefSetting(): { raw: string | null; ref: string | null } {
+  let resolved: Record<string, unknown>;
+  try {
+    resolved = resolveConfigReadonly({ schema: clientConfigSchema, role: "client" });
+  } catch {
+    return { raw: null, ref: null };
+  }
+  const group = resolved.context_tree;
+  if (typeof group !== "object" || group === null) return { raw: null, ref: null };
+  const ref = (group as Record<string, unknown>).ref;
+  if (typeof ref !== "string") return { raw: null, ref: null };
+  return { raw: ref, ref: normalizeContextTreeRef(ref) };
 }
