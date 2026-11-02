@@ -15,12 +15,12 @@ const doctorCoreMocks = vi.hoisted(() => ({
   checkServerReachable: vi.fn(),
   checkWebSocket: vi.fn(),
   ensureFreshAccessToken: vi.fn(),
+  inspectContextTreeCli: vi.fn(),
   inspectLocalContextTree: vi.fn(),
   listLocalContextDataLoss: vi.fn(),
   reconcileAgentConfigs: vi.fn(),
   resolveContextTreeCli: vi.fn(),
   resolveServerUrl: vi.fn(),
-  runContextTreeCommand: vi.fn(),
   runtimeProviderChecks: vi.fn(),
 }));
 
@@ -209,24 +209,41 @@ describe("doctor checks and agent resolver", () => {
     expect(contextTree?.ok).toBe(false);
     expect(contextTree?.detail).toContain("acme/context");
     expect(contextTree?.detail).toContain("not installed");
-    // Nothing was probed: an unresolvable bin short-circuits before spawning.
-    expect(doctorCoreMocks.runContextTreeCommand).not.toHaveBeenCalled();
+    expect(doctorCoreMocks.inspectContextTreeCli).not.toHaveBeenCalled();
   });
 
-  it("reports external mode on when the CLI answers a probe", async () => {
+  it("reports external mode on with the bundled CLI version when the shim is in place", async () => {
     const { runDaemonChecks } = await import("../commands/_shared/doctor-checks.js");
     configMocks.readContextTreeRepositorySetting.mockReturnValue({ raw: "acme/context", repository: "acme/context" });
     doctorCoreMocks.resolveContextTreeCli.mockReturnValue({ command: "node", args: ["/cli.mjs"] });
-    doctorCoreMocks.runContextTreeCommand.mockResolvedValue({ ok: true, payload: { trees: [] } });
+    doctorCoreMocks.inspectContextTreeCli.mockReturnValue({
+      version: "1.0.1",
+      shimPath: "/home/data/context-tree/bin/context-tree",
+      shimPresent: true,
+    });
 
     const checks = await runDaemonChecks();
     expect(checks.find((check) => check.label === "Context Tree CLI")).toEqual({
       label: "Context Tree CLI",
       ok: true,
-      detail: "external mode on (acme/context)",
+      detail: "external mode on (acme/context, context-tree 1.0.1)",
     });
-    // `list` is the probe: no connection, no network, tolerates an absent root.
-    expect(doctorCoreMocks.runContextTreeCommand).toHaveBeenCalledWith(["list", "--json"]);
+  });
+
+  it("fails the Context Tree check when the shim the Skills run is missing", async () => {
+    const { runDaemonChecks } = await import("../commands/_shared/doctor-checks.js");
+    configMocks.readContextTreeRepositorySetting.mockReturnValue({ raw: "acme/context", repository: "acme/context" });
+    doctorCoreMocks.resolveContextTreeCli.mockReturnValue({ command: "node", args: ["/cli.mjs"] });
+    doctorCoreMocks.inspectContextTreeCli.mockReturnValue({
+      version: "1.0.1",
+      shimPath: "/home/data/context-tree/bin/context-tree",
+      shimPresent: false,
+    });
+
+    const checks = await runDaemonChecks();
+    const contextTree = checks.find((check) => check.label === "Context Tree CLI");
+    expect(contextTree?.ok).toBe(false);
+    expect(contextTree?.detail).toContain("run login again");
   });
 
   it("reports a set-but-unusable Context Tree repository", async () => {

@@ -90,6 +90,7 @@ export type {
 export {
   ensureContextTreeSkills,
   formatContextTreeSetupReport,
+  inspectContextTreeCli,
   resolveContextTreeCli,
   runContextTreeCommand,
 } from "./context-tree-cli.js";

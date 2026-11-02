@@ -23,12 +23,12 @@ import {
   checkServerReachable,
   checkWebSocket,
   ensureFreshAccessToken,
+  inspectContextTreeCli,
   inspectLocalContextTree,
   listLocalContextDataLoss,
   reconcileAgentConfigs,
   resolveContextTreeCli,
   resolveServerUrl,
-  runContextTreeCommand,
   runtimeProviderChecks,
 } from "../../core/index.js";
 import { verifyTreeRoot } from "../tree/verify.js";
@@ -92,14 +92,21 @@ export async function checkContextTreeCli(): Promise<CheckResult> {
       detail: `configured for ${repository} but @first-tree-ai/context-tree is not installed beside this CLI`,
     };
   }
-  // `list` is the cheapest JSON-emitting probe: no connection, no network, and
-  // it tolerates an absent managed root. `--version` prints a bare string, so it
-  // is not usable through the JSON envelope parser.
-  const probe = await runContextTreeCommand(["list", "--json"]);
-  if (!probe.ok) {
-    return { label: "Context Tree CLI", ok: false, detail: `${repository}: ${probe.reason}` };
+  // Inspected, not spawned: the version comes from the packaged manifest, and the
+  // shim is what every installed Skill runs. `login` writes it.
+  const cli = inspectContextTreeCli();
+  if (!cli.shimPresent) {
+    return {
+      label: "Context Tree CLI",
+      ok: false,
+      detail: `${repository}: context-tree shim missing at ${cli.shimPath}; run login again`,
+    };
   }
-  return { label: "Context Tree CLI", ok: true, detail: `external mode on (${repository})` };
+  return {
+    label: "Context Tree CLI",
+    ok: true,
+    detail: `external mode on (${repository}, context-tree ${cli.version ?? "unknown"})`,
+  };
 }
 
 export function checkLocalContexts(): CheckResult {

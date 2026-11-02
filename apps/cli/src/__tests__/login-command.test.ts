@@ -197,7 +197,7 @@ async function simulateSuccessfulLocalClientSwitch(opts: {
       restart_check_interval_seconds: 10,
       prompt_timeout_seconds: 60,
     },
-    context_tree: { repository: undefined },
+    context_tree: { repository: undefined, ref: undefined },
     logLevel: "info",
   };
 }

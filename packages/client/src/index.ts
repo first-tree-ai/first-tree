@@ -222,6 +222,32 @@ export { buildMessageDocumentSnapshots } from "./runtime/doc-snapshots.js";
 export type { Classification, ErrorKind, ErrorSource, RetryStrategy } from "./runtime/error-taxonomy.js";
 export { clampRetryAttempt, classify, ERROR_KINDS, nextRetryDelayMs } from "./runtime/error-taxonomy.js";
 export type {
+  ContextTreeCliInvocation,
+  ContextTreeCliResult,
+  ExternalContextTreeTarget,
+  ExternalContextTreeWorkspaceResult,
+} from "./runtime/external-context-tree.js";
+export {
+  CONTEXT_TREE_PACKAGE,
+  CONTEXT_TREE_SHIM_MARKER,
+  contextTreeCliVersion,
+  contextTreeShimDir,
+  contextTreeShimName,
+  ensureExternalContextTreeWorkspace,
+  packagedContextTreeSkillNames,
+  recordedExternalContextTreeWorkspaces,
+  removeExternalContextTreeWorkspace,
+  resolveContextTreeCli,
+  resolveContextTreeRef,
+  runContextTreeCommand,
+  writeContextTreeShim,
+} from "./runtime/external-context-tree.js";
+export {
+  removeLegacyChannelShim,
+  retireLegacyAccountSkills,
+  skillTreeDigest,
+} from "./runtime/external-context-tree-legacy.js";
+export type {
   AgentHandler,
   HandlerConfig,
   HandlerContext,
