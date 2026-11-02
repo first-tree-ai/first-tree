@@ -9,6 +9,7 @@ import { readSourceBindingContract, SOURCE_INTEGRATION_FILES } from "./binding-c
 import { TREE_PROGRESS_FILE } from "./binding-state.js";
 import type { ContextContentClassCounts } from "./content-class.js";
 import { inspectRepoInfraMarkdownFile } from "./content-class.js";
+import { collectEvidenceValidationFindings } from "./evidence.js";
 import { resolveRepoRoot } from "./shared.js";
 import { readTreeIdentityContract } from "./tree-identity.js";
 import { collectMemberValidationFindings, formatLegacyMemberError } from "./validate-members.js";
@@ -22,12 +23,13 @@ import {
 
 const UNCHECKED_RE = /^- \[ \] (.+)$/gmu;
 
-export const VERIFY_USAGE = `usage: ${channelConfig.binName} tree verify [--tree-path PATH]
+export const VERIFY_USAGE = `usage: ${channelConfig.binName} tree verify [--tree-path PATH] [--evidence]
 
 Run validation checks against a Context Tree repo.
 
 Options:
   --tree-path PATH   Verify a tree repo from another working directory
+  --evidence         Also validate evidence records under raw-context/evidence/
   --help             Show this help message`;
 
 type VerifyCheck = {
@@ -43,6 +45,7 @@ export type VerifySummary = {
     progress: VerifyCheck & { uncheckedItems: string[] };
     rootNodeFrontmatter: VerifyCheck;
     treeState: VerifyCheck;
+    evidence?: VerifyCheck & { files: number; records: number; warnings: string[] };
   };
   findings: TreeValidationFinding[];
   ok: boolean;
@@ -50,8 +53,13 @@ export type VerifySummary = {
   targetRoot: string;
 };
 
+export type VerifyOptions = {
+  evidence?: boolean;
+};
+
 function configureVerifyCommand(command: Command): void {
   command.option("--tree-path <path>", "verify a tree repo from another working directory");
+  command.option("--evidence", "also validate evidence records under raw-context/evidence/");
 }
 
 function readTargetRoot(command: Command): string {
@@ -143,7 +151,7 @@ function formatRootNodeError(finding: TreeValidationFinding): string {
   }
 }
 
-export function verifyTreeRoot(targetRoot: string): VerifySummary {
+export function verifyTreeRoot(targetRoot: string, options: VerifyOptions = {}): VerifySummary {
   const invalidManagedPath = SOURCE_INTEGRATION_FILES.some(
     (file) => inspectRepoInfraMarkdownFile(targetRoot, file).kind === "invalid",
   );
@@ -215,6 +223,18 @@ export function verifyTreeRoot(targetRoot: string): VerifySummary {
     targetRoot,
   };
 
+  if (options.evidence === true) {
+    const evidenceResult = collectEvidenceValidationFindings(targetRoot);
+    summary.checks.evidence = {
+      ok: evidenceResult.errors.length === 0,
+      ...(evidenceResult.errors.length === 0 ? {} : { errors: evidenceResult.errors }),
+      files: evidenceResult.files,
+      records: evidenceResult.records,
+      warnings: evidenceResult.warnings,
+    };
+    summary.findings = deduplicateFindings([...summary.findings, ...evidenceResult.findings]);
+  }
+
   summary.ok = Object.values(summary.checks).every((check) => check.ok);
   return summary;
 }
@@ -240,6 +260,18 @@ function printVerifySummary(summary: VerifySummary): void {
     }
   }
 
+  const evidence = summary.checks.evidence;
+  if (evidence !== undefined) {
+    const icon = evidence.ok ? "PASS" : "FAIL";
+    console.log(`  [${icon}] evidence validation (${evidence.records} records in ${evidence.files} files)`);
+    for (const error of evidence.errors ?? []) {
+      console.log(`    - ${error}`);
+    }
+    for (const warning of evidence.warnings) {
+      console.log(`    ! ${warning}`);
+    }
+  }
+
   if (summary.findings.length > 0) {
     console.log("\n  Findings");
     for (const finding of summary.findings) {
@@ -253,7 +285,8 @@ function printVerifySummary(summary: VerifySummary): void {
 
 function runVerifyCommand(context: CommandContext): void {
   try {
-    const summary = verifyTreeRoot(readTargetRoot(context.command));
+    const options = context.command.opts() as { evidence?: boolean };
+    const summary = verifyTreeRoot(readTargetRoot(context.command), { evidence: options.evidence === true });
 
     if (context.options.json) {
       console.log(JSON.stringify(summary, null, 2));
