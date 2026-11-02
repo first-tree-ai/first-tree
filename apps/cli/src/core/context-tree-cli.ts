@@ -67,10 +67,11 @@ export type ContextTreeSetupReport = {
   /** Account-level Skill directories an earlier First Tree installed and this login removed. */
   removedSkillPaths?: string[];
   /**
-   * Account-level `context-tree-*` Skill directories left in place because they
-   * were not recorded as First Tree-created and unmodified — a hand-installed
-   * or edited Skill a login must never delete. Agents may see them beside the
-   * workspace copies.
+   * `context-tree-*` Skill directories left in place because they were not
+   * recorded as First Tree-created and unmodified — a hand-installed or edited
+   * Skill a login must never replace or delete. Covers workspace Skills under a
+   * packaged name and legacy account-level copies, which Agents may see beside
+   * the workspace copies.
    */
   preservedSkillPaths?: string[];
 };
@@ -108,9 +109,11 @@ export async function removeContextTreeSkills(): Promise<ContextTreeSetupReport>
     return { ...base, reason: `${CONTEXT_TREE_PACKAGE} is not installed beside this CLI` };
   }
   const failures: ContextTreeConnectFailure[] = [];
+  const preserved: string[] = [];
   for (const workspace of recordedExternalContextTreeWorkspaces()) {
     const removal = await removeExternalContextTreeWorkspace(workspace);
     if (!removal.ok) failures.push({ workspace, reason: removal.reason });
+    else preserved.push(...removal.preservedSkillPaths);
   }
   try {
     rmSync(contextTreeShimDir(), { recursive: true, force: true });
@@ -125,7 +128,7 @@ export async function removeContextTreeSkills(): Promise<ContextTreeSetupReport>
     reason: "context_tree.repository is not set",
     failures,
     removedSkillPaths: legacy.removed,
-    preservedSkillPaths: legacy.preserved,
+    preservedSkillPaths: [...preserved, ...legacy.preserved],
   };
 }
 
@@ -188,6 +191,7 @@ export async function ensureContextTreeSkills(): Promise<ContextTreeSetupReport>
   };
   for (const workspace of existingWorkspacePaths()) {
     const result = await ensureExternalContextTreeWorkspace(workspace, { repository, ref: ref.ref });
+    report.preservedSkillPaths?.push(...(result.preservedSkillPaths ?? []));
     if (result.ok) report.connectedWorkspaces.push(workspace);
     else
       report.failures.push({
@@ -206,7 +210,7 @@ export function formatContextTreeSetupReport(report: ContextTreeSetupReport): st
   const preserved = report.preservedSkillPaths?.length ?? 0;
   const preservedNote =
     preserved > 0
-      ? `; left ${preserved} hand-installed or edited account-level Skill${preserved === 1 ? "" : "s"} in place (${truncate(
+      ? `; left ${preserved} hand-installed or edited Skill${preserved === 1 ? "" : "s"} in place (${truncate(
           (report.preservedSkillPaths ?? []).join(", "),
           120,
         )})`

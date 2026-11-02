@@ -1,4 +1,6 @@
 import type { ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
+import type { Dirent } from "node:fs";
 import {
   chmodSync,
   cpSync,
@@ -64,9 +66,14 @@ export type ContextTreeCliResult =
 /** The tree First Tree declares in a workspace: always a whole Git repository. */
 export type ExternalContextTreeTarget = { repository: string; ref: string };
 
+/**
+ * `preservedSkillPaths` are workspace Skill directories under a packaged name
+ * that First Tree did not write, or that were edited since, and so were left
+ * as they are while differing from the packaged payload.
+ */
 export type ExternalContextTreeWorkspaceResult =
-  | { ok: true; connected: boolean }
-  | { ok: false; reason: string; reasonCode?: string };
+  | { ok: true; connected: boolean; preservedSkillPaths: string[] }
+  | { ok: false; reason: string; reasonCode?: string; preservedSkillPaths?: string[] };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -298,14 +305,24 @@ export async function resolveContextTreeRef(
   return { ref };
 }
 
-type ConnectionRecords = Map<string, ExternalContextTreeTarget>;
+/**
+ * What First Tree created in one workspace, and nothing else.
+ *
+ * `declared` is set only when First Tree's own `connect` created the
+ * declaration; a matching declaration that was already there stays the
+ * operator's or Agent's. `skills` maps each Skill directory First Tree wrote
+ * (workspace-relative) to the digest it wrote, which is what proves a later
+ * replace or remove touches an unedited First Tree copy.
+ */
+type WorkspaceRecord = { declared: ExternalContextTreeTarget | null; skills: Record<string, string> };
+type WorkspaceRecords = Map<string, WorkspaceRecord>;
 
 function connectionsPath(): string {
   return join(defaultDataDir(), CONNECTIONS_FILENAME);
 }
 
-function readConnectionRecords(): ConnectionRecords {
-  const records: ConnectionRecords = new Map();
+function readWorkspaceRecords(): WorkspaceRecords {
+  const records: WorkspaceRecords = new Map();
   let value: unknown;
   try {
     value = JSON.parse(readFileSync(connectionsPath(), "utf8"));
@@ -315,33 +332,42 @@ function readConnectionRecords(): ConnectionRecords {
   if (!isRecord(value) || value.schemaVersion !== CONNECTIONS_SCHEMA_VERSION || !isRecord(value.workspaces)) {
     return records;
   }
-  for (const [workspace, target] of Object.entries(value.workspaces)) {
-    if (isRecord(target) && typeof target.repository === "string" && typeof target.ref === "string") {
-      records.set(workspace, { repository: target.repository, ref: target.ref });
+  for (const [workspace, entry] of Object.entries(value.workspaces)) {
+    if (!isRecord(entry)) continue;
+    const declared =
+      isRecord(entry.declared) &&
+      typeof entry.declared.repository === "string" &&
+      typeof entry.declared.ref === "string"
+        ? { repository: entry.declared.repository, ref: entry.declared.ref }
+        : null;
+    const skills: Record<string, string> = {};
+    if (isRecord(entry.skills)) {
+      for (const [path, digest] of Object.entries(entry.skills)) if (typeof digest === "string") skills[path] = digest;
     }
+    records.set(workspace, { declared, skills });
   }
   return records;
 }
 
 /**
- * Set or clear one workspace's record. Re-reads the file at write time: the
+ * Read-modify-write one workspace's record. Re-reads the file at write time:
  * callers await CLI commands between deciding and writing, and concurrent
- * session starts for other workspaces may have written in the meantime.
+ * session starts for other workspaces may have written in the meantime. An
+ * empty record is dropped.
  */
-function updateConnectionRecord(workspace: string, target: ExternalContextTreeTarget | null): void {
-  const records = readConnectionRecords();
-  const current = records.get(workspace);
-  if (
-    target === null ? current === undefined : current?.repository === target.repository && current.ref === target.ref
-  ) {
-    return;
+function updateWorkspaceRecord(
+  workspace: string,
+  update: (current: WorkspaceRecord) => WorkspaceRecord,
+): WorkspaceRecord {
+  const records = readWorkspaceRecords();
+  const before = records.get(workspace) ?? { declared: null, skills: {} };
+  const after = update({ declared: before.declared, skills: { ...before.skills } });
+  if (JSON.stringify(after) === JSON.stringify(before) && records.has(workspace)) return after;
+  if (after.declared === null && Object.keys(after.skills).length === 0) {
+    if (!records.delete(workspace)) return after;
+  } else {
+    records.set(workspace, after);
   }
-  if (target === null) records.delete(workspace);
-  else records.set(workspace, target);
-  writeConnectionRecords(records);
-}
-
-function writeConnectionRecords(records: ConnectionRecords): void {
   mkdirSync(defaultDataDir(), { recursive: true });
   const staging = `${connectionsPath()}.${process.pid}.tmp`;
   writeFileSync(
@@ -349,6 +375,7 @@ function writeConnectionRecords(records: ConnectionRecords): void {
     JSON.stringify({ schemaVersion: CONNECTIONS_SCHEMA_VERSION, workspaces: Object.fromEntries(records) }),
   );
   renameSync(staging, connectionsPath());
+  return after;
 }
 
 /** The tree declarations in a workspace's `.context-tree.json`, or [] when it has none. */
@@ -371,6 +398,10 @@ function declares(workspace: string, target: ExternalContextTreeTarget): boolean
       (tree.path ?? ".") === "." &&
       tree.ref === target.ref,
   );
+}
+
+function sameTarget(left: ExternalContextTreeTarget | null, right: ExternalContextTreeTarget): boolean {
+  return left !== null && left.repository.toLowerCase() === right.repository.toLowerCase() && left.ref === right.ref;
 }
 
 /** Repository name, which is how 1.x `--tree` selects a declared Git source. */
@@ -407,7 +438,47 @@ export function packagedContextTreeSkillNames(): string[] {
     .sort();
 }
 
-/** Workspaces whose Skills were installed by this process, keyed by CLI version. */
+/**
+ * A content digest of one Skill directory: its shape, names and bytes, in a
+ * stable order. Returns null for anything that is not a plain tree of regular
+ * files and directories — a linked-in Skill is never one we own.
+ */
+export function skillTreeDigest(root: string): string | null {
+  const hash = createHash("sha256");
+  const visit = (directory: string, prefix: string): boolean => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(directory, { withFileTypes: true });
+    } catch {
+      return false;
+    }
+    entries.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+    for (const entry of entries) {
+      const relative = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+      if (entry.isSymbolicLink()) return false;
+      if (entry.isDirectory()) {
+        hash.update(`d\0${relative}\0`);
+        if (!visit(join(directory, entry.name), relative)) return false;
+      } else if (entry.isFile()) {
+        const bytes = readFileSync(join(directory, entry.name));
+        hash.update(`f\0${relative}\0${bytes.length}\0`);
+        hash.update(bytes);
+      } else {
+        return false;
+      }
+    }
+    return true;
+  };
+  try {
+    const entry = lstatSync(root, { throwIfNoEntry: false });
+    if (entry === undefined || entry.isSymbolicLink() || !entry.isDirectory()) return null;
+    return visit(root, "") ? hash.digest("hex") : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Workspaces whose Skills were reconciled by this process, keyed by CLI version. */
 const installedSkills = new Map<string, string>();
 
 /** Refuse to write through a symlinked or non-directory Skill root. */
@@ -427,24 +498,55 @@ function realSkillRoot(workspace: string, relative: string): string {
   return current;
 }
 
-function installWorkspaceSkills(workspace: string): ContextTreeCliResult {
+type SkillInstallResult = { ok: true; preserved: string[] } | { ok: false; reason: string };
+
+/**
+ * Place the packaged Skills in both workspace Skill roots.
+ *
+ * A target is written only when it is absent, or when the record proves First
+ * Tree wrote it and its bytes still match what was written. Anything else under
+ * a packaged name — hand-maintained, edited, or installed by someone else — is
+ * left exactly as it is; one that differs from the payload is reported.
+ */
+function installWorkspaceSkills(workspace: string): SkillInstallResult {
   const version = contextTreeCliVersion() ?? "unknown";
-  if (installedSkills.get(workspace) === version) return { ok: true, payload: null };
+  if (installedSkills.get(workspace) === version) return { ok: true, preserved: [] };
   const source = packagedSkillsRoot();
   const names = packagedContextTreeSkillNames();
   if (source === null || names.length === 0) {
     return { ok: false, reason: `${CONTEXT_TREE_PACKAGE} ships no Skills; reinstall First Tree` };
   }
+  const recorded = readWorkspaceRecords().get(workspace)?.skills ?? {};
+  const written: Record<string, string> = {};
+  const disowned: string[] = [];
+  const preserved: string[] = [];
   try {
     for (const relative of WORKSPACE_SKILL_ROOTS) {
       const root = realSkillRoot(workspace, relative);
       for (const name of names) {
+        const key = join(relative, name);
+        const target = join(root, name);
+        const payloadDigest = skillTreeDigest(join(source, name));
+        if (payloadDigest === null) throw new Error(`packaged Skill ${name} is not a plain directory`);
+        if (lstatSync(target, { throwIfNoEntry: false }) !== undefined) {
+          const currentDigest = skillTreeDigest(target);
+          if (recorded[key] === undefined || currentDigest !== recorded[key]) {
+            if (recorded[key] !== undefined) disowned.push(key);
+            if (currentDigest !== payloadDigest) preserved.push(target);
+            continue;
+          }
+          if (currentDigest === payloadDigest) {
+            written[key] = payloadDigest;
+            continue;
+          }
+        }
         // Stage beside the target and swap, so a crash never leaves a half-copied Skill.
         const staging = join(root, `.${name}.${process.pid}.staging`);
         rmSync(staging, { recursive: true, force: true });
         cpSync(join(source, name), staging, { recursive: true, verbatimSymlinks: true });
-        rmSync(join(root, name), { recursive: true, force: true });
-        renameSync(staging, join(root, name));
+        rmSync(target, { recursive: true, force: true });
+        renameSync(staging, target);
+        written[key] = payloadDigest;
       }
     }
   } catch (err) {
@@ -452,27 +554,51 @@ function installWorkspaceSkills(workspace: string): ContextTreeCliResult {
       ok: false,
       reason: `could not install Context Tree Skills in ${workspace}: ${err instanceof Error ? err.message : String(err)}`,
     };
+  } finally {
+    // Record what was written even when a later target failed, so revert can find it.
+    updateWorkspaceRecord(workspace, (current) => {
+      for (const key of disowned) delete current.skills[key];
+      return { ...current, skills: { ...current.skills, ...written } };
+    });
   }
   installedSkills.set(workspace, version);
-  return { ok: true, payload: null };
+  return { ok: true, preserved };
 }
 
-function removeWorkspaceSkills(workspace: string): ContextTreeCliResult {
+/** Remove the Skill directories the record proves First Tree wrote and nobody edited since. */
+function removeWorkspaceSkills(workspace: string): { removed: string[]; preserved: string[] } {
   installedSkills.delete(workspace);
-  try {
-    for (const relative of WORKSPACE_SKILL_ROOTS) {
-      const root = join(workspace, relative);
-      const entry = lstatSync(root, { throwIfNoEntry: false });
-      if (entry === undefined || entry.isSymbolicLink() || !entry.isDirectory()) continue;
-      for (const name of packagedContextTreeSkillNames()) rmSync(join(root, name), { recursive: true, force: true });
+  const removed: string[] = [];
+  const preserved: string[] = [];
+  const skills = readWorkspaceRecords().get(workspace)?.skills ?? {};
+  for (const [key, digest] of Object.entries(skills)) {
+    const target = join(workspace, key);
+    if (lstatSync(target, { throwIfNoEntry: false }) === undefined) continue;
+    if (skillTreeDigest(target) !== digest) {
+      preserved.push(target);
+      continue;
     }
-  } catch (err) {
-    return {
-      ok: false,
-      reason: `could not remove Context Tree Skills from ${workspace}: ${err instanceof Error ? err.message : String(err)}`,
-    };
+    try {
+      rmSync(target, { recursive: true, force: true });
+      removed.push(target);
+    } catch {
+      preserved.push(target);
+    }
   }
-  return { ok: true, payload: null };
+  updateWorkspaceRecord(workspace, (current) => ({ ...current, skills: {} }));
+  return { removed, preserved };
+}
+
+async function disconnectOwned(workspace: string, declared: ExternalContextTreeTarget): Promise<ContextTreeCliResult> {
+  if (!declares(workspace, declared)) return { ok: true, payload: null };
+  return runContextTreeCommand([
+    "disconnect",
+    "--tree",
+    treeSelector(declared.repository),
+    "--project-path",
+    workspace,
+    "--json",
+  ]);
 }
 
 /**
@@ -481,10 +607,11 @@ function removeWorkspaceSkills(workspace: string): ContextTreeCliResult {
  *
  * Skills go into both workspace Skill roots, because the same workspace may run
  * Claude Code (`.claude/skills`) or Codex (`.agents/skills`). The connection is
- * only re-made when the workspace does not already declare the target, so a
- * session start normally costs no network round trip. A previous target that
- * First Tree declared — a changed repository or ref — is disconnected first;
- * trees the Agent connected itself are left alone.
+ * only made when the workspace does not already declare the target, so a
+ * session start normally costs no network round trip. A matching declaration
+ * that First Tree did not create is used as it is and never adopted. A
+ * previous target that First Tree declared — a changed repository or ref — is
+ * disconnected first; trees anyone else connected are left alone.
  *
  * Never throws: an Agent without a tree still runs, and its Skills report
  * `NO_CONNECTION` to it.
@@ -499,73 +626,51 @@ export async function ensureExternalContextTreeWorkspace(
   if ("reason" in shim) return { ok: false, reason: shim.reason };
   const skills = installWorkspaceSkills(workspace);
   if (!skills.ok) return skills;
+  const preservedSkillPaths = skills.preserved;
 
-  // Recorded as soon as the Skills land, before connecting, so a revert finds
-  // every workspace First Tree wrote into even when the connect failed.
-  const previous = readConnectionRecords().get(workspace);
-  if (declares(workspace, target)) {
-    updateConnectionRecord(workspace, target);
-    return { ok: true, connected: false };
-  }
-  if (
-    previous &&
-    (previous.repository !== target.repository || previous.ref !== target.ref) &&
-    declaredTrees(workspace).length > 0
-  ) {
+  const previous = readWorkspaceRecords().get(workspace)?.declared ?? null;
+  if (previous !== null && !sameTarget(previous, target)) {
     // Best-effort: a stale declaration that will not go away still leaves the
     // new tree connected, and the Skills ask the Agent to pick with `--tree`.
-    await runContextTreeCommand([
-      "disconnect",
-      "--tree",
-      treeSelector(previous.repository),
-      "--project-path",
-      workspace,
-      "--json",
-    ]);
+    await disconnectOwned(workspace, previous);
+    updateWorkspaceRecord(workspace, (current) => ({ ...current, declared: null }));
   }
-  updateConnectionRecord(workspace, target);
+  if (declares(workspace, target)) return { ok: true, connected: false, preservedSkillPaths };
+
   const connect = await runContextTreeCommand(
     ["connect", target.repository, "--ref", target.ref, "--project-path", workspace, "--json"],
     { cwd: workspace },
   );
-  if (!connect.ok) return connect;
-  return { ok: true, connected: true };
+  if (!connect.ok) return { ...connect, preservedSkillPaths };
+  updateWorkspaceRecord(workspace, (current) => ({ ...current, declared: target }));
+  return { ok: true, connected: true, preservedSkillPaths };
 }
 
 /**
  * Undo {@link ensureExternalContextTreeWorkspace} for one workspace once
- * external mode is switched off: remove the workspace's `context-tree-*` Skills
- * and the declaration First Tree recorded. Content, snapshots and write
- * sessions stay where the CLI keeps them.
+ * external mode is switched off: remove the Skill directories First Tree wrote
+ * and nobody edited, and the declaration First Tree created. Everything else —
+ * edited Skills, declarations someone else made, snapshots and write sessions —
+ * stays.
  */
 export async function removeExternalContextTreeWorkspace(
   workspace: string,
-): Promise<{ ok: true } | { ok: false; reason: string }> {
+): Promise<{ ok: true; preservedSkillPaths: string[] } | { ok: false; reason: string }> {
   if (!resolveContextTreeCli())
     return { ok: false, reason: `${CONTEXT_TREE_PACKAGE} is not installed beside this CLI` };
-  const skills = removeWorkspaceSkills(workspace);
-  if (!skills.ok) return skills;
-  const previous = readConnectionRecords().get(workspace);
-  if (previous) {
-    if (declaredTrees(workspace).length > 0) {
-      const disconnect = await runContextTreeCommand([
-        "disconnect",
-        "--tree",
-        treeSelector(previous.repository),
-        "--project-path",
-        workspace,
-        "--json",
-      ]);
-      if (!disconnect.ok && disconnect.reasonCode !== "NO_CONNECTION") return disconnect;
-    }
-    updateConnectionRecord(workspace, null);
+  const { preserved } = removeWorkspaceSkills(workspace);
+  const declared = readWorkspaceRecords().get(workspace)?.declared ?? null;
+  if (declared !== null) {
+    const disconnect = await disconnectOwned(workspace, declared);
+    if (!disconnect.ok && disconnect.reasonCode !== "NO_CONNECTION") return disconnect;
+    updateWorkspaceRecord(workspace, (current) => ({ ...current, declared: null }));
   }
-  return { ok: true };
+  return { ok: true, preservedSkillPaths: preserved };
 }
 
-/** Workspaces First Tree installed Context Tree Skills into, for revert. */
+/** Workspaces First Tree wrote Skills or a declaration into, for revert. */
 export function recordedExternalContextTreeWorkspaces(): string[] {
-  return [...readConnectionRecords().keys()];
+  return [...readWorkspaceRecords().keys()];
 }
 
 /**
@@ -592,6 +697,9 @@ export async function prepareExternalContextTreeForSession(
     return;
   }
   const result = await ensureExternalContextTreeWorkspace(workspace, { repository, ref: ref.ref });
+  if (result.preservedSkillPaths?.length) {
+    log(`Context Tree: left Skills First Tree did not write in place: ${result.preservedSkillPaths.join(", ")}`);
+  }
   if (!result.ok) log(`Context Tree: could not prepare ${repository}@${ref.ref}: ${result.reason}`);
   else if (result.connected) log(`Context Tree: connected ${repository}@${ref.ref}`);
 }

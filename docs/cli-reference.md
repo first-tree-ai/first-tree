@@ -1300,19 +1300,26 @@ value rather than calling it unset.
 
 - copies the bundled `context-tree-{read,write,init,connect,cleanup,schedule-cleanup}`
   Skills into the workspace's `.claude/skills` (Claude Code) and
-  `.agents/skills` (Codex). Only those names are written or removed: First
-  Tree's own Core Skills `context-tree-review` and `context-tree-audit` share
-  the prefix and stay under the Managed Skills ledger, which is why First Tree
-  does not use the CLI's `skills install --project` (it replaces every
-  `context-tree-*` directory in the destination);
+  `.agents/skills` (Codex). Only those names are considered: First Tree's own
+  Core Skills `context-tree-review` and `context-tree-audit` share the prefix
+  and stay under the Managed Skills ledger, which is why First Tree does not use
+  the CLI's `skills install --project` (it replaces every `context-tree-*`
+  directory in the destination). A target is written only when it is absent, or
+  when First Tree wrote it and its content still matches the digest recorded
+  then. A same-name directory First Tree did not write, or one edited since —
+  a Team Skill, a hand-installed copy — is left as it is and named in the
+  `login` line;
 - runs `context-tree connect <OWNER/REPO> --ref <branch>`, which declares the
   tree in the workspace's `.context-tree.json` and keeps a snapshot under
   `~/.context-tree/snapshots/`. A workspace that already declares the target is
-  not reconnected, so a session start normally costs no network round trip.
-  When the configured repository or ref changes, First Tree disconnects the tree
-  it declared before and connects the new one; trees an Agent connected itself
-  are left alone. First Tree records what it declared per workspace in
-  `<dataDir>/context-tree-connections.json`.
+  not reconnected, so a session start normally costs no network round trip. A
+  matching declaration First Tree did not create is used but never treated as
+  First Tree's. When the configured repository or ref changes, First Tree
+  disconnects only a declaration it created and connects the new one.
+
+First Tree records the Skill digests it wrote and the declarations it created
+per workspace in `<dataDir>/context-tree-connections.json`; nothing outside that
+record is ever replaced, disconnected, or removed.
 
 `login` does this for every existing workspace, and each session start does it
 again for its own workspace, so Agents created after the last `login`, a changed
@@ -1366,8 +1373,9 @@ Tree leaves both in place, and an older First Tree still reads them after a
 downgrade.
 
 **To revert**, unset `context_tree.repository` and re-run `first-tree login`.
-First Tree removes the workspace Skills and the declarations it recorded,
-removes its shim, and retires owned 0.1 account-level copies. Snapshots and
+First Tree removes the workspace Skills it wrote that are still unedited and the
+declarations it created; edited Skills are preserved and reported. It also
+removes its shim and retires owned 0.1 account-level copies. Snapshots and
 write sessions are left where the CLI keeps them. First Tree's own Skills are
 reprojected on the next session.
 

@@ -240,13 +240,10 @@ export {
   resolveContextTreeCli,
   resolveContextTreeRef,
   runContextTreeCommand,
+  skillTreeDigest,
   writeContextTreeShim,
 } from "./runtime/external-context-tree.js";
-export {
-  removeLegacyChannelShim,
-  retireLegacyAccountSkills,
-  skillTreeDigest,
-} from "./runtime/external-context-tree-legacy.js";
+export { removeLegacyChannelShim, retireLegacyAccountSkills } from "./runtime/external-context-tree-legacy.js";
 export type {
   AgentHandler,
   HandlerConfig,

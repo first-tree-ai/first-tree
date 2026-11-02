@@ -254,6 +254,70 @@ describe("ensureContextTreeSkills", () => {
     expect(existsSync(join(home, "data", "context-tree", "bin"))).toBe(false);
   });
 
+  it("never adopts a matching declaration it did not create, so revert keeps it", async () => {
+    createRemoteTree("acme/manual");
+    writeConfig({ repository: "acme/manual", ref: "trunk" });
+    const ws = workspace("manual");
+    const { ensureContextTreeSkills, runContextTreeCommand } = await loadModule();
+    const manual = await runContextTreeCommand([
+      "connect",
+      "acme/manual",
+      "--ref",
+      "trunk",
+      "--project-path",
+      ws,
+      "--json",
+    ]);
+    expect(manual.ok).toBe(true);
+
+    const report = await ensureContextTreeSkills();
+    expect(report).toMatchObject({ status: "installed", failures: [] });
+    expect(report.connectedWorkspaces).toEqual([ws]);
+
+    writeConfig();
+    expect((await ensureContextTreeSkills()).failures).toEqual([]);
+    expect(declaredTrees(ws)).toEqual([{ kind: "git", repository: "acme/manual", path: ".", ref: "trunk" }]);
+  });
+
+  it("preserves and reports a same-name workspace Skill it did not write, even when connect fails", async () => {
+    writeConfig({ repository: "acme/unreachable", ref: "trunk" });
+    const ws = workspace("hand-maintained");
+    const handMade = join(ws, ".claude", "skills", "context-tree-read");
+    mkdirSync(handMade, { recursive: true });
+    writeFileSync(join(handMade, "SKILL.md"), "hand-maintained\n");
+
+    const { ensureContextTreeSkills, formatContextTreeSetupReport } = await loadModule();
+    const report = await ensureContextTreeSkills();
+    expect(report.failures).toHaveLength(1);
+    expect(report.preservedSkillPaths).toEqual([handMade]);
+    expect(readFileSync(join(handMade, "SKILL.md"), "utf8")).toBe("hand-maintained\n");
+    // The other targets were free, so they were installed.
+    expect(existsSync(join(ws, ".claude", "skills", "context-tree-write", "SKILL.md"))).toBe(true);
+    expect(existsSync(join(ws, ".agents", "skills", "context-tree-read", "SKILL.md"))).toBe(true);
+    expect(formatContextTreeSetupReport(report)).toContain("left 1 hand-installed or edited Skill in place");
+
+    writeConfig();
+    await ensureContextTreeSkills();
+    expect(readFileSync(join(handMade, "SKILL.md"), "utf8")).toBe("hand-maintained\n");
+    expect(existsSync(join(ws, ".claude", "skills", "context-tree-write"))).toBe(false);
+  });
+
+  it("keeps a Skill it installed once it has been edited, on revert", async () => {
+    createRemoteTree("acme/edited");
+    writeConfig({ repository: "acme/edited", ref: "trunk" });
+    const ws = workspace("edited");
+    const { ensureContextTreeSkills } = await loadModule();
+    expect((await ensureContextTreeSkills()).failures).toEqual([]);
+    const edited = join(ws, ".agents", "skills", "context-tree-write", "SKILL.md");
+    writeFileSync(edited, "edited by the operator\n");
+
+    writeConfig();
+    const report = await ensureContextTreeSkills();
+    expect(report.preservedSkillPaths).toEqual([join(ws, ".agents", "skills", "context-tree-write")]);
+    expect(readFileSync(edited, "utf8")).toBe("edited by the operator\n");
+    expect(existsSync(join(ws, ".claude", "skills", "context-tree-write"))).toBe(false);
+  });
+
   it("removes its own legacy channel shim and never a user's global context-tree", async () => {
     createRemoteTree("acme/shim");
     writeConfig({ repository: "acme/shim", ref: "trunk" });
@@ -292,7 +356,7 @@ describe("ensureContextTreeSkills", () => {
     for (const dir of [owned, unowned, unrelated]) expect(existsSync(dir)).toBe(true);
     // Provenance survives while anything it covers is still in place.
     expect(existsSync(join(home, "data", "context-tree-owned-skills.json"))).toBe(true);
-    expect(formatContextTreeSetupReport(report)).toContain("left 2 hand-installed or edited account-level Skills");
+    expect(formatContextTreeSetupReport(report)).toContain("left 2 hand-installed or edited Skills");
   });
 });
 

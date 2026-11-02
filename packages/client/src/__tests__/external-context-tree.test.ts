@@ -92,7 +92,7 @@ describe("workspace Skills", () => {
     }
     expect(recordedExternalContextTreeWorkspaces()).toEqual([workspace]);
 
-    expect(await removeExternalContextTreeWorkspace(workspace)).toEqual({ ok: true });
+    expect(await removeExternalContextTreeWorkspace(workspace)).toEqual({ ok: true, preservedSkillPaths: [] });
     for (const root of [".claude", ".agents"]) {
       for (const name of packagedContextTreeSkillNames()) {
         expect(existsSync(join(workspace, root, "skills", name))).toBe(false);

@@ -1,11 +1,10 @@
-import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
-import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, rmSync, unlinkSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, rmSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join, resolve as resolvePath } from "node:path";
 import { defaultDataDir } from "@first-tree/shared/config";
 import { getCliBinding } from "./cli-binding.js";
-import { CONTEXT_TREE_SHIM_MARKER } from "./external-context-tree.js";
+import { CONTEXT_TREE_SHIM_MARKER, skillTreeDigest } from "./external-context-tree.js";
 
 /**
  * Cleanup of what First Tree installed while it bundled the 0.1 Context Tree CLI.
@@ -46,46 +45,6 @@ const LEGACY_PACKAGED_SKILL_DIGESTS: Readonly<Record<string, string>> = {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
-}
-
-/**
- * A content digest of one Skill directory: its shape, names and bytes, in a
- * stable order. Returns null for anything that is not a plain tree of regular
- * files and directories — a linked-in Skill is never one we own.
- */
-export function skillTreeDigest(root: string): string | null {
-  const hash = createHash("sha256");
-  const visit = (directory: string, prefix: string): boolean => {
-    let entries: Dirent[];
-    try {
-      entries = readdirSync(directory, { withFileTypes: true });
-    } catch {
-      return false;
-    }
-    entries.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
-    for (const entry of entries) {
-      const relative = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
-      if (entry.isSymbolicLink()) return false;
-      if (entry.isDirectory()) {
-        hash.update(`d\0${relative}\0`);
-        if (!visit(join(directory, entry.name), relative)) return false;
-      } else if (entry.isFile()) {
-        const bytes = readFileSync(join(directory, entry.name));
-        hash.update(`f\0${relative}\0${bytes.length}\0`);
-        hash.update(bytes);
-      } else {
-        return false;
-      }
-    }
-    return true;
-  };
-  try {
-    const entry = lstatSync(root, { throwIfNoEntry: false });
-    if (entry === undefined || entry.isSymbolicLink() || !entry.isDirectory()) return null;
-    return visit(root, "") ? hash.digest("hex") : null;
-  } catch {
-    return null;
-  }
 }
 
 /** Paths the legacy ownership record proves First Tree created. */
