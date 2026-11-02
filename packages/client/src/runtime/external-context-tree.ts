@@ -19,6 +19,7 @@ import { defaultDataDir, normalizeContextTreeRef, readContextTreeRefSetting } fr
 import { getChildProcessRegistry } from "./child-process-registry.js";
 import { retireLegacyContextTreeInstallOnce } from "./external-context-tree-legacy.js";
 import { CORE_SKILL_NAMES } from "./first-tree-skills/installer.js";
+import { acquireWorkspaceFileLock } from "./workspace-file-lock.js";
 
 /**
  * The external Context Tree CLI (`@first-tree-ai/context-tree`, 1.x).
@@ -353,13 +354,32 @@ function readWorkspaceRecords(): WorkspaceRecords {
   return records;
 }
 
+/** How long a record update waits for another process holding the record lock. */
+const RECORD_LOCK_TIMEOUT_MS = 30_000;
+
 /**
- * Read-modify-write one workspace's record. Re-reads the file at write time:
- * callers await CLI commands between deciding and writing, and concurrent
- * session starts for other workspaces may have written in the meantime. An
- * empty record is dropped.
+ * Read-modify-write one workspace's record under a kernel lock.
+ *
+ * The record is shared by every workspace and by separate processes — `login`
+ * and an already-running daemon — so the whole read-modify-write holds an
+ * exclusive lock on a persistent lock file beside it (the same primitive the
+ * Managed Skills ledger uses). The lock covers only this update, never a
+ * network call. An empty record is dropped.
  */
-function updateWorkspaceRecord(
+async function updateWorkspaceRecord(
+  workspace: string,
+  update: (current: WorkspaceRecord) => WorkspaceRecord,
+): Promise<WorkspaceRecord> {
+  mkdirSync(defaultDataDir(), { recursive: true });
+  const lock = await acquireWorkspaceFileLock(`${connectionsPath()}.lock`, { timeoutMs: RECORD_LOCK_TIMEOUT_MS });
+  try {
+    return writeWorkspaceRecord(workspace, update);
+  } finally {
+    await lock.release();
+  }
+}
+
+function writeWorkspaceRecord(
   workspace: string,
   update: (current: WorkspaceRecord) => WorkspaceRecord,
 ): WorkspaceRecord {
@@ -372,7 +392,6 @@ function updateWorkspaceRecord(
   } else {
     records.set(workspace, after);
   }
-  mkdirSync(defaultDataDir(), { recursive: true });
   const staging = `${connectionsPath()}.${process.pid}.tmp`;
   writeFileSync(
     staging,
@@ -512,7 +531,7 @@ type SkillInstallResult = { ok: true; preserved: string[] } | { ok: false; reaso
  * a packaged name — hand-maintained, edited, or installed by someone else — is
  * left exactly as it is; one that differs from the payload is reported.
  */
-function installWorkspaceSkills(workspace: string): SkillInstallResult {
+async function installWorkspaceSkills(workspace: string): Promise<SkillInstallResult> {
   const version = contextTreeCliVersion() ?? "unknown";
   if (installedSkills.get(workspace) === version) return { ok: true, preserved: [] };
   const source = packagedSkillsRoot();
@@ -559,7 +578,7 @@ function installWorkspaceSkills(workspace: string): SkillInstallResult {
   }
   // Record what was written even when a later target failed, so revert can find it.
   try {
-    updateWorkspaceRecord(workspace, (current) => {
+    await updateWorkspaceRecord(workspace, (current) => {
       for (const key of disowned) delete current.skills[key];
       return { ...current, skills: { ...current.skills, ...written } };
     });
@@ -600,7 +619,7 @@ function containedSkillTarget(workspace: string, key: string): string | null {
  * edited since, and that still live inside the workspace. Anything else is
  * preserved and reported.
  */
-function removeWorkspaceSkills(workspace: string): { removed: string[]; preserved: string[] } {
+async function removeWorkspaceSkills(workspace: string): Promise<{ removed: string[]; preserved: string[] }> {
   installedSkills.delete(workspace);
   const removed: string[] = [];
   const preserved: string[] = [];
@@ -625,7 +644,7 @@ function removeWorkspaceSkills(workspace: string): { removed: string[]; preserve
       preserved.push(target);
     }
   }
-  updateWorkspaceRecord(workspace, (current) => ({ ...current, skills: {} }));
+  await updateWorkspaceRecord(workspace, (current) => ({ ...current, skills: {} }));
   return { removed, preserved };
 }
 
@@ -677,7 +696,7 @@ async function ensureWorkspace(
     return { ok: false, reason: `${CONTEXT_TREE_PACKAGE} is not installed beside this CLI` };
   const shim = writeContextTreeShim();
   if ("reason" in shim) return { ok: false, reason: shim.reason };
-  const skills = installWorkspaceSkills(workspace);
+  const skills = await installWorkspaceSkills(workspace);
   if (!skills.ok) return skills;
   const preservedSkillPaths = skills.preserved;
 
@@ -686,7 +705,7 @@ async function ensureWorkspace(
     // Best-effort: a stale declaration that will not go away still leaves the
     // new tree connected, and the Skills ask the Agent to pick with `--tree`.
     await disconnectOwned(workspace, previous);
-    updateWorkspaceRecord(workspace, (current) => ({ ...current, declared: null }));
+    await updateWorkspaceRecord(workspace, (current) => ({ ...current, declared: null }));
   }
   if (declares(workspace, target)) return { ok: true, connected: false, preservedSkillPaths };
 
@@ -695,7 +714,7 @@ async function ensureWorkspace(
     { cwd: workspace },
   );
   if (!connect.ok) return { ...connect, preservedSkillPaths };
-  updateWorkspaceRecord(workspace, (current) => ({ ...current, declared: target }));
+  await updateWorkspaceRecord(workspace, (current) => ({ ...current, declared: target }));
   return { ok: true, connected: true, preservedSkillPaths };
 }
 
@@ -721,12 +740,12 @@ async function removeWorkspace(
 ): Promise<{ ok: true; preservedSkillPaths: string[] } | { ok: false; reason: string }> {
   if (!resolveContextTreeCli())
     return { ok: false, reason: `${CONTEXT_TREE_PACKAGE} is not installed beside this CLI` };
-  const { preserved } = removeWorkspaceSkills(workspace);
+  const { preserved } = await removeWorkspaceSkills(workspace);
   const declared = readWorkspaceRecords().get(workspace)?.declared ?? null;
   if (declared !== null) {
     const disconnect = await disconnectOwned(workspace, declared);
     if (!disconnect.ok && disconnect.reasonCode !== "NO_CONNECTION") return disconnect;
-    updateWorkspaceRecord(workspace, (current) => ({ ...current, declared: null }));
+    await updateWorkspaceRecord(workspace, (current) => ({ ...current, declared: null }));
   }
   return { ok: true, preservedSkillPaths: preserved };
 }

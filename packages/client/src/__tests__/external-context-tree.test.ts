@@ -16,6 +16,7 @@ import {
   resolveContextTreeRef,
   writeContextTreeShim,
 } from "../runtime/external-context-tree.js";
+import { acquireWorkspaceFileLock } from "../runtime/workspace-file-lock.js";
 
 /**
  * Runs against the real bundled CLI. Only paths that never reach the network
@@ -120,6 +121,33 @@ describe("best-effort boundaries", () => {
       prepareExternalContextTreeForSession(workspace, "acme/ledger", (message) => logs.push(message)),
     ).resolves.toBeUndefined();
     expect(logs.some((message) => message.startsWith("Context Tree:"))).toBe(true);
+  });
+});
+
+describe("ownership record across processes", () => {
+  it("waits for another holder of the record lock and keeps that holder's entry", async () => {
+    const records = join(home, "data", "context-tree-connections.json");
+    mkdirSync(join(home, "data"), { recursive: true });
+    // Stand in for a second process (login vs. the daemon): it holds the kernel
+    // lock, writes its own workspace entry, then releases.
+    const other = await acquireWorkspaceFileLock(`${records}.lock`, { timeoutMs: 1_000 });
+    const workspace = join(home, "data", "workspaces", "this-process");
+    mkdirSync(workspace, { recursive: true });
+    const pending = ensureExternalContextTreeWorkspace(workspace, { repository: "acme/locked", ref: "main" });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(existsSync(records)).toBe(false);
+    const otherWorkspace = join(home, "data", "workspaces", "other-process");
+    writeFileSync(
+      records,
+      JSON.stringify({
+        schemaVersion: 1,
+        workspaces: { [otherWorkspace]: { declared: null, skills: { ".claude/skills/context-tree-read": "x" } } },
+      }),
+    );
+    await other.release();
+
+    await pending;
+    expect(recordedExternalContextTreeWorkspaces().sort()).toEqual([otherWorkspace, workspace].sort());
   });
 });
 
