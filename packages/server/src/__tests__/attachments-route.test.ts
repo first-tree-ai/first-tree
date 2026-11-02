@@ -87,6 +87,26 @@ describe("attachments route — upload + capability download", () => {
     });
   });
 
+  it("sends non-ASCII and quote-bearing filenames as RFC 5987 filename*", async () => {
+    const app = getApp();
+    const admin = await createTestAdmin(app, { username: `up-rfc5987-${crypto.randomUUID().slice(0, 6)}` });
+    const bytes = Buffer.from([0x89, 0x50]);
+
+    const nonAscii = await postAttachment(app, admin, bytes, { filename: "测试报告.pdf" });
+    expect(nonAscii.statusCode).toBe(201);
+    const nonAsciiBody = nonAscii.json() as { id: string };
+    const nonAsciiDownload = await getAttachment(app, admin, nonAsciiBody.id);
+    expect(nonAsciiDownload.headers["content-disposition"]).toBe(
+      "inline; filename*=UTF-8''%E6%B5%8B%E8%AF%95%E6%8A%A5%E5%91%8A.pdf",
+    );
+
+    const quoted = await postAttachment(app, admin, bytes, { filename: 'a"b.png' });
+    expect(quoted.statusCode).toBe(201);
+    const quotedBody = quoted.json() as { id: string };
+    const quotedDownload = await getAttachment(app, admin, quotedBody.id);
+    expect(quotedDownload.headers["content-disposition"]).toBe("inline; filename*=UTF-8''a%22b.png");
+  });
+
   it("dual-reads and reverse-backfills a pre-existing S3-only row", async () => {
     const app = getApp();
     const store = app.attachmentBlobStore as MemoryAttachmentBlobStore;
