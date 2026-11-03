@@ -1,3 +1,4 @@
+import { MAX_ATTACHMENT_FILENAME_BYTES, truncateUtf8ByBytes } from "@first-tree/shared";
 import type { FastifyInstance } from "fastify";
 import { NotFoundError } from "../errors.js";
 import { loadAttachmentMeta, openAttachmentStream } from "../services/attachment.js";
@@ -58,11 +59,18 @@ export async function attachmentRoutes(app: FastifyInstance): Promise<void> {
 }
 
 /**
- * RFC 6266 percent-encoding for the `filename` directive — `inline; filename="..."`.
- * Only percent-encodes characters that would break the quoted-string parser
- * (CR/LF, quote, backslash). Browsers tolerate non-ASCII inside the quoted
- * form, but raw quotes / control chars would smuggle headers.
+ * Encode the filename into an ASCII-only quoted `Content-Disposition`
+ * `filename` parameter.
+ * Node rejects non-Latin-1 response-header characters, and the client already
+ * decodes this percent-encoded wire form when it reads attachment metadata.
+ * Encoding the whole value also protects quotes, slashes, control characters,
+ * and literal percent signs without introducing an ambiguous partial encoding.
  */
 function encodeRfc6266Filename(name: string): string {
-  return name.replace(/[\r\n"\\]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`);
+  return encodeURIComponent(truncateUtf8(name, MAX_ATTACHMENT_FILENAME_BYTES));
+}
+
+/** Bound legacy rows created before filename ingress limits existed. */
+function truncateUtf8(value: string, maxBytes: number): string {
+  return truncateUtf8ByBytes(value, maxBytes) || "attachment";
 }

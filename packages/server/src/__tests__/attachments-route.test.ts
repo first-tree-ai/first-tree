@@ -1,5 +1,12 @@
+import { validateHeaderValue } from "node:http";
 import { Readable } from "node:stream";
-import { ATTACHMENT_FILENAME_HEADER, ATTACHMENT_MIME_HEADER, MAX_ATTACHMENT_BYTES } from "@first-tree/shared";
+import { FirstTreeHubSDK } from "@first-tree/client/cloud";
+import {
+  ATTACHMENT_FILENAME_HEADER,
+  ATTACHMENT_MIME_HEADER,
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENT_FILENAME_BYTES,
+} from "@first-tree/shared";
 import { eq, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { describe, expect, it } from "vitest";
@@ -19,7 +26,7 @@ import { editMessage, lockFileAttachmentRefsIfPresent, sendMessage } from "../se
 import { validateMessageAttachmentRefs } from "../services/chat/message-attachment-validation.js";
 import { ensureMembership } from "../services/team/membership.js";
 import { uuidv7 } from "../uuid.js";
-import { createAdminContext, createTestAdmin, useTestApp } from "./helpers.js";
+import { createAdminContext, createTestAdmin, createTestApp, useTestApp } from "./helpers.js";
 
 type Admin = Awaited<ReturnType<typeof createTestAdmin>>;
 
@@ -85,6 +92,95 @@ describe("attachments route — upload + capability download", () => {
       lifecycleState: "ready",
       data: bytes,
     });
+  });
+
+  it("serves Unicode filenames through an ASCII-safe Content-Disposition header", async () => {
+    const app = getApp();
+    const admin = await createTestAdmin(app, { username: `up-unicode-${crypto.randomUUID().slice(0, 6)}` });
+    const filename = "\u4f1a\u8bdd\u9644\u4ef6 100%\uff08\u7ec8\u7248\uff09.docx";
+    const encodedFilename = encodeURIComponent(filename);
+    const bytes = Buffer.from("unicode filename payload");
+
+    const upload = await postAttachment(app, admin, bytes, {
+      filename: encodedFilename,
+      mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    });
+    expect(upload.statusCode).toBe(201);
+    const body = upload.json() as { id: string; filename: string };
+    expect(body.filename).toBe(filename);
+
+    const download = await getAttachment(app, admin, body.id);
+    expect(download.statusCode).toBe(200);
+    expect(download.rawPayload.equals(bytes)).toBe(true);
+    const contentDisposition = download.headers["content-disposition"];
+    expect(contentDisposition).toBe(`inline; filename="${encodedFilename}"`);
+    if (typeof contentDisposition !== "string") throw new Error("Content-Disposition header is missing");
+    expect(() => validateHeaderValue("Content-Disposition", contentDisposition)).not.toThrow();
+  });
+
+  it("accepts the maximum filename size and downloads through Node fetch", async () => {
+    const isolatedApp = await createTestApp();
+    try {
+      const admin = await createTestAdmin(isolatedApp, { username: `up-max-name-${crypto.randomUUID().slice(0, 6)}` });
+      const filename = ";".repeat(MAX_ATTACHMENT_FILENAME_BYTES);
+      const upload = await postAttachment(isolatedApp, admin, Buffer.from("maximum filename"), {
+        filename: encodeURIComponent(filename),
+      });
+      expect(upload.statusCode).toBe(201);
+      const body = upload.json() as { id: string; filename: string };
+      expect(body.filename).toBe(filename);
+
+      await isolatedApp.listen({ port: 0, host: "127.0.0.1" });
+      const address = isolatedApp.server.address();
+      if (!address || typeof address === "string") throw new Error("Test server did not expose a TCP address");
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/v1/attachments/${body.id}`, {
+        headers: { authorization: `Bearer ${admin.accessToken}` },
+      });
+      expect(response.status).toBe(200);
+      expect(Buffer.from(await response.arrayBuffer())).toEqual(Buffer.from("maximum filename"));
+      const contentDisposition = response.headers.get("content-disposition");
+      expect(contentDisposition).toBe(`inline; filename="${encodeURIComponent(filename)}"`);
+      if (!contentDisposition) throw new Error("Content-Disposition header is missing");
+      expect(() => validateHeaderValue("Content-Disposition", contentDisposition)).not.toThrow();
+    } finally {
+      await isolatedApp.close();
+    }
+  });
+
+  it("bounds legacy stored filenames before sending response headers", async () => {
+    const isolatedApp = await createTestApp();
+    try {
+      const admin = await createTestAdmin(isolatedApp, { username: `legacy-long-${crypto.randomUUID().slice(0, 6)}` });
+      const id = crypto.randomUUID();
+      const filename = ";".repeat(5_500);
+      const bytes = Buffer.from("legacy filename");
+      await isolatedApp.db.insert(attachments).values({
+        id,
+        organizationId: admin.organizationId,
+        objectKey: null,
+        lifecycleState: "ready",
+        mimeType: "application/octet-stream",
+        filename,
+        sizeBytes: bytes.byteLength,
+        data: bytes,
+        uploadedBy: admin.humanAgentUuid,
+      });
+
+      await isolatedApp.listen({ port: 0, host: "127.0.0.1" });
+      const address = isolatedApp.server.address();
+      if (!address || typeof address === "string") throw new Error("Test server did not expose a TCP address");
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/v1/attachments/${id}`, {
+        headers: { authorization: `Bearer ${admin.accessToken}` },
+      });
+      expect(response.status).toBe(200);
+      expect(Buffer.from(await response.arrayBuffer())).toEqual(bytes);
+      const contentDisposition = response.headers.get("content-disposition");
+      expect(contentDisposition).toBe(
+        `inline; filename="${encodeURIComponent(";".repeat(MAX_ATTACHMENT_FILENAME_BYTES))}"`,
+      );
+    } finally {
+      await isolatedApp.close();
+    }
   });
 
   it("dual-reads and reverse-backfills a pre-existing S3-only row", async () => {
@@ -665,6 +761,34 @@ describe("attachments route — upload + capability download", () => {
         TEST_ATTACHMENT_QUOTA,
       ),
     ).rejects.toThrow("Attachment filename is required");
+
+    await expect(
+      createAttachment(
+        app.db,
+        {
+          organizationId: admin.organizationId,
+          mimeType: "application/octet-stream",
+          filename: ";".repeat(MAX_ATTACHMENT_FILENAME_BYTES + 1),
+          body: Buffer.from("long filename"),
+          uploadedBy: admin.humanAgentUuid,
+        },
+        TEST_ATTACHMENT_QUOTA,
+      ),
+    ).rejects.toThrow("Attachment filename exceeds maximum length");
+
+    await expect(
+      createAttachment(
+        app.db,
+        {
+          organizationId: admin.organizationId,
+          mimeType: "application/octet-stream",
+          filename: "\ud800",
+          body: Buffer.from("invalid unicode"),
+          uploadedBy: admin.humanAgentUuid,
+        },
+        TEST_ATTACHMENT_QUOTA,
+      ),
+    ).rejects.toThrow("Attachment filename must contain valid Unicode characters");
   });
 
   it("rejects a mismatched declared byte length", async () => {
@@ -694,6 +818,47 @@ describe("attachments route — upload + capability download", () => {
     const oversize = Buffer.alloc(MAX_ATTACHMENT_BYTES + 1024);
     const reply = await postAttachment(app, admin, oversize);
     expect([400, 413]).toContain(reply.statusCode);
+  });
+
+  it("rejects filenames that could overflow the encoded response header", async () => {
+    const app = getApp();
+    const admin = await createTestAdmin(app, { username: `name-limit-${crypto.randomUUID().slice(0, 6)}` });
+    const filename = ";".repeat(MAX_ATTACHMENT_FILENAME_BYTES + 1);
+    const reply = await postAttachment(app, admin, Buffer.from("too long"), {
+      filename: encodeURIComponent(filename),
+    });
+    expect(reply.statusCode).toBe(400);
+    expect(reply.json<{ error: string }>().error).toContain("Attachment filename exceeds maximum length");
+  });
+
+  it("accepts an encoded filename after trimming request padding", async () => {
+    const isolatedApp = await createTestApp();
+    try {
+      const admin = await createTestAdmin(isolatedApp, {
+        username: `padded-name-${crypto.randomUUID().slice(0, 6)}`,
+      });
+      await isolatedApp.listen({ port: 0, host: "127.0.0.1" });
+      const address = isolatedApp.server.address();
+      if (!address || typeof address === "string") throw new Error("Test server did not expose a TCP address");
+      const sdk = new FirstTreeHubSDK({
+        serverUrl: `http://127.0.0.1:${address.port}`,
+        agentId: admin.humanAgentUuid,
+        runtimeSessionToken: "test-runtime-session",
+        userAgent: "first-tree-test",
+        getAccessToken: () => admin.accessToken,
+      });
+
+      await expect(
+        sdk.uploadAttachment({
+          orgId: admin.organizationId,
+          bytes: Buffer.from("padded"),
+          mimeType: "text/plain",
+          filename: `${" ".repeat(6000)}padded.txt `,
+        }),
+      ).resolves.toMatchObject({ filename: "padded.txt" });
+    } finally {
+      await isolatedApp.close();
+    }
   });
 
   it("returns 404 for unknown attachment id", async () => {
