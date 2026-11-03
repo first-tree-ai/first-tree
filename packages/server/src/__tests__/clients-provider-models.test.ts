@@ -248,7 +248,9 @@ describe("GET /clients/:clientId/providers/:provider/models", () => {
     const app = getApp();
     const admin = await createAdminContext(app, { username: `pm-${crypto.randomUUID().slice(0, 6)}` });
     await markClientOnInstance(app, admin.clientId, app.config.instanceId);
-    setClientReplyTimeoutMsForTests(80);
+    // Generous budget so a loaded runner still lands the durable store before
+    // the timer — the test targets the lost-wake fallback, not the race.
+    setClientReplyTimeoutMsForTests(1000);
 
     const ws = { readyState: 1, send: vi.fn(), close: vi.fn() };
     setClientConnection(admin.clientId, ws as unknown as WebSocket);
@@ -259,9 +261,12 @@ describe("GET /clients/:clientId/providers/:provider/models", () => {
         headers: { authorization: `Bearer ${admin.accessToken}` },
       });
 
-      await vi.waitFor(() => {
-        expect(ws.send).toHaveBeenCalled();
-      });
+      await vi.waitFor(
+        () => {
+          expect(ws.send).toHaveBeenCalled();
+        },
+        { interval: 10 },
+      );
       const frame = JSON.parse(String(ws.send.mock.calls[0]?.[0]));
       const catalog = sampleCatalog("cursor", "auto");
       // Durable store arrives, but no resolveClientReply / result NOTIFY (lost wake).
