@@ -126,7 +126,26 @@ function buttonByLabel(label: string): HTMLButtonElement | null {
   return document.querySelector(`button[aria-label="${label}"]`);
 }
 
+// The component-under-test formats dates with Intl's default (ambient)
+// locale, so on a developer machine whose LANG is not English these
+// hardcoded English assertions see translated output and fail. Pin the
+// default locale for this file to keep the suite hermetic anywhere.
+class DateTimeFormatEn extends Intl.DateTimeFormat {
+  constructor(locales?: string | string[], options?: Intl.DateTimeFormatOptions) {
+    super(locales ?? "en-US", options);
+  }
+}
+class RelativeTimeFormatEn extends Intl.RelativeTimeFormat {
+  constructor(locales?: string | string[], options?: Intl.RelativeTimeFormatOptions) {
+    super(locales ?? "en-US", options);
+  }
+}
+const intlEn = Object.create(Intl) as typeof Intl;
+Object.defineProperty(intlEn, "DateTimeFormat", { value: DateTimeFormatEn });
+Object.defineProperty(intlEn, "RelativeTimeFormat", { value: RelativeTimeFormatEn });
+
 beforeEach(() => {
+  vi.stubGlobal("Intl", intlEn);
   vi.clearAllMocks();
   authMock.memberId = "member-owner";
   cronApiMocks.listChatCronJobs.mockResolvedValue({ items: [] } satisfies ListCronJobsResponse);
@@ -142,6 +161,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  vi.unstubAllGlobals();
   if (root) await act(async () => root?.unmount());
   root = null;
   container = null;
