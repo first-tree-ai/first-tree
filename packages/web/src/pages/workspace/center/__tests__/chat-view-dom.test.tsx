@@ -278,6 +278,7 @@ function chatDetail(overrides: Partial<ChatDetail> = {}): ChatDetail {
     description: overrides.description ?? null,
     descriptionUpdatedAt: overrides.descriptionUpdatedAt ?? null,
     lastReadAt: overrides.lastReadAt ?? null,
+    externalChannel: overrides.externalChannel ?? null,
     lifecyclePolicy: overrides.lifecyclePolicy ?? null,
     metadata: overrides.metadata ?? { source: "github", entityUrl: "https://github.com/acme/web/pull/42" },
     createdAt: overrides.createdAt ?? NOW,

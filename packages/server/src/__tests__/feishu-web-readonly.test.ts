@@ -1,3 +1,4 @@
+import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { imBotBindings } from "../db/schema/im-bot-bindings.js";
 import { imChatBindings } from "../db/schema/im-chat-bindings.js";
@@ -5,7 +6,12 @@ import { serverInstances } from "../db/schema/server-instances.js";
 import { createChat } from "../services/chat/conversation.js";
 import { createTestAgent, useTestApp } from "./helpers.js";
 
-describe("Feishu Web read-only boundary", () => {
+/**
+ * "Web write boundary", not "Web read-only": personal view state (read, pin,
+ * archive) is deliberately still writable, which is why the 403 text below
+ * names the blocked class instead of claiming the whole chat is read-only.
+ */
+describe("Feishu Web write boundary", () => {
   const getApp = useTestApp();
 
   async function setup() {
@@ -31,15 +37,17 @@ describe("Feishu Web read-only boundary", () => {
       })
       .returning();
     if (!binding) throw new Error("binding setup failed");
+    const chatBindingId = `chat-binding-${crypto.randomUUID()}`;
     await app.db.insert(imChatBindings).values({
-      id: `chat-binding-${crypto.randomUUID()}`,
+      id: chatBindingId,
       botBindingId: binding.id,
       feishuChatId: "oc_feishu",
       chatId: chat.id,
       feishuChatType: "group",
+      status: "active",
     });
     const headers = { authorization: `Bearer ${a.accessToken}` };
-    return { app, a, chat, headers };
+    return { app, a, chat, headers, chatBindingId };
   }
 
   it("allows reads and private view state but rejects structural Web writes", async () => {
@@ -64,6 +72,13 @@ describe("Feishu Web read-only boundary", () => {
       payload: { topic: "Web must not rename Feishu" },
     });
     expect(rename.statusCode).toBe(403);
+    // The refusal must not call the chat read-only: personal state above just
+    // succeeded, so that wording would be actively misleading.
+    const renameBody = rename.json<{ error: string }>();
+    expect(renameBody.error).toContain("structural changes are blocked");
+    expect(renameBody.error).toContain("read/pin/archive");
+    expect(renameBody.error).not.toContain("read-only");
+
     const send = await app.inject({
       method: "POST",
       url: `/api/v1/chats/${chat.id}/messages`,
@@ -94,5 +109,34 @@ describe("Feishu Web read-only boundary", () => {
       });
       expect(unfollow.statusCode).toBe(403);
     }
+  });
+
+  /**
+   * BEHAVIOR CHANGE. The Web guard used to match ANY `im_chat_bindings` row,
+   * detached ones included, so a detached chat stayed Web-read-only forever
+   * while the agent scope had already released it. Both scopes now share one
+   * active-only predicate: once the binding detaches the chat is no longer
+   * mirrored into any Feishu conversation, so Web writes are legitimate again.
+   */
+  it("releases the Web boundary once the binding detaches, matching the agent scope", async () => {
+    const { app, a, chat, headers, chatBindingId } = await setup();
+
+    await app.db.update(imChatBindings).set({ status: "detached" }).where(eq(imChatBindings.id, chatBindingId));
+
+    const rename = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/chats/${chat.id}`,
+      headers,
+      payload: { topic: "detached, so writable again" },
+    });
+    expect(rename.statusCode).toBe(200);
+
+    const send = await app.inject({
+      method: "POST",
+      url: `/api/v1/chats/${chat.id}/messages`,
+      headers,
+      payload: { format: "text", content: "the bridge is gone", metadata: { mentions: [a.agent.uuid] } },
+    });
+    expect(send.statusCode).toBe(201);
   });
 });

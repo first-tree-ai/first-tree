@@ -1,6 +1,6 @@
 ---
 id: feishu-agent-channel
-description: Validate a Bot-bound Agent's Feishu registration, inbound message and attachment projection, agentic official lark-cli egress, and read-only Web task end to end.
+description: Validate a Bot-bound Agent's Feishu registration, inbound message and attachment projection, agentic official lark-cli egress, the agent-side First Tree chat-tool boundary, and the Web write boundary end to end.
 areas: [cross-surface]
 surfaces: [server, client, cli, web]
 ---
@@ -11,7 +11,8 @@ surfaces: [server, client, cli, web]
 
 Confirm that one disposable Feishu Bot belongs to exactly one First Tree Agent and that a real Feishu conversation uses
 the canonical First Tree message, Inbox, attachment, and chat-history paths. The run must also prove that internal
-collaborators cannot borrow the primary Agent's Bot identity and that the Web projection remains read-only.
+collaborators cannot borrow the primary Agent's Bot identity, that the Agent cannot answer the conversation through
+First Tree's own chat tools, and that Web structural writes stay blocked while personal view state keeps working.
 
 ## Preconditions
 
@@ -69,17 +70,54 @@ collaborators cannot borrow the primary Agent's Bot identity and that the Web pr
   materialized paths. Partial failure, unsupported cards/merged forwards, >10 refs and >10 MiB resources must preserve
   the message with explicit unavailable placeholders. Confirm the uploader actor is the Bot-scoped Integration, while
   the displayed author remains the Feishu human.
-- Invite Agent B through the ordinary Agent collaboration path. Confirm normal bounded history/backfill applies and B
-  can inspect the same canonical messages and attachments, but cannot obtain A's App Secret, record external intent, or send
-  to this Feishu conversation.
+- Put Agent B into the bound task as an ordinary collaborator. Note that `chat invite` into a chat with an ACTIVE
+  binding is refused — that refusal is itself checked below — so B's membership has to be established while no active
+  binding covers the chat, not by inviting into a live one. With B a speaker, confirm normal bounded history/backfill
+  applies and B can inspect the same canonical messages and attachments, but cannot obtain A's App Secret, record
+  external intent, or send to this Feishu conversation.
 - From Agent A, first record an outbound intent, then call the official `lark-cli` directly for a new message, reply,
   thread reply, Markdown/card and attachment. Confirm each first attempt creates exactly one immutable recipientless
   First Tree message through shared `sendMessage`, gives other speakers only `notify=false` context, and uses that
   message id as the Feishu idempotency key. Reusing the same message id with changed content, target, or media bytes must
   be rejected. Confirm the temporary credential environment is private, is available only to A, and is deleted after use.
+- From Agent A's session inside the bound task, attempt every First Tree chat tool. The boundary blocks messages and
+  membership changes, not all writes: `chat send`, `chat ask` and `chat invite` must be refused before anything is
+  written, each naming the Feishu reply path (record the delivery with `feishu intent`, then send with the official
+  `lark-cli --as bot`) rather than only refusing; `chat create` and `chat open` must be refused locally with the same
+  guidance. Removing a participant and editing an existing message must be refused identically — the same class of
+  change, so a gap in either is a gap in the boundary. `chat update --topic/--description`, `chat list`, `chat history`,
+  `feishu intent`, `feishu credential-env` and the agent's own archive/read state must keep working. Confirm no refused
+  command left a message, participant or chat behind. Repeat from Agent B and confirm the boundary is a property of the
+  chat, not of the Bot-owning Agent.
+- Point the session's `FIRST_TREE_CHAT_ID` at the bound chat with `FIRST_TREE_AGENT_ID` unset, and separately against a
+  Server that does not report a chat's external channel. `chat create` and `chat open` must refuse as UNDETERMINED in
+  both cases rather than proceeding, and must say what to fix. From a plain operator terminal with neither variable set
+  and no Agent configured, `chat open` must still work — "no chat context" and "chat context we cannot resolve" are
+  different answers.
+- Confirm a refusal requires membership first: from an Agent that is not a participant, target the bound chat's UUID and
+  confirm the error is indistinguishable from the same attempt against an ordinary chat it also does not belong to, so
+  the boundary cannot be used to discover which chats are Feishu-bound.
+- Run `chat create --agent <another local agent>` from inside the bound session. It must refuse without creating
+  anything, even though that other Agent cannot see the originating chat — the origin check runs as the session Agent,
+  and an inconclusive answer must refuse rather than proceed.
+- With the guard active, force a provider terminal failure for Agent A in the bound task (for example, invalid provider
+  credentials). Confirm the operator-facing runtime notice still lands in First Tree chat history — an agent that cannot
+  run at all must not also go silent — while ordinary agent sends in the same chat remain refused. Then confirm the
+  exemption is not casually borrowed: an ordinary agent send that decorates itself with the runtime-notice metadata
+  while addressing a teammate must still be refused, and must not persist that marker even in an unbridged chat. Treat
+  the dedicated notice endpoint as a misuse-prevention rail, not an authorization boundary — it is membership-gated
+  exactly like an ordinary send, so this step is checking that the ordinary path stays closed, not that the notice path
+  is unforgeable.
+- Exercise the runtime notice across a version skew in BOTH directions, since a provider failure is most likely during a
+  deploy. Point the current Client at a Server without the runtime-notice endpoint and confirm the notice still reaches
+  chat history through the older wire shape. Then have a Client that predates the endpoint publish into the current
+  Server and confirm the notice lands there too, stored the same way — including in the bound chat.
+- Detach the chat binding, then retry `chat send` in the same chat. It must succeed: the boundary follows the live
+  binding, not the chat's `feishu` origin label, so a detached conversation returns to being an ordinary First Tree chat.
 - Open the bound task in Web. Confirm messages, author attribution and attachments remain readable, while direct message,
   rename, membership, join/leave and other structural mutations are absent and rejected by direct Web API calls. Personal
-  read, pin and archive state must continue to work.
+  read, pin and archive state must continue to work. After detaching the binding, confirm Web structural writes are
+  accepted again — Web and the agent scope must release the chat at the same moment.
 - Revoke the binding and confirm credentials are cleared, the Channel disconnects, chat bindings detach, and later
   ingress/resource/CLI operations fail closed without deleting historical canonical messages or attachments.
 - Delete every disposable Feishu document, spreadsheet, Base app, calendar, event, task and attachment created by the
@@ -89,14 +127,17 @@ collaborators cannot borrow the primary Agent's Bot identity and that the Web pr
 ## Expected Result
 
 `PASS`: all real provider, permission, runtime, canonical history, attachment, authorization, idempotency and Web
-read-only branches above are observed on the exact target with no user scope, cross-Bot, cross-Agent or duplicate
+write-boundary branches above are observed on the exact target with no user scope, cross-Bot, cross-Agent or duplicate
 delivery, and all disposable provider resources are removed.
 
 `FAIL`: a reproducible product defect creates/wakes on an unrelated unmentioned group message, fails to wake on a verified
 Bot reply or activated-thread continuation, persists provider reference context as canonical history, attributes an
 external human as a First Tree member, loses a triggered message when one resource fails, exposes A's Bot credential to
-B, bypasses canonical message creation, duplicates a same-id send inside the provider window, or permits a Web structural
-mutation.
+B, bypasses canonical message creation, duplicates a same-id send inside the provider window, permits a Web structural
+mutation, lets an Agent answer a bridged conversation through First Tree's own chat tools, lets a request body mint its
+own runtime-notice exemption, reveals a chat's Feishu binding to a non-member through the refusal, blocks the Bot's own
+outbound delivery or the provider-failure runtime notice, blocks `chat update` or personal state, or keeps refusing in
+either scope after the binding detaches.
 
 `BLOCKED`: official QR creation, disposable tenant/chat, inbound provider connectivity, official `lark-cli`, a
 provider-backed Agent turn, or the two-replica environment cannot be established. Deterministic product tests alone do
