@@ -52,17 +52,22 @@ export async function attachmentRoutes(app: FastifyInstance): Promise<void> {
       .header("Cache-Control", "private, max-age=31536000, immutable")
       .header("ETag", etag)
       .header("X-Content-Type-Options", "nosniff")
-      .header("Content-Disposition", `inline; filename="${encodeRfc6266Filename(meta.filename)}"`);
+      .header("Content-Disposition", `inline; ${encodeRfc6266Filename(meta.filename)}`);
     return reply.send(stream);
   });
 }
 
 /**
- * RFC 6266 percent-encoding for the `filename` directive — `inline; filename="..."`.
- * Only percent-encodes characters that would break the quoted-string parser
- * (CR/LF, quote, backslash). Browsers tolerate non-ASCII inside the quoted
- * form, but raw quotes / control chars would smuggle headers.
+ * Build an RFC 6266 filename disposition.
+ *
+ * ASCII filenames use the quoted `filename` form. Non-ASCII filenames use
+ * RFC 5987's `filename*` form so the header value remains ASCII-safe.
  */
 function encodeRfc6266Filename(name: string): string {
-  return name.replace(/[\r\n"\\]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`);
+  if (/^[\x20-\x7E]*$/.test(name) && !/[\r\n"\\]/.test(name)) {
+    return `filename="${name}"`;
+  }
+
+  const encoded = encodeURIComponent(name).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `filename*=UTF-8''${encoded}`;
 }
