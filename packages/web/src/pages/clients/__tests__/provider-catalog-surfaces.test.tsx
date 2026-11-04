@@ -38,6 +38,7 @@ const HOST_SETUP_CASES = [
   ["kimi-code", "kimi # then run /login"],
   ["opencode", "opencode auth login"],
   ["pi", "pi # then run /login"],
+  ["zcode", "zcode login"],
 ] as const satisfies readonly (readonly [RuntimeProvider, string])[];
 
 let root: Root | null = null;

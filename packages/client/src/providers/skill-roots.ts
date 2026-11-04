@@ -19,4 +19,5 @@ export const PROVIDER_SKILL_ROOTS: Readonly<Record<RuntimeProvider, string>> = O
   "kimi-code": ".kimi-code/skills",
   opencode: ".opencode/skills",
   pi: ".agents/skills",
+  zcode: ".zcode/skills",
 } satisfies Record<RuntimeProvider, string>);

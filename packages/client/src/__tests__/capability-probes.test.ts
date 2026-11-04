@@ -917,6 +917,7 @@ describe("probeCapabilities (aggregator)", () => {
       "kimi-code": okProbe,
       opencode: okProbe,
       pi: okProbe,
+      zcode: okProbe,
     } as const;
 
     const { probeCapabilities } = await import("../providers/capabilities/index.js");
@@ -935,13 +936,14 @@ describe("probeCapabilities (aggregator)", () => {
       "kimi-code",
       "opencode",
       "pi",
+      "zcode",
     ]);
     expect(caps["claude-code"]?.state).toBe("ok");
     expect(caps["claude-code-tui"]).toBeUndefined();
     expect(caps.antigravity).toMatchObject({ state: "missing", available: false });
     expect(tuiProbe).not.toHaveBeenCalled();
     expect(antigravityProbe).toHaveBeenCalledTimes(1);
-    expect(okProbe).toHaveBeenCalledTimes(9);
+    expect(okProbe).toHaveBeenCalledTimes(10);
   }, 15_000);
 
   it("publishes the machine-level lark-cli capability alongside runtime providers", async () => {
@@ -969,6 +971,7 @@ describe("probeCapabilities (aggregator)", () => {
       "kimi-code": vi.fn().mockRejectedValue("kimi probe failed"),
       opencode: vi.fn().mockRejectedValue("opencode probe failed"),
       pi: vi.fn().mockRejectedValue("pi probe failed"),
+      zcode: vi.fn().mockRejectedValue("zcode probe failed"),
     } as const;
 
     const { probeCapabilities } = await import("../providers/capabilities/index.js");
@@ -987,6 +990,7 @@ describe("probeCapabilities (aggregator)", () => {
     expect(caps["kimi-code"]).toMatchObject({ state: "error", error: "kimi probe failed" });
     expect(caps.opencode).toMatchObject({ state: "error", error: "opencode probe failed" });
     expect(caps.pi).toMatchObject({ state: "error", error: "pi probe failed" });
+    expect(caps.zcode).toMatchObject({ state: "error", error: "zcode probe failed" });
     // Disabled providers are never probed, so no entry (not even an error one).
     expect(caps["claude-code-tui"]).toBeUndefined();
     expect(caps.antigravity).toMatchObject({ state: "error", error: "antigravity probe failed" });
@@ -1035,6 +1039,7 @@ describe("probeCapabilities (aggregator)", () => {
       "kimi-code",
       "opencode",
       "pi",
+      "zcode",
     ]);
   });
 
@@ -1052,6 +1057,7 @@ describe("probeCapabilities (aggregator)", () => {
       "kimi-code": ok,
       opencode: ok,
       pi: ok,
+      zcode: ok,
     } as const;
 
     const { probeCapabilities } = await import("../providers/capabilities/index.js");
