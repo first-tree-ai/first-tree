@@ -899,7 +899,10 @@ describe("Terminate with apply-ack (?waitForApply=true) — the Web Reset path",
     clientId: string,
     overrides: Record<string, unknown> = {},
   ): Promise<void> {
-    await vi.waitFor(() => expect(ws.send).toHaveBeenCalled());
+    // Poll tightly: the caller's reply budget is the subject of the test, so
+    // the wait for the frame must not spend a quarter of it on a scheduler
+    // sleep before the ack is even sent.
+    await vi.waitFor(() => expect(ws.send).toHaveBeenCalled(), { interval: 5 });
     const frame = JSON.parse(ws.send.mock.calls[0]?.[0] as string) as { ref: string; agentId: string; chatId: string };
     const resolved = resolveClientReply(clientId, frame.ref, {
       command: "session:terminate",
@@ -1368,7 +1371,11 @@ describe("Terminate with apply-ack (?waitForApply=true) — the Web Reset path",
     // The honest end state: the Reset did not happen and the client may still
     // be fenced. Reporting the plain conflict here would hide the worse half.
     const { app, admin, agent, chat, ws } = await setup("suspended", { finalizeReceipt: "drop" });
-    setClientReplyTimeoutMsForTests(80);
+    // The re-activation write below and the ack both have to land inside the
+    // apply-ack window, and that window is not what this case is about — the
+    // unreceipted abort is. Keep it generous so a loaded runner cannot expire
+    // the waiter between the two.
+    setClientReplyTimeoutMsForTests(1000);
     try {
       const pending = terminateReq(app, admin, agent.uuid, chat.id);
       await vi.waitFor(() => expect(ws.send).toHaveBeenCalled());
