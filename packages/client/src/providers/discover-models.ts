@@ -1,5 +1,10 @@
 import type { ProviderModelCatalog, RuntimeProvider } from "@first-tree/shared";
 import {
+  type AntigravityDiscoverModelsDeps,
+  discoverAntigravityModels,
+  parseAntigravityModelsOutput,
+} from "./antigravity/discover-models.js";
+import {
   type CursorDiscoverModelsDeps,
   discoverCursorModels,
   parseCursorModelsOutput,
@@ -19,10 +24,10 @@ import {
  * those families.
  */
 export type HostDiscoverModelsDeps = CursorDiscoverModelsDeps & KimiDiscoverModelsDeps;
-export type DiscoverModelsDeps = HostDiscoverModelsDeps & GrokDiscoverModelsDeps;
+export type DiscoverModelsDeps = HostDiscoverModelsDeps & GrokDiscoverModelsDeps & AntigravityDiscoverModelsDeps;
 
-export type { CursorDiscoverModelsDeps, GrokDiscoverModelsDeps, KimiDiscoverModelsDeps };
-export { parseCursorModelsOutput, parseKimiConfigModels, resolveKimiConfigPath };
+export type { AntigravityDiscoverModelsDeps, CursorDiscoverModelsDeps, GrokDiscoverModelsDeps, KimiDiscoverModelsDeps };
+export { parseAntigravityModelsOutput, parseCursorModelsOutput, parseKimiConfigModels, resolveKimiConfigPath };
 
 function fetchedAt(deps: { now?: () => Date }): string {
   return (deps.now ?? (() => new Date()))().toISOString();
@@ -45,8 +50,9 @@ export function unavailableCatalog(
 
 /**
  * Discover the model catalog for a runtime provider from the host-local
- * provider. Phase 1 implements Cursor + Kimi + Grok; other providers return
- * `source: "unavailable"` so the web can keep its curated/fallback UI.
+ * provider. Phase 1 implements Cursor + Kimi + Grok + Antigravity; other
+ * providers return `source: "unavailable"` so the web can keep its
+ * curated/fallback UI.
  */
 export async function discoverProviderModels(
   provider: RuntimeProvider,
@@ -58,11 +64,7 @@ export async function discoverProviderModels(
     case "grok":
       return discoverGrokModels(deps);
     case "antigravity":
-      return unavailableCatalog(
-        provider,
-        "Antigravity model discovery is not enabled in V1; enter the provider-native model slug",
-        deps,
-      );
+      return discoverAntigravityModels(deps);
     case "kimi-code":
       return discoverKimiModels(deps);
     case "amp":
