@@ -381,12 +381,113 @@ describe("classifyProviderFailure", () => {
     });
     expect(protocol).toMatchObject({ category: "configuration", reasonCode: "antigravity_protocol_error" });
 
+    const noop = classifyProviderFailure(
+      new Error("No-op webhook event on PR #3910:\n\nEvent: issue_comment created by github-bot."),
+      { provider: "antigravity", scope: "provider_turn", source: "stream" },
+    );
+    expect(noop.category).toBe("unknown");
+
+    const quota = classifyProviderFailure(
+      new Error(
+        [
+          "unsupported or malformed Antigravity stream (9 lines)",
+          "Antigravity returned an ERROR result",
+          "error: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 2h42m27s.",
+        ].join("\n"),
+      ),
+      { provider: "antigravity", scope: "provider_turn", source: "stream" },
+    );
+    expect(quota).toMatchObject({
+      category: "provider_capacity",
+      reasonCode: "provider_usage_limit",
+      retryAfterMs: ((2 * 3600 + 42 * 60 + 27) * 1000) | 0,
+    });
+    expect(
+      decideProviderRetry({
+        classification: quota,
+        scope: "provider_turn",
+        attempt: 1,
+        replaySafety: "user_visible",
+      }),
+    ).toMatchObject({
+      action: "stop",
+      reasonCode: "capacity_wait_required",
+      terminalKind: "capacity_wait_required",
+    });
+
     const platform = classifyProviderFailure(new Error("Antigravity is not supported on Windows in v1"), {
       provider: "antigravity",
       scope: "session_start",
       source: "session",
     });
     expect(platform).toMatchObject({ category: "capability", reasonCode: "antigravity_platform_unsupported" });
+
+    const review = classifyProviderFailure(
+      new Error(
+        [
+          "Reviewed successor head 03e8f42a4721630f3c15dd28f6754a342460ec27 on PR #3881 across two full sweeps: clean verdict with zero real findings.",
+          "",
+          "Previous Finding Resolved: Listing bed feature promotion now strictly keeps the sign in CTA.",
+        ].join("\n"),
+      ),
+      { provider: "antigravity", scope: "provider_turn", source: "stream" },
+    );
+    expect(review.category).toBe("unknown");
+
+    const rejected401 = classifyProviderFailure(
+      Object.assign(new Error("Request rejected by upstream"), { status: 401 }),
+      { provider: "antigravity", scope: "provider_turn", source: "sdk" },
+    );
+    expect(rejected401.category).toBe("credential");
+    const rejected403 = classifyProviderFailure(
+      Object.assign(new Error("Request rejected by upstream"), { status: 403 }),
+      { provider: "antigravity", scope: "provider_turn", source: "sdk" },
+    );
+    expect(rejected403.category).toBe("credential");
+
+    const prematureZeroResults = classifyProviderFailure(
+      new Error("expected one terminal result event, observed 0\nexit 1"),
+      { provider: "antigravity", scope: "provider_turn", source: "stream" },
+    );
+    expect(prematureZeroResults.category).toBe("unknown");
+    expect(prematureZeroResults.reasonCode).not.toBe("antigravity_protocol_error");
+
+    const zeroEventsWithStderrCrash = classifyProviderFailure(
+      new Error(
+        ["expected one terminal result event, observed 0", "sqlite3: database or disk is full", "exit 1"].join("\n"),
+      ),
+      { provider: "antigravity", scope: "provider_turn", source: "stream" },
+    );
+    expect(zeroEventsWithStderrCrash.category).toBe("unknown");
+    expect(zeroEventsWithStderrCrash.reasonCode).not.toBe("antigravity_protocol_error");
+
+    const duplicateResults = classifyProviderFailure(new Error("expected one terminal result event, observed 2"), {
+      provider: "antigravity",
+      scope: "provider_turn",
+      source: "stream",
+    });
+    expect(duplicateResults).toMatchObject({ category: "configuration", reasonCode: "antigravity_protocol_error" });
+
+    const zeroConversationIdsAndResults = classifyProviderFailure(
+      new Error(
+        ["expected one conversation ID, observed 0", "expected one terminal result event, observed 0", "exit 1"].join(
+          "\n",
+        ),
+      ),
+      { provider: "antigravity", scope: "provider_turn", source: "stream" },
+    );
+    expect(zeroConversationIdsAndResults.category).toBe("unknown");
+    expect(zeroConversationIdsAndResults.reasonCode).not.toBe("antigravity_protocol_error");
+
+    const duplicateConversationIds = classifyProviderFailure(new Error("expected one conversation ID, observed 2"), {
+      provider: "antigravity",
+      scope: "provider_turn",
+      source: "stream",
+    });
+    expect(duplicateConversationIds).toMatchObject({
+      category: "configuration",
+      reasonCode: "antigravity_protocol_error",
+    });
   });
 
   it("classifies Pi credential phrasings as needs_operator and does not unknown-retry them", () => {

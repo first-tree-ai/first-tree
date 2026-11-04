@@ -99,23 +99,27 @@ export function isGrokAuthError(message: string): boolean {
   return GROK_AUTH_KEYWORDS.some((kw) => lower.includes(kw));
 }
 
-const ANTIGRAVITY_AUTH_KEYWORDS: readonly string[] = [
-  "authentication required",
-  "not authenticated",
-  "unauthorized",
-  "sign in",
-  "login required",
-  "credential",
-  "gemini_api_key",
-  "token missing",
-  "token expired",
-  "invalid token",
+const ANTIGRAVITY_AUTH_DIAGNOSTICS: readonly RegExp[] = [
+  /authentication required/,
+  /not authenticated/,
+  /login required/,
+  /\bunauthorized\b/,
+  /gemini_api_key/,
+  /token missing/,
+  /token expired/,
+  /invalid token/,
+  /credential is missing/,
+  /api credential/,
+  /invalid credential/,
+  /run agy(?: once)? to sign in/,
+  /please sign in/,
+  /sign in again/,
 ];
 
 export function isAntigravityAuthError(message: string): boolean {
   if (message.length === 0) return false;
   const lower = message.toLowerCase();
-  return ANTIGRAVITY_AUTH_KEYWORDS.some((keyword) => lower.includes(keyword));
+  return ANTIGRAVITY_AUTH_DIAGNOSTICS.some((pattern) => pattern.test(lower));
 }
 
 export function isKimiCodeAuthError(codeOrMessage: string): boolean {

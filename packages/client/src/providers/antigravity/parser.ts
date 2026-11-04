@@ -1,8 +1,9 @@
 /**
  * Tolerant parser for the documented Antigravity CLI `stream-json` protocol.
- * Protocol-required identity and terminal-result checks are intentionally left
- * to the handler so a CLI update fails closed instead of being mistaken for a
- * successful turn.
+ * Non-JSON stdout is noise (agy may leak TUI/progress lines). Unknown JSON
+ * event types stay diagnostics. Protocol-required identity and terminal-result
+ * checks are intentionally left to the handler so a CLI update fails closed
+ * instead of being mistaken for a successful turn.
  */
 
 export type AntigravityUsage = {
@@ -31,7 +32,8 @@ export type AntigravityStreamEvent =
       usage: AntigravityUsage | null;
     }
   | { kind: "error"; message: string }
-  | { kind: "unknown"; note: string; raw: string };
+  | { kind: "unknown"; note: string; raw: string }
+  | { kind: "noise"; raw: string };
 
 const PREVIEW_LIMIT = 400;
 
@@ -89,7 +91,9 @@ export function parseAntigravityStreamLine(line: string): AntigravityStreamEvent
   try {
     value = JSON.parse(raw);
   } catch {
-    return [unknown("unparsable stream line", raw)];
+    // agy can mix terminal/TUI progress onto stdout alongside stream-json.
+    // Keep those lines as noise so a valid init+result is not poisoned.
+    return [{ kind: "noise", raw: raw.slice(0, PREVIEW_LIMIT) }];
   }
   const row = record(value);
   if (!row) return [unknown("non-object stream line", raw)];
@@ -97,6 +101,12 @@ export function parseAntigravityStreamLine(line: string): AntigravityStreamEvent
   const eventName = string(row.event);
   if (eventName === "init") {
     return [{ kind: "init", sessionId: string(row.conversation_id) }];
+  }
+
+  if (eventName === "error") {
+    const message =
+      string(row.message) ?? string(row.error) ?? string(record(row.error)?.message) ?? "Antigravity stream error";
+    return [{ kind: "error", message }];
   }
 
   if (eventName === "step_update") {
@@ -109,8 +119,13 @@ export function parseAntigravityStreamLine(line: string): AntigravityStreamEvent
     if (stepUsage) events.push({ kind: "usage", usage: stepUsage });
 
     const stepType = string(step.step_type);
-    if (stepType === "agent_response") {
-      const text = typeof step.text_delta === "string" ? step.text_delta : "";
+    if (stepType === "agent_response" || stepType === "error_message") {
+      const text =
+        (typeof step.text_delta === "string" && step.text_delta) ||
+        string(step.text) ||
+        string(step.message) ||
+        string(step.error) ||
+        "";
       if (text) events.push({ kind: "assistant_delta", text });
       return events;
     }
@@ -137,7 +152,7 @@ export function parseAntigravityStreamLine(line: string): AntigravityStreamEvent
       });
       return events;
     }
-    if (stepType === "user_input" || stepType === "checkpoint") return events;
+    if (stepType === "user_input" || stepType === "checkpoint" || stepType === "system_message") return events;
     return [...events, unknown(`unknown step type ${String(step.step_type)}`, raw)];
   }
 
@@ -145,9 +160,13 @@ export function parseAntigravityStreamLine(line: string): AntigravityStreamEvent
     const result = record(row.result);
     if (!result) return [unknown("result event missing result payload", raw)];
     const status = string(result.status);
-    const isError = status !== "SUCCESS";
     const text = string(result.response) ?? "";
-    const error = string(result.error);
+    const diagnostic = string(result.error) ?? string(record(result.error)?.message);
+    // agy often ends a finished turn with status ERROR while putting the
+    // agent's report in `response`. That is turn output, not a provider
+    // diagnostic. Only an explicit error payload (or an empty ERROR) is a
+    // failure.
+    const isError = status !== "SUCCESS" && (Boolean(diagnostic) || !text);
     const events: AntigravityStreamEvent[] = [
       {
         kind: "result",
@@ -157,7 +176,12 @@ export function parseAntigravityStreamLine(line: string): AntigravityStreamEvent
         usage: usage(result.usage),
       },
     ];
-    if (isError) events.push({ kind: "error", message: error ?? `Antigravity returned status ${status ?? "unknown"}` });
+    if (isError) {
+      events.push({
+        kind: "error",
+        message: diagnostic ?? string(result.message) ?? `Antigravity returned status ${status ?? "unknown"}`,
+      });
+    }
     return events;
   }
 
