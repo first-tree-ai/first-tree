@@ -48,6 +48,37 @@ async function flushUntil(predicate: () => boolean, attempts = 20): Promise<void
   }
 }
 
+/**
+ * Open the model menu and return its current options. While the catalog query is
+ * pending the menu opens on the pre-catalog list (DEFAULT + Custom) and only
+ * re-renders with the catalog once the query lands, so a caller that reads the
+ * options once, straight after the click, can read the pre-catalog list (issue 2165).
+ */
+async function openModelMenu(container: HTMLElement): Promise<HTMLButtonElement[]> {
+  await act(async () => {
+    container.querySelector('button[aria-label="Model"]')?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  await flushUntil(() => document.body.querySelectorAll('[role="option"]').length > 0, 60);
+  return Array.from(document.body.querySelectorAll<HTMLButtonElement>('[role="option"]'));
+}
+
+/** Open the menu and click the option whose text contains `label`. */
+async function pickModelOption(container: HTMLElement, label: string): Promise<void> {
+  const find = () =>
+    Array.from(document.body.querySelectorAll<HTMLButtonElement>('[role="option"]')).find((b) =>
+      b.textContent?.includes(label),
+    );
+
+  await openModelMenu(container);
+  await flushUntil(() => find() !== undefined, 60);
+
+  const option = find();
+  expect(option, `model option "${label}"`).toBeDefined();
+  await act(async () => {
+    option?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+}
+
 function renderWithQuery(element: React.ReactElement): Promise<HTMLElement> {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(<QueryClientProvider client={queryClient}>{element}</QueryClientProvider>);
@@ -181,15 +212,7 @@ describe("ModelSection — daemon catalog", () => {
       const b = el.querySelector<HTMLButtonElement>('button[aria-label="Model"]');
       return !!b && !b.disabled;
     });
-    await act(async () => {
-      el.querySelector('button[aria-label="Model"]')?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-    const option = Array.from(document.body.querySelectorAll<HTMLButtonElement>('[role="option"]')).find((b) =>
-      b.textContent?.includes("Composer"),
-    );
-    await act(async () => {
-      option?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
+    await pickModelOption(el, "Composer");
     expect(saved).toEqual(["composer-1"]);
   });
 
@@ -204,15 +227,7 @@ describe("ModelSection — daemon catalog", () => {
       const b = el.querySelector<HTMLButtonElement>('button[aria-label="Model"]');
       return !!b && !b.disabled;
     });
-    await act(async () => {
-      el.querySelector('button[aria-label="Model"]')?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-    const custom = Array.from(document.body.querySelectorAll<HTMLButtonElement>('[role="option"]')).find((b) =>
-      b.textContent?.includes("Custom model id…"),
-    );
-    await act(async () => {
-      custom?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
+    await pickModelOption(el, "Custom model id…");
     // Switching to custom entry is a mode switch, not a save.
     expect(saved).toEqual([]);
 
@@ -363,15 +378,7 @@ describe("ModelSection — daemon catalog", () => {
       const b = el.querySelector<HTMLButtonElement>('button[aria-label="Model"]');
       return !!b && !b.disabled;
     });
-    await act(async () => {
-      el.querySelector('button[aria-label="Model"]')?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-    const unset = Array.from(document.body.querySelectorAll<HTMLButtonElement>('[role="option"]')).find((b) =>
-      b.textContent?.includes("(unset — inherits local)"),
-    );
-    await act(async () => {
-      unset?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
+    await pickModelOption(el, "(unset — inherits local)");
     // Empty string = no override → the host provider's local default applies.
     expect(saved).toEqual([""]);
   });
@@ -409,12 +416,52 @@ describe("ModelSection — daemon catalog", () => {
       const b = el.querySelector<HTMLButtonElement>('button[aria-label="Model"]');
       return !!b && !b.disabled;
     });
-    await act(async () => {
-      el.querySelector('button[aria-label="Model"]')?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-    const option = Array.from(document.body.querySelectorAll<HTMLButtonElement>('[role="option"]')).find((b) =>
-      b.textContent?.includes("Grok Code Fast"),
+    await pickModelOption(el, "Grok Code Fast");
+    expect(saved).toEqual(["grok-code-fast-1"]);
+  });
+
+  it("saves a grok catalog pick when the catalog lands after the menu opened", async () => {
+    // While the query is pending the menu opens on the pre-catalog list (DEFAULT and
+    // Custom, not disabled) and only re-renders with the catalog once it resolves. A
+    // pick that reads the options once, in that window, clicks nothing and saves
+    // nothing (issue 2165). The catalog promise lands when this test resolves it, so
+    // the ordering is the assertion rather than how long a render happened to take.
+    let landCatalog: ((catalog: ProviderModelCatalog) => void) | undefined;
+    providerModelsMocks.getProviderModels.mockImplementation(
+      () =>
+        new Promise<ProviderModelCatalog>((resolve) => {
+          landCatalog = resolve;
+        }),
     );
+    const saved: string[] = [];
+    const el = await renderWithQuery(
+      <ModelSection value="" onChange={(v) => saved.push(v)} provider="grok" clientId="c1" />,
+    );
+
+    await flushUntil(() => {
+      const b = el.querySelector<HTMLButtonElement>('button[aria-label="Model"]');
+      return !!b && !b.disabled;
+    });
+
+    const pending = await openModelMenu(el);
+    // The menu is open and it is the pre-catalog picker: the option this test saves
+    // is genuinely absent while the query is in flight, not merely unrendered yet.
+    expect(pending.length).toBeGreaterThan(0);
+    expect(pending.some((option) => option.textContent?.includes("Grok Code Fast"))).toBe(false);
+
+    expect(landCatalog).toBeDefined();
+    await act(async () => {
+      landCatalog?.(GROK_CATALOG);
+    });
+
+    const catalogOption = () =>
+      Array.from(document.body.querySelectorAll<HTMLButtonElement>('[role="option"]')).find((option) =>
+        option.textContent?.includes("Grok Code Fast"),
+      );
+    await flushUntil(() => catalogOption() !== undefined, 60);
+
+    const option = catalogOption();
+    expect(option, 'model option "Grok Code Fast"').toBeDefined();
     await act(async () => {
       option?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
@@ -434,16 +481,12 @@ describe("ModelSection — Cursor Auto optimization modes", () => {
       const b = el.querySelector<HTMLButtonElement>('button[aria-label="Model"]');
       return !!b && !b.disabled;
     });
-    await act(async () => {
-      el.querySelector('button[aria-label="Model"]')?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
+    const options = await openModelMenu(el);
     const body = document.body.textContent ?? "";
     expect(body).toContain("Auto · Intelligence");
     expect(body).toContain("Auto · Balance");
     expect(body).toContain("Auto · Cost");
-    const option = Array.from(document.body.querySelectorAll<HTMLButtonElement>('[role="option"]')).find((b) =>
-      b.textContent?.includes("Auto · Balance"),
-    );
+    const option = options.find((b) => b.textContent?.includes("Auto · Balance"));
     expect(option).toBeDefined();
     await act(async () => {
       option?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
