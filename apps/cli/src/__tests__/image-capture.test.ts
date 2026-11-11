@@ -2,9 +2,9 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FirstTreeHubSDK } from "@first-tree/client";
-import { type ImageRefContent, imageBatchRefContentSchema, isImageBatchRefContent } from "@first-tree/shared";
+import type { ImageRefContent } from "@first-tree/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { captureOutboundImages, toGenericImageAttachmentRefs, toOutboundImageMessage } from "../core/image-capture.js";
+import { captureOutboundImages, toGenericImageAttachmentRefs } from "../core/image-capture.js";
 
 /**
  * `chat send` image capture: the picture sibling of doc capture. Driven by the
@@ -101,53 +101,15 @@ describe("captureOutboundImages (chat send image capture)", () => {
     expect(out.imageRefs[0]).toMatchObject({ filename: "shot.png", size: PNG.byteLength });
     expect(out.caption).toBe("看图：");
   });
-
-  it("produces a batch that validates against the shared image-batch schema (the shape send.ts builds)", async () => {
-    const { sdk } = stubSdk();
-    const out = await captureOutboundImages("![s](shot.png)", { sdk, chatId: CHAT_ID }, { FIRST_TREE_DOC_BASE: base });
-    // Mirror send.ts: caption omitted when empty, attachments = the refs.
-    const content = {
-      ...(out.caption.trim() ? { caption: out.caption } : {}),
-      attachments: out.imageRefs,
-    };
-    expect(isImageBatchRefContent(content)).toBe(true);
-    expect(() => imageBatchRefContentSchema.parse(content)).not.toThrow();
-  });
 });
 
-describe("toOutboundImageMessage (format/content conversion)", () => {
+describe("toGenericImageAttachmentRefs (metadata attachments)", () => {
   const ref: ImageRefContent = {
     imageId: "00000000-0000-4000-8000-000000000001",
     mimeType: "image/png",
     filename: "shot.png",
     size: 8,
   };
-
-  it("leaves a text/markdown body unchanged when no image captured", () => {
-    const out = toOutboundImageMessage("markdown", "hello **world**", { caption: "hello **world**", imageRefs: [] });
-    expect(out).toEqual({ format: "markdown", content: "hello **world**" });
-  });
-
-  it("does NOT convert a card body even if images were (somehow) captured", () => {
-    const out = toOutboundImageMessage("card", "card-body", { caption: "cap", imageRefs: [ref] });
-    expect(out).toEqual({ format: "card", content: "card-body" });
-  });
-
-  it("converts a captioned image send into a valid file batch", () => {
-    const out = toOutboundImageMessage("markdown", "看图", { caption: "看图", imageRefs: [ref] });
-    expect(out.format).toBe("file");
-    expect(isImageBatchRefContent(out.content)).toBe(true);
-    expect(out.content).toMatchObject({ caption: "看图", attachments: [ref] });
-  });
-
-  it("does not put a captured image batch into request content", () => {
-    const out = toOutboundImageMessage("request", "Choose the rollout?", {
-      caption: "Choose the rollout?",
-      imageRefs: [ref],
-    });
-    expect(out.format).toBe("request");
-    expect(out.content).toBe("Choose the rollout?");
-  });
 
   it("adapts captured image refs into generic metadata attachments", () => {
     expect(toGenericImageAttachmentRefs([ref])).toEqual([
@@ -160,19 +122,5 @@ describe("toOutboundImageMessage (format/content conversion)", () => {
       },
     ]);
     expect(toGenericImageAttachmentRefs([{ ...ref, size: undefined }])).toEqual([]);
-  });
-
-  it("omits the caption key for an image-only send (empty caption)", () => {
-    const out = toOutboundImageMessage("text", "", { caption: "   ", imageRefs: [ref] });
-    expect(out.format).toBe("file");
-    expect(out.content).not.toHaveProperty("caption");
-    expect(isImageBatchRefContent(out.content)).toBe(true);
-  });
-
-  it("preserves an inlined doc link in the caption for a mixed doc+image send", () => {
-    const caption = "see [design](attachment:abc)";
-    const out = toOutboundImageMessage("markdown", caption, { caption, imageRefs: [ref] });
-    expect(out.format).toBe("file");
-    expect((out.content as { caption?: string }).caption).toContain("attachment:abc");
   });
 });

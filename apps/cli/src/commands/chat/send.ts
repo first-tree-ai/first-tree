@@ -1,11 +1,17 @@
-import { CLI_BODY_ORIGIN_METADATA_KEY, CLI_BODY_ORIGINS, type MessageFormat } from "@first-tree/shared";
+import {
+  CLI_BODY_ORIGIN_METADATA_KEY,
+  CLI_BODY_ORIGINS,
+  MAX_MESSAGE_ATTACHMENT_REFS,
+  type MessageFormat,
+} from "@first-tree/shared";
 import type { Command } from "commander";
 import { fail, success } from "../../cli/output.js";
 import { channelConfig } from "../../core/channel.js";
 import { captureOutboundDocs } from "../../core/doc-capture.js";
-import { captureOutboundImages, toOutboundImageMessage } from "../../core/image-capture.js";
+import { captureOutboundImages, toGenericImageAttachmentRefs } from "../../core/image-capture.js";
 import { print } from "../../core/output.js";
 import { createSdk, handleSdkError } from "../_shared/local-agent.js";
+import { readOutboundAttachmentRefs } from "./_shared/attachments.js";
 import { guardInlineShellResidue, looksLikeEscapedNewlineBody, readMessageBody, readStdin } from "./_shared/io.js";
 
 interface SendOptions {
@@ -33,7 +39,11 @@ export function registerChatSendCommand(chat: Command): void {
         "for any rich or multi-line body so the shell cannot mangle backticks, quotes, or newlines.",
     )
     .option("-f, --format <format>", "Message format (text|markdown|card)", "text")
-    .option("-m, --metadata <json>", "JSON metadata to attach")
+    .option(
+      "-m, --metadata <json>",
+      "JSON metadata to attach. metadata.attachments shares one per-message limit of " +
+        `${MAX_MESSAGE_ATTACHMENT_REFS} references with the documents and images chat send captures.`,
+    )
     .option("--agent <name>", "Agent name on the First Tree server (default: first configured on this client)")
     .option(
       "--reply-to <messageId>",
@@ -156,23 +166,34 @@ export function registerChatSendCommand(chat: Command): void {
         // runtime's result-sink does for final-text — uploading to the org
         // attachment store and attaching generic refs. Pure pass-through
         // outside an agent session.
-        const captured = await captureOutboundDocs(content ?? "", { sdk, chatId });
+        // Caller refs first: the per-message roster is capped, and `chat ask`
+        // spends that budget in this order — caller refs, documents, then images.
+        const existingAttachments = readOutboundAttachmentRefs(metadata);
+        const captured = await captureOutboundDocs(content ?? "", {
+          sdk,
+          chatId,
+          maxAttachments: Math.max(0, MAX_MESSAGE_ATTACHMENT_REFS - existingAttachments.length),
+        });
 
-        // Capture workspace images the (doc-rewritten) body references and, when
-        // any resolve, convert this into a human-identical image send: a
-        // `format: "file"` batch whose caption is the image-stripped body and
-        // whose attachments are the uploaded refs. Only text/markdown bodies are
-        // eligible — a `card` body is not an image batch. Pure pass-through
-        // otherwise.
+        // Capture workspace images the (doc-rewritten) body references and put
+        // them on the same `metadata.attachments` roster `chat ask` uses: the
+        // message keeps its text/markdown body, with the image markdown stripped
+        // from it. A `format: "file"` image batch used to be written instead, and
+        // the post-convergence server never folded it into the roster, so the
+        // image was dropped silently (issue 2372). Only text/markdown bodies are
+        // eligible; a `card` body passes through untouched.
+        const documentAttachments = captured.attachments ?? [];
         const imageEligible = options.format === "text" || options.format === "markdown";
-        const capturedImages = imageEligible
-          ? await captureOutboundImages(captured.content, { sdk, chatId })
-          : { caption: captured.content, imageRefs: [] };
-        const { format: outboundFormat, content: outboundContent } = toOutboundImageMessage(
-          options.format,
-          captured.content,
-          capturedImages,
+        const imageCapacity = Math.max(
+          0,
+          MAX_MESSAGE_ATTACHMENT_REFS - existingAttachments.length - documentAttachments.length,
         );
+        const capturedImages = imageEligible
+          ? await captureOutboundImages(captured.content, { sdk, chatId, maxAttachments: imageCapacity })
+          : { caption: captured.content, imageRefs: [] };
+        const imageAttachments = toGenericImageAttachmentRefs(capturedImages.imageRefs);
+        const outboundAttachments = [...existingAttachments, ...documentAttachments, ...imageAttachments];
+        const outboundContent = imageAttachments.length > 0 ? capturedImages.caption : captured.content;
 
         const cliBodyOrigin =
           options.messageFile !== undefined
@@ -185,16 +206,16 @@ export function registerChatSendCommand(chat: Command): void {
             ? { ...(metadata ?? {}), [CLI_BODY_ORIGIN_METADATA_KEY]: cliBodyOrigin }
             : metadata;
         const outboundMetadata =
-          captured.attachments || captured.documentContext
+          outboundAttachments.length > 0 || captured.documentContext
             ? {
                 ...(metadataWithBodyOrigin ?? {}),
-                ...(captured.attachments ? { attachments: captured.attachments } : {}),
+                ...(outboundAttachments.length > 0 ? { attachments: outboundAttachments } : {}),
                 ...(captured.documentContext ? { documentContext: captured.documentContext } : {}),
               }
             : metadataWithBodyOrigin;
 
         const result = await sdk.sendMessage(chatId, {
-          format: outboundFormat,
+          format: options.format,
           content: outboundContent,
           metadata: outboundMetadata,
           source: "cli",

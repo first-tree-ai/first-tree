@@ -1,6 +1,4 @@
 import {
-  type AttachmentRef,
-  attachmentRefSchema,
   CLI_BODY_ORIGIN_METADATA_KEY,
   CLI_BODY_ORIGINS,
   MAX_MESSAGE_ATTACHMENT_REFS,
@@ -13,6 +11,7 @@ import { captureOutboundDocs } from "../../core/doc-capture.js";
 import { captureOutboundImages, toGenericImageAttachmentRefs } from "../../core/image-capture.js";
 import { print } from "../../core/output.js";
 import { createSdk, handleSdkError } from "../_shared/local-agent.js";
+import { readOutboundAttachmentRefs } from "./_shared/attachments.js";
 import { guardInlineShellResidue, looksLikeEscapedNewlineBody, readMessageBody, readStdin } from "./_shared/io.js";
 import { buildRequestMetadata } from "./_shared/request.js";
 
@@ -23,33 +22,6 @@ interface AskOptions {
   options?: string;
   multiSelect?: boolean;
   messageFile?: string;
-}
-
-/**
- * Write-side reader for caller-supplied attachment metadata. Render paths are
- * intentionally tolerant of malformed history, but a new send must fail
- * closed instead of silently dropping bad entries while merging captures.
- */
-function readOutboundAttachmentRefs(metadata: Record<string, unknown> | undefined): AttachmentRef[] {
-  const raw = metadata?.attachments;
-  if (raw === undefined || raw === null) return [];
-  if (!Array.isArray(raw)) {
-    fail("INVALID_METADATA", "metadata.attachments must be an array of attachment references.", 2);
-  }
-  if (raw.length > MAX_MESSAGE_ATTACHMENT_REFS) {
-    fail(
-      "INVALID_METADATA",
-      `metadata.attachments exceeds the per-message limit of ${MAX_MESSAGE_ATTACHMENT_REFS}.`,
-      2,
-    );
-  }
-  return raw.map((entry, index) => {
-    const parsed = attachmentRefSchema.safeParse(entry);
-    if (!parsed.success) {
-      fail("INVALID_METADATA", `metadata.attachments[${index}] is not a valid attachment reference.`, 2);
-    }
-    return parsed.data;
-  });
 }
 
 export function registerChatAskCommand(chat: Command): void {
@@ -72,7 +44,11 @@ export function registerChatAskCommand(chat: Command): void {
         "for any rich or multi-line body so the shell cannot mangle backticks, quotes, or newlines.",
     )
     .option("-f, --format <format>", "Message format (text|markdown|card)", "text")
-    .option("-m, --metadata <json>", "JSON metadata to attach")
+    .option(
+      "-m, --metadata <json>",
+      "JSON metadata to attach. metadata.attachments shares one per-message limit of " +
+        `${MAX_MESSAGE_ATTACHMENT_REFS} references with the documents and images chat ask captures.`,
+    )
     .option("--agent <name>", "Agent name on the First Tree server (default: first configured on this client)")
     .option(
       "-F, --message-file <path>",
