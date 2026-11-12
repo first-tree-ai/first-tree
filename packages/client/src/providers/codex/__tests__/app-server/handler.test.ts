@@ -937,6 +937,54 @@ describe("codex app-server handler", () => {
     await handler.shutdown();
   });
 
+  it("drops an item that lands while the turn's delivery ACK is in flight", async () => {
+    const fake = new FakeAppServerClient();
+    const token = makeDeliveryToken();
+    const emitEvent = vi.fn<(event: SessionEvent) => void>();
+    const handler = makeHandler(fake);
+    const ctx = makeContext({ emitEvent });
+    let releaseComplete: () => void = () => {
+      throw new Error("delivery ACK was never requested");
+    };
+    token.complete = vi.fn<DeliveryToken["complete"]>().mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseComplete = resolve;
+        }),
+    );
+
+    const startPromise = handler.start(makeMessage("m1", "first"), ctx, token);
+    await waitFor(() => fake.requests.some((request) => request.method === "turn/start"));
+
+    fake.emit("item/completed", {
+      threadId: "thread-app-server",
+      turnId: "turn-1",
+      item: { type: "agentMessage", id: "item-answer", text: "answer", phase: null, memoryCitation: null },
+    });
+    fake.emit("turn/completed", {
+      threadId: "thread-app-server",
+      turn: { id: "turn-1", status: "completed", items: [], error: null },
+    });
+    await waitFor(() => vi.mocked(token.complete).mock.calls.length === 1);
+
+    fake.emit("item/completed", {
+      threadId: "thread-app-server",
+      turnId: "turn-1",
+      item: { type: "agentMessage", id: "item-late", text: "late", phase: null, memoryCitation: null },
+    });
+    await flushAsync();
+
+    const assistantTexts = emitEvent.mock.calls
+      .map(([event]) => event)
+      .filter((event) => event.kind === "assistant_text")
+      .map((event) => (event.payload as { text: string }).text);
+    expect(assistantTexts).toEqual(["answer"]);
+
+    releaseComplete();
+    await startPromise;
+    await handler.shutdown();
+  });
+
   it("emits one token usage event from the cumulative total delta across app-server updates", async () => {
     const fake = new FakeAppServerClient();
     const emitEvent = vi.fn<(event: SessionEvent) => void>();

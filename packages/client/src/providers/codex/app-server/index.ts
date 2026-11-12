@@ -1527,6 +1527,10 @@ export const createCodexAppServerHandler: HandlerFactory = (config: HandlerConfi
 
     if (providerRetrySettlement) return providerRetrySettlement;
 
+    // Nothing but the terminal event and ACK remain; an item from here would
+    // emit a session event after turn_end with nothing left to close it (#2381).
+    currentTurn = null;
+
     if (terminalRejectionReason) {
       sessionCtx.emitEvent({ kind: "turn_end", payload: { status: "error" } });
       await turn.primaryToken.terminalRejected(turn.acceptedMessages, terminalRejectionReason, {
