@@ -103,6 +103,8 @@ together.
   provider hook completes within its outer budget with a controlled unavailable
   result, normal coding remains usable, and no Context is injected.
 
+## Evidence
+
 Record provider version, Plugin adapter version/digest and Core release digest, resolved project kind/reason, exact
 Team identifier, hook transcript, operation output, endpoint fault used, attempt
 count, and latency. Redact credentials and private Context content.
