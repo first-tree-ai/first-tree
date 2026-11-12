@@ -117,7 +117,7 @@ export async function orgSettingsRoutes(app: FastifyInstance): Promise<void> {
       throw new GoneError("source_repos is read-only; use Team Resources instead");
     }
     await orgSettingsService.deleteOrgSetting(app.db, scope.organizationId, namespace);
-    reply.status(204).send();
+    return reply.status(204).send();
   });
 }
 
