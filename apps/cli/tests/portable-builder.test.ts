@@ -833,6 +833,120 @@ if (args[0] === "--version") {
     expect(shim).toContain("FIRST_TREE_PORTABLE_BIN_DIR");
   });
 
+  it("skips the payload download when the installed version is already current", async () => {
+    const platform = currentPlatform();
+    if (platform === null) return;
+    const fixture = await makeFixture(platform);
+    const home = tempDir("first-tree-home-");
+    const prefix = join(home, "prefix");
+    const binDir = join(home, "bin");
+    const env = {
+      ...process.env,
+      HOME: home,
+      FIRST_TREE_PORTABLE_CHANNEL: "prod",
+      FIRST_TREE_PORTABLE_DOWNLOAD_BASE_URL: `file://${fixture}`,
+    };
+    const installArgs = [
+      join(REPO_ROOT, "scripts", "portable", "install.sh"),
+      "--prefix",
+      prefix,
+      "--bin-dir",
+      binDir,
+      "--no-path-edit",
+    ];
+
+    const first = spawnSync("sh", installArgs, { cwd: REPO_ROOT, env, encoding: "utf8" });
+    expect(first.status, first.stderr || first.stdout).toBe(0);
+
+    // Removing the payload makes any fetch fatal, so the second run can only
+    // exit 0 when it stopped before downloading the artifact.
+    rmSync(join(fixture, "prod", "1.2.3", `first-tree-1.2.3-${platform}.tar.gz`));
+
+    const second = spawnSync("sh", installArgs, { cwd: REPO_ROOT, env, encoding: "utf8" });
+    expect(second.status, second.stderr || second.stdout).toBe(0);
+    expect(second.stdout).toContain("is already installed; skipped the payload download");
+    expect(second.stdout).toContain("nothing to download");
+    expect(readFileSync(join(prefix, "current", "VERSION"), "utf8")).toBe("1.2.3\n");
+  });
+
+  it("repairs an incomplete install instead of treating it as up to date", async () => {
+    const platform = currentPlatform();
+    if (platform === null) return;
+    const fixture = await makeFixture(platform);
+    const home = tempDir("first-tree-home-");
+    const prefix = join(home, "prefix");
+    const binDir = join(home, "bin");
+    const env = {
+      ...process.env,
+      HOME: home,
+      FIRST_TREE_PORTABLE_CHANNEL: "prod",
+      FIRST_TREE_PORTABLE_DOWNLOAD_BASE_URL: `file://${fixture}`,
+    };
+    const installArgs = [
+      join(REPO_ROOT, "scripts", "portable", "install.sh"),
+      "--prefix",
+      prefix,
+      "--bin-dir",
+      binDir,
+      "--no-path-edit",
+    ];
+
+    const first = spawnSync("sh", installArgs, { cwd: REPO_ROOT, env, encoding: "utf8" });
+    expect(first.status, first.stderr || first.stdout).toBe(0);
+
+    // Same version on disk, but the bundled runtime is gone: the link still
+    // names 1.2.3, so a version-only check would skip the install and leave the
+    // prefix unusable.
+    rmSync(join(prefix, "current", "node", "bin", "node"));
+
+    const second = spawnSync("sh", installArgs, { cwd: REPO_ROOT, env, encoding: "utf8" });
+    expect(second.status, second.stderr || second.stdout).toBe(0);
+    expect(second.stdout).not.toContain("is already installed");
+    expect(existsSync(join(prefix, "current", "node", "bin", "node"))).toBe(true);
+  });
+
+  it("warns before replacing a local build with a released version", async () => {
+    const platform = currentPlatform();
+    if (platform === null) return;
+    const fixture = await makeFixture(platform);
+    const home = tempDir("first-tree-home-");
+    const prefix = join(home, "prefix");
+    const binDir = join(home, "bin");
+    const env = {
+      ...process.env,
+      HOME: home,
+      FIRST_TREE_PORTABLE_CHANNEL: "prod",
+      FIRST_TREE_PORTABLE_DOWNLOAD_BASE_URL: `file://${fixture}`,
+    };
+    const installArgs = [
+      join(REPO_ROOT, "scripts", "portable", "install.sh"),
+      "--prefix",
+      prefix,
+      "--bin-dir",
+      binDir,
+      "--no-path-edit",
+    ];
+
+    const localFixture = await makeFixture(platform);
+    await writeFixtureVersion(localFixture, "local.20260101", platform);
+    const local = spawnSync("sh", [...installArgs, "--version", "local.20260101"], {
+      cwd: REPO_ROOT,
+      env: { ...env, FIRST_TREE_PORTABLE_DOWNLOAD_BASE_URL: `file://${localFixture}` },
+      encoding: "utf8",
+    });
+    expect(local.status, local.stderr || local.stdout).toBe(0);
+    expect(readFileSync(join(prefix, "current", "VERSION"), "utf8")).toBe("local.20260101\n");
+
+    const released = spawnSync("sh", [...installArgs, "--version", "1.2.3"], {
+      cwd: REPO_ROOT,
+      env,
+      encoding: "utf8",
+    });
+    expect(released.status, released.stderr || released.stdout).toBe(0);
+    expect(released.stdout).toContain("Replacing local build local.20260101 with released 1.2.3");
+    expect(readFileSync(join(prefix, "current", "VERSION"), "utf8")).toBe("1.2.3\n");
+  });
+
   it("prints shell refresh guidance for the profile it updates", async () => {
     const platform = currentPlatform();
     if (platform === null) return;

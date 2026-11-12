@@ -739,6 +739,65 @@ print_path_guidance() {
   fi
 }
 
+# Version of the complete portable install `$PREFIX/current` points at, or
+# nothing when the prefix is empty, half-written, or dangling. Callers treat an
+# empty result as "not installed yet" and fall through to the normal install
+# path, which is also the repair path.
+installed_portable_version() {
+  current_link="$PREFIX/current"
+  [ -L "$current_link" ] || return 0
+  [ -f "$current_link/VERSION" ] || return 0
+  [ -x "$current_link/node/bin/node" ] || return 0
+  [ -f "$current_link/app/cli/index.mjs" ] || return 0
+  installed="$(tr -d '[:space:]' <"$current_link/VERSION")"
+  [ -n "$installed" ] || return 0
+  printf '%s\n' "$installed"
+}
+
+# A shim only counts as installed when it is one of ours and points at this
+# prefix. Otherwise a re-run with a different --prefix would skip the install
+# and leave `first-tree` resolving to the other prefix.
+shim_installed_for_prefix() {
+  shim="$1"
+  [ -x "$shim" ] || return 1
+  grep -q "FIRST_TREE_PORTABLE_ROOT" "$shim" 2>/dev/null || return 1
+  grep -qF "root=$(shell_single_quote "$PREFIX/current")" "$shim" 2>/dev/null
+}
+
+# Shared tail for both the fresh install and the already-installed fast path:
+# wire PATH + the background service, then print the summary. Keeping one copy
+# means the two paths cannot drift on the lines the install tests assert.
+# $1 = outcome (e.g. "installed", "is already installed")
+# $2 = detail line under the headline
+finish_portable_install() {
+  finish_outcome="$1"
+  finish_detail="$2"
+  ui_step "PATH and background service"
+  PATH="$BIN_DIR:${PATH:-}"
+  export PATH
+  maybe_edit_path "$BIN_NAME"
+  ensure_daemon_service "$BIN_NAME"
+  # Only claim the service is set up when it actually is. ensure_daemon_service
+  # deliberately does not fail the install, so neither its "run login" notice nor
+  # its warning may be followed by a success line contradicting it.
+  case "$DAEMON_SERVICE_STATE" in
+    ready) ui_ok "Shell and background service are set up" ;;
+    deferred) ui_detail "Install is complete; the background service starts after login." ;;
+    *) ui_detail "Install is complete; background service setup still needs login." ;;
+  esac
+
+  say ""
+  say "${C_BRAND}${C_BOLD}  $G_OK  First Tree $VERSION ${finish_outcome}$C_RESET"
+  say "${C_DIM}        ${finish_detail}${C_RESET}"
+  say ""
+  say "  Command: $BIN_DIR/$BIN_NAME"
+  print_path_guidance
+  say ""
+  say "  Next:"
+  say "    $BIN_DIR/$BIN_NAME login <connect-code>"
+  say ""
+}
+
 clean_npm_temp_residue() {
   package_name="$1"
   case "$package_name" in
@@ -885,6 +944,28 @@ ui_kv "Download" "$(ui_bytes_human "$ASSET_SIZE")"
 ui_kv "SHA-256" "$(ui_sha_short "$ASSET_SHA")"
 ui_ok "Resolved $BIN_NAME $VERSION for $PLATFORM"
 
+# Re-running the installer on an up-to-date machine is the documented
+# install-or-upgrade path, so it must not fetch the payload (tens of MB with the
+# bundled Node runtime) only to discard it. Skip only when every moving part is
+# already in place; a missing link, runtime or shim falls through to the normal
+# path, which doubles as the repair path.
+INSTALLED_VERSION="$(installed_portable_version)"
+if [ -n "$INSTALLED_VERSION" ] && [ "$INSTALLED_VERSION" = "$VERSION" ] &&
+  shim_installed_for_prefix "$BIN_DIR/$BIN_NAME" &&
+  shim_installed_for_prefix "$BIN_DIR/$ALIAS_NAME"; then
+  ui_ok "$BIN_NAME $VERSION is already installed; skipped the payload download"
+  finish_portable_install "is already up to date" \
+    "$PREFIX/current $G_ARROW $PREFIX/versions/$VERSION $G_DOT nothing to download"
+  exit 0
+fi
+
+# Dev/dogfood machines run a `local.*` build, which compares unequal to every
+# released version, so a plain re-run replaces it. That is intended, but it must
+# never be silent: `upgrade` treats local builds as ahead and refuses instead.
+case "$INSTALLED_VERSION" in
+  local.*) ui_warn "Replacing local build $INSTALLED_VERSION with released $VERSION" ;;
+esac
+
 clean_npm_temp_residue "$PACKAGE_NAME"
 mkdir -p "$PREFIX/versions" "$PREFIX/.tmp" "$BIN_DIR"
 # Store one lexical absolute-path contract in shims and metadata consumers.
@@ -915,9 +996,21 @@ mkdir -p "$TEMP_VERSION_DIR"
 extract_tarball "$TARBALL" "$TEMP_VERSION_DIR"
 
 if [ -e "$FINAL_VERSION_DIR" ]; then
-  rm -rf "$TEMP_VERSION_DIR"
-  VALIDATION_DIR="$FINAL_VERSION_DIR"
-  ui_detail "Version $VERSION is already unpacked, reusing $FINAL_VERSION_DIR"
+  # A version directory is only reusable when it is complete: the fast path
+  # above already skips complete installs, so reaching here with one on disk
+  # means the previous attempt was interrupted (or the runtime was removed).
+  # Re-extracting repairs it; reusing it would fail the smoke check below.
+  if [ -x "$FINAL_VERSION_DIR/node/bin/node" ] &&
+    [ -f "$FINAL_VERSION_DIR/app/cli/index.mjs" ] &&
+    [ -f "$FINAL_VERSION_DIR/INSTALL.json" ]; then
+    rm -rf "$TEMP_VERSION_DIR"
+    VALIDATION_DIR="$FINAL_VERSION_DIR"
+    ui_detail "Version $VERSION is already unpacked, reusing $FINAL_VERSION_DIR"
+  else
+    ui_warn "Version $VERSION is on disk but incomplete; re-extracting"
+    rm -rf "$FINAL_VERSION_DIR"
+    VALIDATION_DIR="$TEMP_VERSION_DIR"
+  fi
 else
   VALIDATION_DIR="$TEMP_VERSION_DIR"
 fi
@@ -974,27 +1067,4 @@ ui_kv "Shim" "$BIN_DIR/$ALIAS_NAME"
 ui_kv "Current" "$CURRENT_LINK $G_ARROW $FINAL_VERSION_DIR"
 ui_ok "$BIN_NAME $VERSION is now the active version"
 
-ui_step "PATH and background service"
-PATH="$BIN_DIR:${PATH:-}"
-export PATH
-maybe_edit_path "$BIN_NAME"
-ensure_daemon_service "$BIN_NAME"
-# Only claim the service is set up when it actually is. ensure_daemon_service
-# deliberately does not fail the install, so neither its "run login" notice nor
-# its warning may be followed by a success line contradicting it.
-case "$DAEMON_SERVICE_STATE" in
-  ready) ui_ok "Shell and background service are set up" ;;
-  deferred) ui_detail "Install is complete; the background service starts after login." ;;
-  *) ui_detail "Install is complete; background service setup still needs login." ;;
-esac
-
-say ""
-say "${C_BRAND}${C_BOLD}  $G_OK  First Tree $VERSION installed$C_RESET"
-say "${C_DIM}        $FINAL_VERSION_DIR $G_DOT completed in $(ui_elapsed "$TOTAL_START")$C_RESET"
-say ""
-say "  Command: $BIN_DIR/$BIN_NAME"
-print_path_guidance
-say ""
-say "  Next:"
-say "    $BIN_DIR/$BIN_NAME login <connect-code>"
-say ""
+finish_portable_install "installed" "$FINAL_VERSION_DIR $G_DOT completed in $(ui_elapsed "$TOTAL_START")"
