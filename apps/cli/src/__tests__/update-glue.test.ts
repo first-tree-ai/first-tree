@@ -266,6 +266,29 @@ describe("update glue", () => {
     expect(output()).toContain("spawn string denied");
   });
 
+  it("keeps healthy status-zero refresh output silent while preserving exit 75", async () => {
+    const { SELF_RESTART_EXIT_CODE, createExecuteUpdate } = await import("../core/update-glue.js");
+    const logs: Array<[level: string, message: string]> = [];
+    spawnSyncMock.mockReturnValueOnce({
+      status: 0,
+      signal: null,
+      stderr: "service unit already current\n",
+      stdout: "refresh complete\n",
+    });
+
+    await expect(
+      createExecuteUpdate({
+        managed: true,
+        log: (level, message) => logs.push([level, message]),
+      })({ currentVersion: "0.5.0", targetVersion: "0.6.0" }),
+    ).rejects.toMatchObject({ exitCode: SELF_RESTART_EXIT_CODE });
+
+    expect(exitMock).toHaveBeenCalledWith(SELF_RESTART_EXIT_CODE);
+    expect(logs.filter(([level]) => level === "warn")).toEqual([]);
+    expect(logs.map(([, message]) => message).join("\n")).not.toContain("service unit already current");
+    expect(logs.map(([, message]) => message).join("\n")).not.toContain("refresh complete");
+  });
+
   it("routes managed update output through the injected logger and captures refresh-unit output", async () => {
     const { SELF_RESTART_EXIT_CODE, createExecuteUpdate } = await import("../core/update-glue.js");
     const logs: Array<[level: string, message: string]> = [];
