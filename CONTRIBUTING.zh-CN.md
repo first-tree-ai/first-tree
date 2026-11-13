@@ -69,7 +69,8 @@ pnpm test
 
 ## 贡献者许可协议（CLA）
 
-在 PR 可以被合并之前，每个以人类身份提交的作者都必须先签署贡献者许可协议。自动化 bot 账号豁免。
+在 PR 可以被合并之前，每个以人类身份提交的作者都必须**已被**一份贡献者许可协议覆盖。
+自动化 bot 账号豁免。被覆盖不等于必须本人签署：组织成员可以由下方的 CCLA 覆盖。
 
 - **个人贡献者：** 阅读
   [Individual Contributor License Agreement (ICLA) v1.0](https://gist.githubusercontent.com/bestony/5a32ba8d5daa68b95adab6a9bba9c1cc/raw/dffb751c6fcb4c0d3b6df087e2353f149ab0e24b/icla.md)，
@@ -81,7 +82,7 @@ pnpm test
   用户名，这些贡献者才会被视为已覆盖。
 
 `CLA` workflow 会把 ICLA 签署元数据记录到专用分支 `cla-signatures` 上的
-`signatures/version1/cla.json`。该记录包含 GitHub 用户名与稳定的账号标识、评论内容、仓库与
+`signatures/version1/cla.json`。该记录包含 GitHub 用户名与稳定的账号标识、评论标识、仓库与
 pull request 标识、签署时间戳，以及签署时 GitHub 公开的昵称与邮箱。该分支只是签名台账；
 代码改动仍然通过针对 `main` 的 pull request 进行。
 
