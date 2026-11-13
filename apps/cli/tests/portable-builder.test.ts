@@ -650,6 +650,8 @@ describe("portable installer", () => {
       integrationRuntime?: boolean;
       failEnsureService?: boolean;
       deferEnsureService?: boolean;
+      /** Write a different version into INSTALL.json, so the candidate fails validation. */
+      staleInstallVersion?: string;
     } = {},
   ): Promise<void> {
     const channelDir = join(root, "prod");
@@ -747,7 +749,7 @@ if (args[0] === "--version") {
       JSON.stringify({
         schemaVersion: 1,
         channel: "prod",
-        version,
+        version: options.staleInstallVersion ?? version,
         gitSha: "abc123",
         nodeVersion: "v24.0.0",
         packageName: "first-tree",
@@ -909,6 +911,44 @@ if (args[0] === "--version") {
     for (const present of ["VERSION", "INSTALL.json", "node/bin/node", "app/cli/index.mjs"]) {
       expect(existsSync(join(prefix, "current", present)), present).toBe(true);
     }
+  });
+
+  it("keeps the directory on disk when the extracted candidate fails validation", async () => {
+    const platform = currentPlatform();
+    if (platform === null) return;
+    const fixture = await makeFixture(platform);
+    // The archive is checked and extracted, but its INSTALL.json disagrees with
+    // the metadata, so validation fails after extraction and before the swap.
+    await writeFixtureVersion(fixture, "1.2.4", platform, { staleInstallVersion: "9.9.9" });
+    const home = tempDir("first-tree-home-");
+    const prefix = join(home, "prefix");
+    const binDir = join(home, "bin");
+    const env = {
+      ...process.env,
+      HOME: home,
+      FIRST_TREE_PORTABLE_CHANNEL: "prod",
+      FIRST_TREE_PORTABLE_DOWNLOAD_BASE_URL: `file://${fixture}`,
+    };
+    const installArgs = [
+      join(REPO_ROOT, "scripts", "portable", "install.sh"),
+      "--prefix",
+      prefix,
+      "--bin-dir",
+      binDir,
+      "--no-path-edit",
+      "--version",
+      "1.2.4",
+    ];
+
+    // An interrupted earlier attempt left this behind; it must survive a failed
+    // retry, because the new payload never became a valid replacement.
+    await mkdir(join(prefix, "versions", "1.2.4"), { recursive: true });
+    writeFileSync(join(prefix, "versions", "1.2.4", "half-written.txt"), "partial\n");
+
+    const install = spawnSync("sh", installArgs, { cwd: REPO_ROOT, env, encoding: "utf8" });
+    expect(install.status, install.stderr || install.stdout).not.toBe(0);
+    expect(install.stderr).toContain("INSTALL.json version does not match downloaded metadata");
+    expect(readFileSync(join(prefix, "versions", "1.2.4", "half-written.txt"), "utf8")).toBe("partial\n");
   });
 
   it("warns before replacing a local build with a released version", async () => {
