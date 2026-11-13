@@ -156,9 +156,10 @@ describe("chat command behavior", () => {
     expect(help).toContain("best-effort and body-reference based");
     expect(help).toContain("PNG/JPEG/GIF/WebP");
     expect(help).toContain("sending agent's own workspace");
-    expect(help).toContain("10 MiB each, up to 20 images per message");
+    expect(help).toContain("10 MiB each");
     expect(help).toContain("workspace `.md` path");
-    expect(help).toContain("10 MiB each, up to 10 documents per message");
+    expect(help).toContain("share one per-message limit of 10 references");
+    expect(help).toContain("captured items use only the remaining capacity");
     expect(help).toContain("Other outbound file types are not captured");
     // Who a send actually wakes: an agent recipient starts a session, a human
     // is only notified. The sentence had no coverage and shipped with a

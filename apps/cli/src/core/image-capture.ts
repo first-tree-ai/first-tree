@@ -1,5 +1,5 @@
 import { buildMessageImageSnapshots, type FirstTreeHubSDK } from "@first-tree/client";
-import type { AttachmentRef, ImageRefContent, MessageFormat } from "@first-tree/shared";
+import type { AttachmentRef, ImageRefContent } from "@first-tree/shared";
 import { resolveChatOrgId, resolveImageFenceFromEnv } from "./capture-context.js";
 
 /**
@@ -36,29 +36,6 @@ export async function captureOutboundImages(
   } catch {
     return { caption: content, imageRefs: [] };
   }
-}
-
-/**
- * Decide the outbound `format` + `content` given the doc-captured body and the
- * image-capture result. Text/markdown sends become a human-identical
- * `imageBatchRefContent` file message. Requests keep their textual body and
- * attach images through generic metadata in `chat ask`; card/reference bodies
- * and image-free sends pass through unchanged.
- */
-export function toOutboundImageMessage(
-  baseFormat: MessageFormat,
-  docContent: string,
-  captured: { caption: string; imageRefs: ImageRefContent[] },
-): { format: MessageFormat; content: unknown } {
-  const eligible = baseFormat === "text" || baseFormat === "markdown";
-  if (!eligible || captured.imageRefs.length === 0) return { format: baseFormat, content: docContent };
-  return {
-    format: "file",
-    content: {
-      ...(captured.caption.trim() ? { caption: captured.caption } : {}),
-      attachments: captured.imageRefs,
-    },
-  };
 }
 
 /**
