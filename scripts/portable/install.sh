@@ -739,6 +739,18 @@ print_path_guidance() {
   fi
 }
 
+# One completeness definition for both the fast path and version-directory
+# reuse. A directory is installable only when everything a later reader depends
+# on is there: the version node reports, the metadata the portable updater reads
+# (INSTALL.json), the bundled runtime, and the app entry.
+portable_version_dir_complete() {
+  [ -f "$1/VERSION" ] || return 1
+  [ -f "$1/INSTALL.json" ] || return 1
+  [ -x "$1/node/bin/node" ] || return 1
+  [ -f "$1/app/cli/index.mjs" ] || return 1
+  return 0
+}
+
 # Version of the complete portable install `$PREFIX/current` points at, or
 # nothing when the prefix is empty, half-written, or dangling. Callers treat an
 # empty result as "not installed yet" and fall through to the normal install
@@ -746,9 +758,7 @@ print_path_guidance() {
 installed_portable_version() {
   current_link="$PREFIX/current"
   [ -L "$current_link" ] || return 0
-  [ -f "$current_link/VERSION" ] || return 0
-  [ -x "$current_link/node/bin/node" ] || return 0
-  [ -f "$current_link/app/cli/index.mjs" ] || return 0
+  portable_version_dir_complete "$current_link" || return 0
   installed="$(tr -d '[:space:]' <"$current_link/VERSION")"
   [ -n "$installed" ] || return 0
   printf '%s\n' "$installed"
@@ -995,20 +1005,20 @@ rm -rf "$TEMP_VERSION_DIR"
 mkdir -p "$TEMP_VERSION_DIR"
 extract_tarball "$TARBALL" "$TEMP_VERSION_DIR"
 
+REUSE_VERSION_DIR=0
 if [ -e "$FINAL_VERSION_DIR" ]; then
   # A version directory is only reusable when it is complete: the fast path
   # above already skips complete installs, so reaching here with one on disk
-  # means the previous attempt was interrupted (or the runtime was removed).
-  # Re-extracting repairs it; reusing it would fail the smoke check below.
-  if [ -x "$FINAL_VERSION_DIR/node/bin/node" ] &&
-    [ -f "$FINAL_VERSION_DIR/app/cli/index.mjs" ] &&
-    [ -f "$FINAL_VERSION_DIR/INSTALL.json" ]; then
+  # means the previous attempt was interrupted (or a file was removed).
+  # Re-extracting repairs it; reusing a partial one would either fail the smoke
+  # check below or install a directory a later run refuses to trust.
+  if portable_version_dir_complete "$FINAL_VERSION_DIR"; then
+    REUSE_VERSION_DIR=1
     rm -rf "$TEMP_VERSION_DIR"
     VALIDATION_DIR="$FINAL_VERSION_DIR"
     ui_detail "Version $VERSION is already unpacked, reusing $FINAL_VERSION_DIR"
   else
     ui_warn "Version $VERSION is on disk but incomplete; re-extracting"
-    rm -rf "$FINAL_VERSION_DIR"
     VALIDATION_DIR="$TEMP_VERSION_DIR"
   fi
 else
@@ -1032,7 +1042,10 @@ INSTALL_ENTRY="$(json_string "$INSTALL_FILE" appEntry)"
 [ "$INSTALL_MODE" = "portable" ] || die "INSTALL.json does not describe a portable install"
 [ "$INSTALL_ENTRY" = "app/cli/index.mjs" ] || die "INSTALL.json appEntry is unsupported"
 
-if [ "$VALIDATION_DIR" = "$TEMP_VERSION_DIR" ]; then
+if [ "$REUSE_VERSION_DIR" -eq 0 ]; then
+  # The candidate is validated above before this point, so an unusable extraction
+  # never costs the directory that is already on disk: replace it only now.
+  rm -rf "$FINAL_VERSION_DIR"
   mv "$TEMP_VERSION_DIR" "$FINAL_VERSION_DIR"
 fi
 ui_kv "Unpacked" "$FINAL_VERSION_DIR"

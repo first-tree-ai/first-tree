@@ -869,7 +869,11 @@ if (args[0] === "--version") {
     expect(readFileSync(join(prefix, "current", "VERSION"), "utf8")).toBe("1.2.3\n");
   });
 
-  it("repairs an incomplete install instead of treating it as up to date", async () => {
+  it.each([
+    ["the bundled runtime", "node/bin/node"],
+    ["the version marker", "VERSION"],
+    ["the install metadata", "INSTALL.json"],
+  ])("repairs an install missing %s instead of treating it as up to date", async (_label, missing) => {
     const platform = currentPlatform();
     if (platform === null) return;
     const fixture = await makeFixture(platform);
@@ -894,15 +898,17 @@ if (args[0] === "--version") {
     const first = spawnSync("sh", installArgs, { cwd: REPO_ROOT, env, encoding: "utf8" });
     expect(first.status, first.stderr || first.stdout).toBe(0);
 
-    // Same version on disk, but the bundled runtime is gone: the link still
-    // names 1.2.3, so a version-only check would skip the install and leave the
-    // prefix unusable.
-    rmSync(join(prefix, "current", "node", "bin", "node"));
+    // Same version on disk, but a file a later reader depends on is gone. A
+    // version-only check would skip the install; a reuse check that does not
+    // match the fast path would keep the broken directory and report success.
+    rmSync(join(prefix, "current", missing), { recursive: true, force: true });
 
     const second = spawnSync("sh", installArgs, { cwd: REPO_ROOT, env, encoding: "utf8" });
     expect(second.status, second.stderr || second.stdout).toBe(0);
     expect(second.stdout).not.toContain("is already installed");
-    expect(existsSync(join(prefix, "current", "node", "bin", "node"))).toBe(true);
+    for (const present of ["VERSION", "INSTALL.json", "node/bin/node", "app/cli/index.mjs"]) {
+      expect(existsSync(join(prefix, "current", present)), present).toBe(true);
+    }
   });
 
   it("warns before replacing a local build with a released version", async () => {
