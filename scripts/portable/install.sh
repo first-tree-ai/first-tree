@@ -1042,29 +1042,31 @@ INSTALL_ENTRY="$(json_string "$INSTALL_FILE" appEntry)"
 [ "$INSTALL_MODE" = "portable" ] || die "INSTALL.json does not describe a portable install"
 [ "$INSTALL_ENTRY" = "app/cli/index.mjs" ] || die "INSTALL.json appEntry is unsupported"
 
+ui_ok "Payload contents match the release metadata"
+
+# Exercise the candidate where it sits, before it replaces anything. A
+# same-version repair overwrites files inside the live version directory, so a
+# payload that cannot start must fail here with the working install untouched;
+# checking after the swap would have already broken the shim that points at it.
+ui_step "Runtime smoke check"
+if ! "$VALIDATION_DIR/node/bin/node" "$VALIDATION_DIR/app/cli/index.mjs" --version >/dev/null; then
+  die "portable payload failed the pre-commit runtime smoke check"
+fi
+ui_ok "Bundled runtime starts and reports a version"
+
 if [ "$REUSE_VERSION_DIR" -eq 0 ]; then
-  # The candidate is validated above before this point, so an unusable extraction
-  # never costs the directory that is already on disk: replace it only now.
+  # Only now that the candidate has passed validation and the smoke check may it
+  # replace the directory on disk.
   rm -rf "$FINAL_VERSION_DIR"
   mv "$TEMP_VERSION_DIR" "$FINAL_VERSION_DIR"
 fi
 ui_kv "Unpacked" "$FINAL_VERSION_DIR"
-ui_ok "Payload contents match the release metadata"
 
 CURRENT_LINK="$PREFIX/current"
 if [ -e "$CURRENT_LINK" ] && [ ! -L "$CURRENT_LINK" ]; then
   die "$CURRENT_LINK exists and is not a symlink"
 fi
 NEW_LINK="$PREFIX/.current.$$"
-
-# Exercise the candidate runtime directly before changing stable shims or
-# `current`. Once `current` moves, every remaining operation is best-effort or
-# non-failing so installer success/failure always reflects the active version.
-ui_step "Runtime smoke check"
-if ! "$FINAL_VERSION_DIR/node/bin/node" "$FINAL_VERSION_DIR/app/cli/index.mjs" --version >/dev/null; then
-  die "portable payload failed the pre-commit runtime smoke check"
-fi
-ui_ok "Bundled runtime starts and reports a version"
 
 # Prepare both stable shims while current still names the old version. The
 # current symlink is the final commit point, so a shim write failure never

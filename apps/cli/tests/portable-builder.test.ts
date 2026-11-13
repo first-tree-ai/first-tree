@@ -951,6 +951,45 @@ if (args[0] === "--version") {
     expect(readFileSync(join(prefix, "versions", "1.2.4", "half-written.txt"), "utf8")).toBe("partial\n");
   });
 
+  it("keeps the working install when a same-version repair fails its smoke check", async () => {
+    const platform = currentPlatform();
+    if (platform === null) return;
+    const fixture = await makeFixture(platform);
+    const home = tempDir("first-tree-home-");
+    const prefix = join(home, "prefix");
+    const binDir = join(home, "bin");
+    const env = {
+      ...process.env,
+      HOME: home,
+      FIRST_TREE_PORTABLE_CHANNEL: "prod",
+      FIRST_TREE_PORTABLE_DOWNLOAD_BASE_URL: `file://${fixture}`,
+    };
+    const installArgs = [
+      join(REPO_ROOT, "scripts", "portable", "install.sh"),
+      "--prefix",
+      prefix,
+      "--bin-dir",
+      binDir,
+      "--no-path-edit",
+    ];
+
+    const first = spawnSync("sh", installArgs, { cwd: REPO_ROOT, env, encoding: "utf8" });
+    expect(first.status, first.stderr || first.stdout).toBe(0);
+    const shim = join(binDir, "first-tree");
+    expect(spawnSync(shim, ["--version"], { encoding: "utf8" }).stdout.trim()).toBe("1.2.3");
+
+    // Same version, one file missing: the rerun takes the repair path, and the
+    // replacement payload cannot start. The install that works must survive, or
+    // `current` already points at files that never ran.
+    rmSync(join(prefix, "current", "INSTALL.json"));
+    await writeFixtureVersion(fixture, "1.2.3", platform, { failRuntimeSmoke: true });
+
+    const second = spawnSync("sh", installArgs, { cwd: REPO_ROOT, env, encoding: "utf8" });
+    expect(second.status, second.stderr || second.stdout).not.toBe(0);
+    expect(second.stderr).toContain("portable payload failed the pre-commit runtime smoke check");
+    expect(spawnSync(shim, ["--version"], { encoding: "utf8" }).stdout.trim()).toBe("1.2.3");
+  });
+
   it("warns before replacing a local build with a released version", async () => {
     const platform = currentPlatform();
     if (platform === null) return;
