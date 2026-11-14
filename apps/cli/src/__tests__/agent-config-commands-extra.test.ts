@@ -35,6 +35,12 @@ const outputMocks = vi.hoisted(() => ({
 
 vi.mock("../core/bootstrap.js", () => bootstrapMocks);
 vi.mock("../commands/agent/config/_shared/fetchers.js", () => fetcherMocks);
+
+const stdinMock = vi.hoisted(() => ({ readStdin: vi.fn() }));
+const printMock = vi.hoisted(() => ({ line: vi.fn() }));
+
+vi.mock("../commands/_shared/stdin.js", () => stdinMock);
+vi.mock("../core/output.js", () => ({ print: printMock }));
 vi.mock("../cli/output.js", () => outputMocks);
 
 const NOW = "2026-06-01T00:00:00.000Z";
@@ -158,6 +164,37 @@ describe("agent config command behavior", () => {
     });
 
     await expect(runConfig(["set-env", "nova", "BROKEN"])).rejects.toMatchObject({ code: "BAD_KV", exitCode: 2 });
+
+    // SEC-052: with --value-stdin the value never appears in argv, and the
+    // trailing newline a pipe adds is not part of the credential.
+    stdinMock.readStdin.mockResolvedValueOnce("s3cret-value\n");
+    await runConfig(["set-env", "nova", "OPENAI_API_KEY", "--sensitive", "--value-stdin"]);
+    expect(fetcherMocks.patchConfig).toHaveBeenLastCalledWith("https://hub.example", "admin-token", "agent-uuid", 1, {
+      env: [
+        { key: "KEEP", value: "1", sensitive: false },
+        { key: "OPENAI_API_KEY", value: "s3cret-value", sensitive: true },
+      ],
+    });
+    await expect(runConfig(["set-env", "nova", "OPENAI_API_KEY=inline", "--value-stdin"])).rejects.toMatchObject({
+      code: "BAD_KV",
+      exitCode: 2,
+    });
+    await expect(runConfig(["set-env", "nova", "--value-stdin"])).rejects.toMatchObject({
+      code: "BAD_KV",
+      exitCode: 2,
+    });
+    stdinMock.readStdin.mockResolvedValueOnce(null);
+    await expect(runConfig(["set-env", "nova", "OPENAI_API_KEY", "--value-stdin"])).rejects.toMatchObject({
+      code: "NO_STDIN",
+      exitCode: 2,
+    });
+
+    // A positional value still works, but a sensitive one is nudged to the pipe.
+    printMock.line.mockClear();
+    await runConfig(["set-env", "nova", "PLAIN=visible"]);
+    expect(printMock.line).not.toHaveBeenCalled();
+    await runConfig(["set-env", "nova", "SECRET=inline", "--sensitive"]);
+    expect(printMock.line.mock.calls.map((call) => String(call[0])).join("")).toContain("--value-stdin");
 
     await runConfig(["set-model", "nova", "opus"]);
     expect(fetcherMocks.patchConfig).toHaveBeenLastCalledWith("https://hub.example", "admin-token", "agent-uuid", 1, {
