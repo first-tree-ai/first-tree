@@ -650,6 +650,8 @@ describe("portable installer", () => {
       integrationRuntime?: boolean;
       failEnsureService?: boolean;
       deferEnsureService?: boolean;
+      /** Write a different version into INSTALL.json, so the candidate fails validation. */
+      staleInstallVersion?: string;
     } = {},
   ): Promise<void> {
     const channelDir = join(root, "prod");
@@ -747,7 +749,7 @@ if (args[0] === "--version") {
       JSON.stringify({
         schemaVersion: 1,
         channel: "prod",
-        version,
+        version: options.staleInstallVersion ?? version,
         gitSha: "abc123",
         nodeVersion: "v24.0.0",
         packageName: "first-tree",
@@ -831,6 +833,203 @@ if (args[0] === "--version") {
     expect(shim).toContain("FIRST_TREE_INSTALL_MODE=portable");
     expect(shim).toContain("FIRST_TREE_PORTABLE_ROOT");
     expect(shim).toContain("FIRST_TREE_PORTABLE_BIN_DIR");
+  });
+
+  it("skips the payload download when the installed version is already current", async () => {
+    const platform = currentPlatform();
+    if (platform === null) return;
+    const fixture = await makeFixture(platform);
+    const home = tempDir("first-tree-home-");
+    const prefix = join(home, "prefix");
+    const binDir = join(home, "bin");
+    const env = {
+      ...process.env,
+      HOME: home,
+      FIRST_TREE_PORTABLE_CHANNEL: "prod",
+      FIRST_TREE_PORTABLE_DOWNLOAD_BASE_URL: `file://${fixture}`,
+    };
+    const installArgs = [
+      join(REPO_ROOT, "scripts", "portable", "install.sh"),
+      "--prefix",
+      prefix,
+      "--bin-dir",
+      binDir,
+      "--no-path-edit",
+    ];
+
+    const first = spawnSync("sh", installArgs, { cwd: REPO_ROOT, env, encoding: "utf8" });
+    expect(first.status, first.stderr || first.stdout).toBe(0);
+
+    // Removing the payload makes any fetch fatal, so the second run can only
+    // exit 0 when it stopped before downloading the artifact.
+    rmSync(join(fixture, "prod", "1.2.3", `first-tree-1.2.3-${platform}.tar.gz`));
+
+    const second = spawnSync("sh", installArgs, { cwd: REPO_ROOT, env, encoding: "utf8" });
+    expect(second.status, second.stderr || second.stdout).toBe(0);
+    expect(second.stdout).toContain("is already installed; skipped the payload download");
+    expect(second.stdout).toContain("nothing to download");
+    expect(readFileSync(join(prefix, "current", "VERSION"), "utf8")).toBe("1.2.3\n");
+  });
+
+  it.each([
+    ["the bundled runtime", "node/bin/node"],
+    ["the version marker", "VERSION"],
+    ["the install metadata", "INSTALL.json"],
+  ])("repairs an install missing %s instead of treating it as up to date", async (_label, missing) => {
+    const platform = currentPlatform();
+    if (platform === null) return;
+    const fixture = await makeFixture(platform);
+    const home = tempDir("first-tree-home-");
+    const prefix = join(home, "prefix");
+    const binDir = join(home, "bin");
+    const env = {
+      ...process.env,
+      HOME: home,
+      FIRST_TREE_PORTABLE_CHANNEL: "prod",
+      FIRST_TREE_PORTABLE_DOWNLOAD_BASE_URL: `file://${fixture}`,
+    };
+    const installArgs = [
+      join(REPO_ROOT, "scripts", "portable", "install.sh"),
+      "--prefix",
+      prefix,
+      "--bin-dir",
+      binDir,
+      "--no-path-edit",
+    ];
+
+    const first = spawnSync("sh", installArgs, { cwd: REPO_ROOT, env, encoding: "utf8" });
+    expect(first.status, first.stderr || first.stdout).toBe(0);
+
+    // Same version on disk, but a file a later reader depends on is gone. A
+    // version-only check would skip the install; a reuse check that does not
+    // match the fast path would keep the broken directory and report success.
+    rmSync(join(prefix, "current", missing), { recursive: true, force: true });
+
+    const second = spawnSync("sh", installArgs, { cwd: REPO_ROOT, env, encoding: "utf8" });
+    expect(second.status, second.stderr || second.stdout).toBe(0);
+    expect(second.stdout).not.toContain("is already installed");
+    for (const present of ["VERSION", "INSTALL.json", "node/bin/node", "app/cli/index.mjs"]) {
+      expect(existsSync(join(prefix, "current", present)), present).toBe(true);
+    }
+  });
+
+  it("keeps the directory on disk when the extracted candidate fails validation", async () => {
+    const platform = currentPlatform();
+    if (platform === null) return;
+    const fixture = await makeFixture(platform);
+    // The archive is checked and extracted, but its INSTALL.json disagrees with
+    // the metadata, so validation fails after extraction and before the swap.
+    await writeFixtureVersion(fixture, "1.2.4", platform, { staleInstallVersion: "9.9.9" });
+    const home = tempDir("first-tree-home-");
+    const prefix = join(home, "prefix");
+    const binDir = join(home, "bin");
+    const env = {
+      ...process.env,
+      HOME: home,
+      FIRST_TREE_PORTABLE_CHANNEL: "prod",
+      FIRST_TREE_PORTABLE_DOWNLOAD_BASE_URL: `file://${fixture}`,
+    };
+    const installArgs = [
+      join(REPO_ROOT, "scripts", "portable", "install.sh"),
+      "--prefix",
+      prefix,
+      "--bin-dir",
+      binDir,
+      "--no-path-edit",
+      "--version",
+      "1.2.4",
+    ];
+
+    // An interrupted earlier attempt left this behind; it must survive a failed
+    // retry, because the new payload never became a valid replacement.
+    await mkdir(join(prefix, "versions", "1.2.4"), { recursive: true });
+    writeFileSync(join(prefix, "versions", "1.2.4", "half-written.txt"), "partial\n");
+
+    const install = spawnSync("sh", installArgs, { cwd: REPO_ROOT, env, encoding: "utf8" });
+    expect(install.status, install.stderr || install.stdout).not.toBe(0);
+    expect(install.stderr).toContain("INSTALL.json version does not match downloaded metadata");
+    expect(readFileSync(join(prefix, "versions", "1.2.4", "half-written.txt"), "utf8")).toBe("partial\n");
+  });
+
+  it("keeps the working install when a same-version repair fails its smoke check", async () => {
+    const platform = currentPlatform();
+    if (platform === null) return;
+    const fixture = await makeFixture(platform);
+    const home = tempDir("first-tree-home-");
+    const prefix = join(home, "prefix");
+    const binDir = join(home, "bin");
+    const env = {
+      ...process.env,
+      HOME: home,
+      FIRST_TREE_PORTABLE_CHANNEL: "prod",
+      FIRST_TREE_PORTABLE_DOWNLOAD_BASE_URL: `file://${fixture}`,
+    };
+    const installArgs = [
+      join(REPO_ROOT, "scripts", "portable", "install.sh"),
+      "--prefix",
+      prefix,
+      "--bin-dir",
+      binDir,
+      "--no-path-edit",
+    ];
+
+    const first = spawnSync("sh", installArgs, { cwd: REPO_ROOT, env, encoding: "utf8" });
+    expect(first.status, first.stderr || first.stdout).toBe(0);
+    const shim = join(binDir, "first-tree");
+    expect(spawnSync(shim, ["--version"], { encoding: "utf8" }).stdout.trim()).toBe("1.2.3");
+
+    // Same version, one file missing: the rerun takes the repair path, and the
+    // replacement payload cannot start. The install that works must survive, or
+    // `current` already points at files that never ran.
+    rmSync(join(prefix, "current", "INSTALL.json"));
+    await writeFixtureVersion(fixture, "1.2.3", platform, { failRuntimeSmoke: true });
+
+    const second = spawnSync("sh", installArgs, { cwd: REPO_ROOT, env, encoding: "utf8" });
+    expect(second.status, second.stderr || second.stdout).not.toBe(0);
+    expect(second.stderr).toContain("portable payload failed the pre-commit runtime smoke check");
+    expect(spawnSync(shim, ["--version"], { encoding: "utf8" }).stdout.trim()).toBe("1.2.3");
+  });
+
+  it("warns before replacing a local build with a released version", async () => {
+    const platform = currentPlatform();
+    if (platform === null) return;
+    const fixture = await makeFixture(platform);
+    const home = tempDir("first-tree-home-");
+    const prefix = join(home, "prefix");
+    const binDir = join(home, "bin");
+    const env = {
+      ...process.env,
+      HOME: home,
+      FIRST_TREE_PORTABLE_CHANNEL: "prod",
+      FIRST_TREE_PORTABLE_DOWNLOAD_BASE_URL: `file://${fixture}`,
+    };
+    const installArgs = [
+      join(REPO_ROOT, "scripts", "portable", "install.sh"),
+      "--prefix",
+      prefix,
+      "--bin-dir",
+      binDir,
+      "--no-path-edit",
+    ];
+
+    const localFixture = await makeFixture(platform);
+    await writeFixtureVersion(localFixture, "local.20260101", platform);
+    const local = spawnSync("sh", [...installArgs, "--version", "local.20260101"], {
+      cwd: REPO_ROOT,
+      env: { ...env, FIRST_TREE_PORTABLE_DOWNLOAD_BASE_URL: `file://${localFixture}` },
+      encoding: "utf8",
+    });
+    expect(local.status, local.stderr || local.stdout).toBe(0);
+    expect(readFileSync(join(prefix, "current", "VERSION"), "utf8")).toBe("local.20260101\n");
+
+    const released = spawnSync("sh", [...installArgs, "--version", "1.2.3"], {
+      cwd: REPO_ROOT,
+      env,
+      encoding: "utf8",
+    });
+    expect(released.status, released.stderr || released.stdout).toBe(0);
+    expect(released.stdout).toContain("Replacing local build local.20260101 with released 1.2.3");
+    expect(readFileSync(join(prefix, "current", "VERSION"), "utf8")).toBe("1.2.3\n");
   });
 
   it("prints shell refresh guidance for the profile it updates", async () => {
