@@ -107,7 +107,7 @@ describe("POST /me/connect-tokens bootstrap command", () => {
       expectShortConnectCode(body.token);
       expect(body.command).toBe(`first-tree login ${body.token}`);
       expect(body.bootstrapCommand).toBe(
-        `curl -fsSL https://download.first-tree.ai/releases/prod/install.sh | sh\n` +
+        `curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/prod/install.sh | sh\n` +
           `~/.local/bin/first-tree login ${body.token}`,
       );
       expect(body).not.toHaveProperty("npmSpec");
@@ -151,7 +151,7 @@ describe("POST /me/connect-tokens bootstrap command", () => {
       expectShortConnectCode(body.token);
       expect(body.command).toBe(`FIRST_TREE_SERVER_URL='https://selfhost.example.test' first-tree login ${body.token}`);
       expect(body.bootstrapCommand).toBe(
-        `curl -fsSL https://download.first-tree.ai/releases/prod/install.sh | sh\n` +
+        `curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/prod/install.sh | sh\n` +
           `FIRST_TREE_SERVER_URL='https://selfhost.example.test' ~/.local/bin/first-tree login ${body.token}`,
       );
     });
@@ -172,7 +172,7 @@ describe("POST /me/connect-tokens bootstrap command", () => {
         expectShortConnectCode(body.token);
         expect(body.command).toBe(`FIRST_TREE_SERVER_URL='first-tree.internal' first-tree login ${body.token}`);
         expect(body.bootstrapCommand).toBe(
-          `curl -fsSL https://download.first-tree.ai/releases/prod/install.sh | sh\n` +
+          `curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/prod/install.sh | sh\n` +
             `FIRST_TREE_SERVER_URL='first-tree.internal' ~/.local/bin/first-tree login ${body.token}`,
         );
       } finally {
@@ -196,7 +196,7 @@ describe("POST /me/connect-tokens bootstrap command", () => {
         expectShortConnectCode(body.token);
         expect(body.command).toBe(`FIRST_TREE_SERVER_URL='self'\\''host;$(id)' first-tree login ${body.token}`);
         expect(body.bootstrapCommand).toBe(
-          `curl -fsSL https://download.first-tree.ai/releases/prod/install.sh | sh\n` +
+          `curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/prod/install.sh | sh\n` +
             `FIRST_TREE_SERVER_URL='self'\\''host;$(id)' ~/.local/bin/first-tree login ${body.token}`,
         );
       } finally {
@@ -233,7 +233,7 @@ describe("POST /me/connect-tokens bootstrap command", () => {
       expect(body.installerUrl).toBe("https://download.first-tree.ai/releases/staging/install.sh");
       expect(body.command).toBe(`first-tree-staging login ${body.token}`);
       expect(body.bootstrapCommand).toBe(
-        `curl -fsSL https://download.first-tree.ai/releases/staging/install.sh | sh\n` +
+        `curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/staging/install.sh | sh\n` +
           `~/.local/bin/first-tree-staging login ${body.token}`,
       );
     });
@@ -270,7 +270,7 @@ describe("POST /me/connect-tokens bootstrap command", () => {
       expectShortConnectCode(body.token);
       expect(body.installerUrl).toBe("https://downloads.example.test/releases/prod/install.sh");
       expect(body.bootstrapCommand).toBe(
-        `curl -fsSL 'https://downloads.example.test/releases/prod/install.sh' | ` +
+        `curl -fsSL --proto '=https' --proto-redir '=https' 'https://downloads.example.test/releases/prod/install.sh' | ` +
           `FIRST_TREE_PORTABLE_DOWNLOAD_BASE_URL='https://downloads.example.test/releases' ` +
           `sh\n~/.local/bin/first-tree login ${body.token}`,
       );
@@ -297,7 +297,7 @@ describe("POST /me/connect-tokens bootstrap command", () => {
         expectShortConnectCode(body.token);
         expect(body.installerUrl).toBe("https://downloads.example.test/releases/$(id)/prod/install.sh");
         expect(body.bootstrapCommand).toBe(
-          `curl -fsSL 'https://downloads.example.test/releases/$(id)/prod/install.sh' | ` +
+          `curl -fsSL --proto '=https' --proto-redir '=https' 'https://downloads.example.test/releases/$(id)/prod/install.sh' | ` +
             `FIRST_TREE_PORTABLE_DOWNLOAD_BASE_URL='https://downloads.example.test/releases/$(id)' ` +
             `sh\n~/.local/bin/first-tree login ${body.token}`,
         );
