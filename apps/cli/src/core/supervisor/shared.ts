@@ -273,7 +273,11 @@ export function ensureLogDir(): void {
 
 export function shellQuote(value: string): string {
   if (/^[A-Za-z0-9_\-./:=]+$/.test(value)) return value;
-  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  // POSIX single quotes: nothing inside is expanded, and an embedded quote is
+  // closed + re-opened. Double quotes are not enough here — `$` and backticks
+  // stay live inside them, so a path like `/tmp/$(id)` would execute when the
+  // generated launcher runs (SEC-028).
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
 export function readFileOrFlagDrift(path: string, expected: string): boolean {

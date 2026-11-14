@@ -259,10 +259,10 @@ describe("service install helpers", () => {
       program: "/opt/My Node/node",
       args: ["/tmp/cli path/index.mjs"],
     });
-    expect(wrapper).toContain('"/opt/My Node/node" "/tmp/cli path/index.mjs" daemon start --no-interactive');
+    expect(wrapper).toContain(`'/opt/My Node/node' '/tmp/cli path/index.mjs' daemon start --no-interactive`);
 
     const unit = renderSystemdUnit({ kind: "bin", program: "/usr/local/bin/first tree" });
-    expect(unit).toContain('ExecStart="/usr/local/bin/first tree" daemon start --no-interactive');
+    expect(unit).toContain(`ExecStart='/usr/local/bin/first tree' daemon start --no-interactive`);
     expect(unit).toContain(`Environment=FIRST_TREE_HOME=${process.env.FIRST_TREE_HOME}`);
     expect(unit).toContain("WantedBy=default.target");
     expect(unit).not.toContain("HTTPS_PROXY");

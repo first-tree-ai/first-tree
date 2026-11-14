@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { defaultHome } from "@first-tree/shared/config";
@@ -173,6 +173,28 @@ describe("renderLaunchdWrapper — launcher script supervises the resolved CLI",
     });
     expect(wrapper).toContain("/usr/bin/node /opt/first-tree/dist/cli/index.mjs daemon start --no-interactive");
   });
+
+  it.skipIf(process.platform === "win32")(
+    "does not execute command substitution baked into the resolved CLI path",
+    () => {
+      const dir = mkdtempSync(join(tmpdir(), "first-tree-launchd-quote-"));
+      const marker = join(dir, "pwned");
+      const wrapperPath = join(dir, "wrapper");
+      try {
+        // SEC-028: a path carrying `$(...)` must stay inert text in the
+        // launcher. Double quotes plus backslash escaping are not enough.
+        writeFileSync(wrapperPath, renderLaunchdWrapper({ kind: "bin", program: `$(touch ${marker})` }), {
+          mode: 0o755,
+        });
+        // The wrapper restarts on every failure; one iteration is enough for a
+        // substitution that was left unescaped to run.
+        spawnSync("/bin/sh", [wrapperPath], { timeout: 1500, encoding: "utf8" });
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it.skipIf(process.platform === "win32")(
     "reloads an atomically replaced wrapper after exit 75 without waiting for launchd to respawn it",
