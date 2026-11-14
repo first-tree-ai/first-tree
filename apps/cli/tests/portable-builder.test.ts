@@ -835,6 +835,130 @@ if (args[0] === "--version") {
     expect(shim).toContain("FIRST_TREE_PORTABLE_BIN_DIR");
   });
 
+  it("refuses to overwrite an existing alias that is not a First Tree shim", async () => {
+    const platform = currentPlatform();
+    if (platform === null) return;
+    const fixture = await makeFixture(platform);
+    const home = tempDir("first-tree-home-");
+    const prefix = join(home, "prefix");
+    const binDir = join(home, "bin");
+    await mkdir(binDir, { recursive: true });
+    // `ft` is a generic name; another tool can own it. Overwriting it silently
+    // replaces an executable this install does not manage (SEC-057).
+    const foreignAlias = join(binDir, "ft");
+    const foreignBody = "#!/bin/sh\necho someone-elses-tool\n";
+    writeFileSync(foreignAlias, foreignBody, { mode: 0o755 });
+    const res = spawnSync(
+      "sh",
+      [join(REPO_ROOT, "scripts", "portable", "install.sh"), "--prefix", prefix, "--bin-dir", binDir, "--no-path-edit"],
+      {
+        cwd: REPO_ROOT,
+        env: {
+          ...process.env,
+          HOME: home,
+          FIRST_TREE_PORTABLE_CHANNEL: "prod",
+          FIRST_TREE_PORTABLE_DOWNLOAD_BASE_URL: `file://${fixture}`,
+        },
+        encoding: "utf8",
+      },
+    );
+
+    expect(res.status, res.stderr || res.stdout).not.toBe(0);
+    expect(res.stderr).toContain(foreignAlias);
+    expect(res.stderr).toContain("--bin-dir");
+    expect(readFileSync(foreignAlias, "utf8")).toBe(foreignBody);
+    // Nothing else may have been written: the refusal happens before the
+    // activation step, so there is no half-installed shim or `current` link.
+    expect(existsSync(join(binDir, "first-tree"))).toBe(false);
+    expect(existsSync(join(prefix, "current"))).toBe(false);
+  });
+
+  it("upgrades a legacy shim that already points at this prefix", async () => {
+    const platform = currentPlatform();
+    if (platform === null) return;
+    const fixture = await makeFixture(platform);
+    const home = tempDir("first-tree-home-");
+    const prefix = join(home, "prefix");
+    const binDir = join(home, "bin");
+    const env = {
+      ...process.env,
+      HOME: home,
+      FIRST_TREE_PORTABLE_CHANNEL: "prod",
+      FIRST_TREE_PORTABLE_DOWNLOAD_BASE_URL: `file://${fixture}`,
+    };
+    const installArgs = [
+      join(REPO_ROOT, "scripts", "portable", "install.sh"),
+      "--prefix",
+      prefix,
+      "--bin-dir",
+      binDir,
+      "--no-path-edit",
+    ];
+
+    const first = spawnSync("sh", installArgs, { cwd: REPO_ROOT, env, encoding: "utf8" });
+    expect(first.status, first.stderr || first.stdout).toBe(0);
+
+    // Pre-bin-dir shims double-quote the root and export no bin directory. They
+    // still belong to this install, so the ownership gate must accept them;
+    // otherwise an existing user could never upgrade again.
+    const legacyShim = `#!/bin/sh
+set -eu
+root="${join(prefix, "current")}"
+export FIRST_TREE_INSTALL_MODE=portable
+export FIRST_TREE_PORTABLE_ROOT="$root"
+exec "$root/node/bin/node" "$root/app/cli/index.mjs" "$@"
+`;
+    for (const name of ["first-tree", "ft"]) {
+      writeFileSync(join(binDir, name), legacyShim, { mode: 0o755 });
+    }
+
+    await writeFixtureVersion(fixture, "1.2.4", platform);
+    const second = spawnSync("sh", installArgs, { cwd: REPO_ROOT, env, encoding: "utf8" });
+    expect(second.status, second.stderr || second.stdout).toBe(0);
+    expect(readFileSync(join(binDir, "ft"), "utf8")).toContain("FIRST_TREE_PORTABLE_BIN_DIR");
+    expect(readFileSync(join(prefix, "current", "VERSION"), "utf8")).toBe("1.2.4\n");
+  });
+
+  it("treats equivalent prefix spellings as the same install", async () => {
+    const platform = currentPlatform();
+    if (platform === null) return;
+    const fixture = await makeFixture(platform);
+    const home = tempDir("first-tree-home-");
+    const prefix = join(home, "prefix");
+    const binDir = join(home, "bin");
+    const env = {
+      ...process.env,
+      HOME: home,
+      FIRST_TREE_PORTABLE_CHANNEL: "prod",
+      FIRST_TREE_PORTABLE_DOWNLOAD_BASE_URL: `file://${fixture}`,
+    };
+
+    const first = spawnSync(
+      "sh",
+      [join(REPO_ROOT, "scripts", "portable", "install.sh"), "--prefix", prefix, "--bin-dir", binDir, "--no-path-edit"],
+      { cwd: REPO_ROOT, env, encoding: "utf8" },
+    );
+    expect(first.status, first.stderr || first.stdout).toBe(0);
+
+    // A trailing slash names the same directory. The shim written by the first
+    // run records the normalized root, so the ownership guard, the fast path and
+    // the shim write must all normalize before they compare.
+    const second = spawnSync(
+      "sh",
+      [
+        join(REPO_ROOT, "scripts", "portable", "install.sh"),
+        "--prefix",
+        `${prefix}/`,
+        "--bin-dir",
+        `${binDir}/`,
+        "--no-path-edit",
+      ],
+      { cwd: REPO_ROOT, env, encoding: "utf8" },
+    );
+    expect(second.status, second.stderr || second.stdout).toBe(0);
+    expect(second.stdout).toContain("is already installed");
+  });
+
   it("skips the payload download when the installed version is already current", async () => {
     const platform = currentPlatform();
     if (platform === null) return;
@@ -1299,7 +1423,9 @@ if (args[0] === "--version") {
     expect(secondInstall.status, secondInstall.stderr || secondInstall.stdout).toBe(0);
     expect(readFileSync(join(prefix, "current", "VERSION"), "utf8")).toBe("1.2.4\n");
     expect(readdirSync(join(prefix, "versions", "1.2.3")).filter((entry) => entry.startsWith(".current."))).toEqual([]);
-  });
+    // Same two-install cost as the neighbouring shell-installer cases; the
+    // default 5 s budget is not enough when the package suites run in parallel.
+  }, 45_000);
 
   it("keeps the old current when the candidate runtime smoke check fails", async () => {
     const platform = currentPlatform();
