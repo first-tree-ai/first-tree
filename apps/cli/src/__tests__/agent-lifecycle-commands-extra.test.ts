@@ -174,6 +174,12 @@ describe("agent lifecycle CLI commands", () => {
     expect(coreMocks.removeLocalAgent).toHaveBeenCalledWith("old");
   });
 
+  it("rejects an agent name that would delete files outside the state roots", async () => {
+    await expect(runAgent(["remove", "../../outside"])).rejects.toMatchObject({ code: "INVALID_AGENT_NAME" });
+    expect(coreMocks.removeLocalAgent).not.toHaveBeenCalled();
+    expect(coreMocks.localContextDataLossForAgent).not.toHaveBeenCalled();
+  });
+
   it("adds an existing agent, handles missing prompt args, and reports prompt cancellation", async () => {
     await runAgent(["add", "--agent-id", "agent-1"]);
 

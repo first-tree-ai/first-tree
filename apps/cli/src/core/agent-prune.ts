@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
+import { AGENT_NAME_REGEX } from "@first-tree/shared";
 import { defaultConfigDir, defaultDataDir } from "@first-tree/shared/config";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
@@ -140,9 +141,27 @@ export function formatStaleReason(reason: StaleAliasReason): string {
  * tree under `data/workspaces/<name>`, and the session-mapping file under
  * `data/sessions/<name>.json`. Mirrors what `agent remove` does, exposed
  * separately so prune and the post-rotation override cleanup can share it.
+ *
+ * SEC-030: the name ends up in three recursive deletions, so it is validated
+ * against the canonical schema and each resolved target must still sit inside
+ * its state root. Without both checks a traversal name (`../../x`) deletes
+ * writable files outside First Tree state.
  */
 export function removeLocalAgent(name: string): void {
-  rmSync(join(defaultConfigDir(), "agents", name), { recursive: true, force: true });
-  rmSync(join(defaultDataDir(), "workspaces", name), { recursive: true, force: true });
-  rmSync(join(defaultDataDir(), "sessions", `${name}.json`), { force: true });
+  if (!AGENT_NAME_REGEX.test(name)) {
+    throw new Error(`Refusing to remove local agent "${name}": not a canonical agent name.`);
+  }
+  removeWithinStateRoot(defaultConfigDir(), join("agents", name));
+  removeWithinStateRoot(defaultDataDir(), join("workspaces", name));
+  removeWithinStateRoot(defaultDataDir(), join("sessions", `${name}.json`));
+}
+
+/** Delete `relative` under `root`, refusing anything that resolves outside it. */
+function removeWithinStateRoot(root: string, relative: string): void {
+  const resolvedRoot = resolve(root);
+  const target = resolve(resolvedRoot, relative);
+  if (target === resolvedRoot || !target.startsWith(`${resolvedRoot}${sep}`)) {
+    throw new Error(`Refusing to delete ${target}: it is outside ${resolvedRoot}.`);
+  }
+  rmSync(target, { recursive: true, force: true });
 }
