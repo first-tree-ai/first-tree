@@ -1,3 +1,5 @@
+import { curlInstallerProtocolFlags } from "./url-policy.js";
+
 const SAFE_SHELL_ARG_PATTERN = /^[A-Za-z0-9_@%+=:,./-]+$/;
 
 export const CONNECT_BOOTSTRAP_CODE_PLACEHOLDER = "FIRST_TREE_CONNECT_CODE_PLACEHOLDER";
@@ -71,7 +73,10 @@ export function buildPortableBootstrapCommand(options: {
     defaultServerUrl: options.defaultServerUrl,
   });
 
-  return [`curl -fsSL ${installerUrl} | ${installerEnv}sh`, loginCommand].join("\n");
+  return [
+    `curl -fsSL ${curlInstallerProtocolFlags(options.installerUrl)} ${installerUrl} | ${installerEnv}sh`,
+    loginCommand,
+  ].join("\n");
 }
 
 export function materializeConnectBootstrapCommand(template: ConnectBootstrapCommandTemplate, code: string): string {

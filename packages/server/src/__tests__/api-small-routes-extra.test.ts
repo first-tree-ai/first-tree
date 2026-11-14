@@ -510,7 +510,7 @@ describe("small API route handlers", () => {
     expect(result.token).toBe(token);
     expect(result.command).toBe("first-tree login 'code'\\''$(id);x'");
     expect(result.bootstrapCommand).toBe(
-      `curl -fsSL https://download.first-tree.ai/releases/prod/install.sh | sh\n` +
+      `curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/prod/install.sh | sh\n` +
         `~/.local/bin/first-tree login 'code'\\''$(id);x'`,
     );
     expect(result.installerUrl).toBe("https://download.first-tree.ai/releases/prod/install.sh");

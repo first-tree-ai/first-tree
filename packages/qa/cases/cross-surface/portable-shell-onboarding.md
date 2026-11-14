@@ -17,11 +17,11 @@ Run both hosted channels. The expected commands, with the minted connect code su
 
 ```sh
 # Production
-curl -fsSL https://download.first-tree.ai/releases/prod/install.sh | sh
+curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/prod/install.sh | sh
 ~/.local/bin/first-tree login <connect-code>
 
 # Staging
-curl -fsSL https://download.first-tree.ai/releases/staging/install.sh | sh
+curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/staging/install.sh | sh
 ~/.local/bin/first-tree-staging login <connect-code>
 ```
 

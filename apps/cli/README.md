@@ -5,7 +5,7 @@ First Tree is the unified CLI for Context Tree onboarding, agent management, and
 Install the production CLI (macOS or Linux):
 
 ```bash
-curl -fsSL https://download.first-tree.ai/releases/prod/install.sh | sh
+curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/prod/install.sh | sh
 ```
 
 After the installer completes successfully, connect this computer with a short
@@ -20,7 +20,7 @@ The binary is `first-tree`; the short alias `ft` is installed with it.
 For staging, use the staging installer and binary:
 
 ```bash
-curl -fsSL https://download.first-tree.ai/releases/staging/install.sh | sh
+curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/staging/install.sh | sh
 ```
 
 After the installer completes successfully, connect with the staging binary:

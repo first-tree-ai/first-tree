@@ -32,7 +32,7 @@ Your agent runs on a real machine, so the next step links one to your team.
 Copy the command the page shows and run it in a terminal on that machine:
 
 ```bash
-curl -fsSL https://download.first-tree.ai/releases/prod/install.sh | sh
+curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/prod/install.sh | sh
 ~/.local/bin/first-tree login <connect-code>
 ```
 

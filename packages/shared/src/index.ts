@@ -1788,3 +1788,9 @@ export {
   type ShellIoUnsupportedReason,
   stripShellCommandDisplayWrapper,
 } from "./shell-command-io.js";
+export {
+  curlInstallerProtocolFlags,
+  installerUrlMessage,
+  isTrustedInstallerUrl,
+  trustedInstallerUrlSchema,
+} from "./url-policy.js";
