@@ -919,6 +919,46 @@ exec "$root/node/bin/node" "$root/app/cli/index.mjs" "$@"
     expect(readFileSync(join(prefix, "current", "VERSION"), "utf8")).toBe("1.2.4\n");
   });
 
+  it("treats equivalent prefix spellings as the same install", async () => {
+    const platform = currentPlatform();
+    if (platform === null) return;
+    const fixture = await makeFixture(platform);
+    const home = tempDir("first-tree-home-");
+    const prefix = join(home, "prefix");
+    const binDir = join(home, "bin");
+    const env = {
+      ...process.env,
+      HOME: home,
+      FIRST_TREE_PORTABLE_CHANNEL: "prod",
+      FIRST_TREE_PORTABLE_DOWNLOAD_BASE_URL: `file://${fixture}`,
+    };
+
+    const first = spawnSync(
+      "sh",
+      [join(REPO_ROOT, "scripts", "portable", "install.sh"), "--prefix", prefix, "--bin-dir", binDir, "--no-path-edit"],
+      { cwd: REPO_ROOT, env, encoding: "utf8" },
+    );
+    expect(first.status, first.stderr || first.stdout).toBe(0);
+
+    // A trailing slash names the same directory. The shim written by the first
+    // run records the normalized root, so the ownership guard, the fast path and
+    // the shim write must all normalize before they compare.
+    const second = spawnSync(
+      "sh",
+      [
+        join(REPO_ROOT, "scripts", "portable", "install.sh"),
+        "--prefix",
+        `${prefix}/`,
+        "--bin-dir",
+        `${binDir}/`,
+        "--no-path-edit",
+      ],
+      { cwd: REPO_ROOT, env, encoding: "utf8" },
+    );
+    expect(second.status, second.stderr || second.stdout).toBe(0);
+    expect(second.stdout).toContain("is already installed");
+  });
+
   it("skips the payload download when the installed version is already current", async () => {
     const platform = currentPlatform();
     if (platform === null) return;

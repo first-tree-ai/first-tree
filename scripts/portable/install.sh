@@ -982,6 +982,15 @@ ui_kv "Download" "$(ui_bytes_human "$ASSET_SIZE")"
 ui_kv "SHA-256" "$(ui_sha_short "$ASSET_SHA")"
 ui_ok "Resolved $BIN_NAME $VERSION for $PLATFORM"
 
+# Normalize the two user-supplied directories exactly once, before anything
+# compares or writes a path. `pwd -L` strips trailing slashes and dot segments
+# without resolving a caller-selected symlink prefix, matching Node's
+# path.resolve. The fast path, the shim-ownership guard and the shim write all
+# read these values, so they must not disagree about the same directory.
+mkdir -p "$PREFIX" "$BIN_DIR"
+PREFIX="$(CDPATH= cd -L "$PREFIX" && pwd -L)"
+BIN_DIR="$(CDPATH= cd -L "$BIN_DIR" && pwd -L)"
+
 # Re-running the installer on an up-to-date machine is the documented
 # install-or-upgrade path, so it must not fetch the payload (tens of MB with the
 # bundled Node runtime) only to discard it. Skip only when every moving part is
@@ -1011,12 +1020,7 @@ assert_shim_ownership "$BIN_DIR/$BIN_NAME"
 assert_shim_ownership "$BIN_DIR/$ALIAS_NAME"
 
 clean_npm_temp_residue "$PACKAGE_NAME"
-mkdir -p "$PREFIX/versions" "$PREFIX/.tmp" "$BIN_DIR"
-# Store one lexical absolute-path contract in shims and metadata consumers.
-# `pwd -L` removes trailing slashes and dot segments without resolving a
-# caller-selected symlink prefix, matching Node's path.resolve semantics.
-PREFIX="$(CDPATH= cd -L "$PREFIX" && pwd -L)"
-BIN_DIR="$(CDPATH= cd -L "$BIN_DIR" && pwd -L)"
+mkdir -p "$PREFIX/versions" "$PREFIX/.tmp"
 TARBALL="$WORK_DIR/payload.tar.gz"
 
 ui_step "Downloading payload"
