@@ -774,6 +774,34 @@ shim_installed_for_prefix() {
   grep -qF "root=$(shell_single_quote "$PREFIX/current")" "$shim" 2>/dev/null
 }
 
+# Ownership test for a path we are about to replace. Accepts every shape this
+# installer has ever written for THIS prefix — the current single-quoted form and
+# the pre-bin-dir double-quoted form — so an existing user can still upgrade.
+shim_belongs_to_prefix() {
+  shim="$1"
+  [ -f "$shim" ] || return 1
+  grep -q "FIRST_TREE_INSTALL_MODE=portable" "$shim" 2>/dev/null || return 1
+  grep -q "FIRST_TREE_PORTABLE_ROOT" "$shim" 2>/dev/null || return 1
+  if grep -qF "root=$(shell_single_quote "$PREFIX/current")" "$shim" 2>/dev/null; then
+    return 0
+  fi
+  legacy_root="$(printf '%s' "$PREFIX/current" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+  grep -qF "root=\"$legacy_root\"" "$shim" 2>/dev/null
+}
+
+# The bin directory is user-supplied, and the alias (`ft`) is a generic name that
+# another tool may already own. Overwriting it would replace an executable this
+# install does not manage (SEC-057), so refuse before touching the filesystem and
+# name both ways out.
+assert_shim_ownership() {
+  shim_path="$1"
+  if [ -e "$shim_path" ] || [ -L "$shim_path" ]; then
+    if ! shim_belongs_to_prefix "$shim_path"; then
+      die "refusing to overwrite $shim_path: it exists but is not a First Tree shim for $PREFIX/current. Move it aside, or install the shims into another directory with --bin-dir."
+    fi
+  fi
+}
+
 # Shared tail for both the fresh install and the already-installed fast path:
 # wire PATH + the background service, then print the summary. Keeping one copy
 # means the two paths cannot drift on the lines the install tests assert.
@@ -975,6 +1003,12 @@ fi
 case "$INSTALLED_VERSION" in
   local.*) ui_warn "Replacing local build $INSTALLED_VERSION with released $VERSION" ;;
 esac
+
+# Fail before downloading anything when either shim slot holds a file we do not
+# own. Both slots are checked up front so a refusal never leaves one shim
+# rewritten and the other untouched.
+assert_shim_ownership "$BIN_DIR/$BIN_NAME"
+assert_shim_ownership "$BIN_DIR/$ALIAS_NAME"
 
 clean_npm_temp_residue "$PACKAGE_NAME"
 mkdir -p "$PREFIX/versions" "$PREFIX/.tmp" "$BIN_DIR"

@@ -482,6 +482,94 @@ describe("installPortableSpec", () => {
     expect(readFileSync(oldSentinel, "utf8")).toBe("immutable-old-version\n");
   });
 
+  it("refuses to overwrite an alias shim another tool owns", async () => {
+    const platform = currentPlatform();
+    if (platform === null) return;
+    const fixture = await makePortableFixture();
+    const home = tempDir("ft-portable-home-");
+    const prefix = join(home, "prefix");
+    const binDir = join(home, "bin");
+    await seedOldInstall(prefix, { binDir });
+    // `ft` is a generic name; the updater must not replace a file it does not
+    // manage (SEC-057).
+    const foreignAlias = join(binDir, "ft");
+    const foreignBody = "#!/bin/sh\necho someone-elses-tool\n";
+    writeFileSync(foreignAlias, foreignBody, { mode: 0o755 });
+    vi.stubEnv("FIRST_TREE_PORTABLE_ROOT", join(prefix, "current"));
+    vi.stubEnv("FIRST_TREE_PORTABLE_DOWNLOAD_BASE_URL", `file://${fixture.root}`);
+    vi.stubEnv("HOME", home);
+    vi.stubEnv("PATH", sanitizedHostPath());
+
+    const { installPortableSpec } = await importProdUpdateModule();
+    const result = await installPortableSpec("latest");
+
+    expect(result).toMatchObject({ ok: false, mode: "portable" });
+    expect(JSON.stringify(result)).toContain(foreignAlias);
+    expect(JSON.stringify(result)).toContain("FIRST_TREE_PORTABLE_BIN_DIR");
+    expect(readFileSync(foreignAlias, "utf8")).toBe(foreignBody);
+    // Refusing happens before the commit point, so `current` still names the
+    // working old version.
+    expect(readFileSync(join(prefix, "current", "VERSION"), "utf8")).toBe("old\n");
+  });
+
+  it("upgrades legacy shims that already point at this prefix", async () => {
+    const platform = currentPlatform();
+    if (platform === null) return;
+    const fixture = await makePortableFixture();
+    const home = tempDir("ft-portable-home-");
+    const prefix = join(home, "prefix");
+    const binDir = join(home, ".local", "bin");
+    await mkdir(join(prefix, "versions", "old"), { recursive: true });
+    await writeFile(join(prefix, "versions", "old", "VERSION"), "old\n");
+    await writeFile(
+      join(prefix, "versions", "old", "INSTALL.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        channel: "prod",
+        version: "0.1.0",
+        gitSha: "old",
+        nodeVersion: "v24.0.0",
+        packageName: "first-tree",
+        binName: "first-tree",
+        aliasName: "ft",
+        generatedAt: new Date().toISOString(),
+        platform,
+        installMode: "portable",
+        appEntry: "app/cli/index.mjs",
+      }),
+    );
+    await symlink(join(prefix, "versions", "old"), join(prefix, "current"));
+    // Pre-bin-dir shims: the root is double-quoted and no bin directory is
+    // exported. They still belong to this install, so the ownership gate must
+    // accept them or an existing user could never upgrade again.
+    mkdirSync(binDir, { recursive: true });
+    const legacyShim = `#!/bin/sh
+set -eu
+root="${join(prefix, "current")}"
+export FIRST_TREE_INSTALL_MODE=portable
+export FIRST_TREE_PORTABLE_ROOT="$root"
+exec "$root/node/bin/node" "$root/app/cli/index.mjs" "$@"
+`;
+    for (const name of ["first-tree", "ft"]) {
+      writeFileSync(join(binDir, name), legacyShim, { mode: 0o755 });
+    }
+    vi.stubEnv("FIRST_TREE_PORTABLE_ROOT", join(prefix, "current"));
+    vi.stubEnv("FIRST_TREE_PORTABLE_BIN_DIR", "");
+    vi.stubEnv("FIRST_TREE_PORTABLE_DOWNLOAD_BASE_URL", `file://${fixture.root}`);
+    vi.stubEnv("HOME", home);
+    vi.stubEnv("PATH", sanitizedHostPath());
+
+    const { installPortableSpec } = await importProdUpdateModule();
+    await expect(installPortableSpec("latest")).resolves.toEqual({
+      ok: true,
+      mode: "portable",
+      installedVersion: "1.2.3",
+    });
+    expect(readFileSync(join(binDir, "first-tree"), "utf8")).toContain("FIRST_TREE_PORTABLE_BIN_DIR");
+    expect(readFileSync(join(binDir, "ft"), "utf8")).toContain("FIRST_TREE_PORTABLE_BIN_DIR");
+    expect(readFileSync(join(prefix, "current", "VERSION"), "utf8")).toBe("1.2.3\n");
+  });
+
   it("downloads portable payloads over HTTP and writes fallback shims when PATH has no existing shim", async () => {
     const platform = currentPlatform();
     if (platform === null) return;

@@ -24,6 +24,7 @@ import { cliFetch } from "./cli-fetch.js";
 import { resolveNpmInvocation } from "./npm-invocation.js";
 import { print } from "./output.js";
 import {
+  assertReplaceableShimSlot,
   hasPortableInstallSignal,
   type PortableInstallContext,
   portableShimContents,
@@ -551,10 +552,11 @@ async function writePortableShim(path: string, root: string, binDir: string): Pr
 }
 
 async function rewritePortableShims(context: PortableInstallContext): Promise<void> {
-  const binNames = [channelConfig.binName, channelConfig.aliasName];
-  await Promise.all(
-    binNames.map((name) => writePortableShim(join(context.binDir, name), context.root, context.binDir)),
-  );
+  const shimPaths = [channelConfig.binName, channelConfig.aliasName].map((name) => join(context.binDir, name));
+  // Check every slot before writing any of them: a refusal must not leave one
+  // shim rewritten and the other still foreign.
+  for (const path of shimPaths) assertReplaceableShimSlot(path, context.root, context.binDir);
+  await Promise.all(shimPaths.map((path) => writePortableShim(path, context.root, context.binDir)));
 }
 
 function portableInstallFailure(err: unknown, reasonCode = "portable_update_failed"): ExecuteUpdateResult {
