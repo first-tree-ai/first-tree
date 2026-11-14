@@ -15,8 +15,9 @@ import {
   resolveCliInstall,
   runCapture,
   runCaptureOut,
-  shellQuote,
+  systemdExecQuote,
   systemdPathEnv,
+  systemdValueQuote,
 } from "./shared.js";
 import type { ResolvedBinary, ServiceInfo, ServiceOpResult, ServiceState, SupervisorBackend } from "./types.js";
 
@@ -90,8 +91,8 @@ export function renderSystemdUnit(
 ): string {
   const execStart: string =
     invocation.kind === "bin"
-      ? `${shellQuote(invocation.program)} daemon start --no-interactive`
-      : `${shellQuote(invocation.program)} ${invocation.args.map(shellQuote).join(" ")} daemon start --no-interactive`;
+      ? `${systemdExecQuote(invocation.program)} daemon start --no-interactive`
+      : `${systemdExecQuote(invocation.program)} ${invocation.args.map(systemdExecQuote).join(" ")} daemon start --no-interactive`;
 
   // Always pin FIRST_TREE_HOME into the unit. Without this line, systemd's
   // launched process inherits only the user manager's env — FIRST_TREE_HOME
@@ -99,11 +100,12 @@ export function renderSystemdUnit(
   // identical to what the operator wants, but ANY env override (one-off
   // `FIRST_TREE_HOME=/tmp/foo` test) silently disappears when the unit
   // gets installed. Embedding the resolved home eliminates that drift.
-  const homeEnv = `Environment=FIRST_TREE_HOME=${shellQuote(defaultHome())}\n`;
+  // Each directive carries the whole `KEY=value` as one quoted item.
+  const homeEnv = `Environment=${systemdValueQuote(`FIRST_TREE_HOME=${defaultHome()}`)}\n`;
   // `systemd --user` does not inherit the operator's interactive shell PATH.
   // Put this CLI's Node directory first so npm/nvm-installed shebangs and
   // self-update use the same Node toolchain when supervised.
-  const pathEnv = `Environment=PATH=${shellQuote(servicePath)}\n`;
+  const pathEnv = `Environment=${systemdValueQuote(`PATH=${servicePath}`)}\n`;
   const wantedBy = scope === "system" ? "multi-user.target" : "default.target";
 
   // Restart policy split:

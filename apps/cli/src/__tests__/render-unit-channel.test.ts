@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { defaultHome } from "@first-tree/shared/config";
@@ -16,6 +16,7 @@ import {
   windowsSupervisorLogPath,
   windowsSupervisorWrapperLogPath,
 } from "../core/service-install.js";
+import { systemdExecQuote, systemdValueQuote } from "../core/supervisor/shared.js";
 
 /**
  * Lock the channel → unit-file contract at the unit-template layer.
@@ -35,8 +36,7 @@ import {
  * `launchdLabel` references with hardcoded strings (or reintroduces a
  * home-basename derivation), this test catches it.
  */
-const FAKE_BIN_INVOCATION = { kind: "bin", program: "/usr/local/bin/first-tree-dev" } as const;
-// The launchd plist points at the launcher script, not the CLI directly.
+const FAKE_BIN_INVOCATION = { kind: "bin", program: "/usr/local/bin/first-tree-dev" } as const; // The launchd plist points at the launcher script, not the CLI directly.
 // Mirror `launchdWrapperPath()`: <home>/service/<display name>. The display
 // name is what macOS shows in the background-items list.
 const FAKE_WRAPPER_PATH = join(defaultHome(), "service", channelConfig.displayName);
@@ -76,7 +76,7 @@ describe("renderSystemdUnit — channel identity baked into unit text", () => {
     // overrides — see service-install.ts docblock about respecting
     // ad-hoc overrides). Assert the literal env line is present with
     // a path matching the current process's resolved home.
-    expect(unit).toContain(`Environment=FIRST_TREE_HOME=${defaultHome()}`);
+    expect(unit).toContain(`Environment="FIRST_TREE_HOME=${defaultHome()}"`);
   });
 
   it("does NOT reference the pre-multi-env hardcoded `first-tree-client` identifier", () => {
@@ -86,11 +86,11 @@ describe("renderSystemdUnit — channel identity baked into unit text", () => {
   });
 
   it("embeds the CLI program path in ExecStart", () => {
-    expect(unit).toMatch(/ExecStart=\/usr\/local\/bin\/first-tree-dev daemon start --no-interactive/);
+    expect(unit).toMatch(/ExecStart="\/usr\/local\/bin\/first-tree-dev" daemon start --no-interactive/);
   });
 
   it("includes the current Node binary directory in PATH", () => {
-    const pathLine = unit.split("\n").find((line) => line.startsWith("Environment=PATH="));
+    const pathLine = unit.split("\n").find((line) => line.startsWith('Environment="PATH='));
     expect(pathLine).toBeDefined();
     expect(pathLine).toContain(dirname(process.execPath));
   });
@@ -173,6 +173,28 @@ describe("renderLaunchdWrapper — launcher script supervises the resolved CLI",
     });
     expect(wrapper).toContain("/usr/bin/node /opt/first-tree/dist/cli/index.mjs daemon start --no-interactive");
   });
+
+  it.skipIf(process.platform === "win32")(
+    "does not execute command substitution baked into the resolved CLI path",
+    () => {
+      const dir = mkdtempSync(join(tmpdir(), "first-tree-launchd-quote-"));
+      const marker = join(dir, "pwned");
+      const wrapperPath = join(dir, "wrapper");
+      try {
+        // SEC-028: a path carrying `$(...)` must stay inert text in the
+        // launcher. Double quotes plus backslash escaping are not enough.
+        writeFileSync(wrapperPath, renderLaunchdWrapper({ kind: "bin", program: `$(touch ${marker})` }), {
+          mode: 0o755,
+        });
+        // The wrapper restarts on every failure; one iteration is enough for a
+        // substitution that was left unescaped to run.
+        spawnSync("/bin/sh", [wrapperPath], { timeout: 1500, encoding: "utf8" });
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it.skipIf(process.platform === "win32")(
     "reloads an atomically replaced wrapper after exit 75 without waiting for launchd to respawn it",
@@ -273,5 +295,83 @@ describe("renderWindowsSupervisorCmd — wrapper enters the hidden supervisor co
     expect(wrapper).toContain(`>>"${windowsSupervisorWrapperLogPath()}" 2>&1`);
     expect(wrapper).not.toContain(`>>"${windowsSupervisorLogPath()}"`);
     expect(wrapper).toContain(" 2>&1");
+  });
+});
+
+/**
+ * SEC-028 follow-up: the launchd wrapper is `/bin/sh`, the systemd unit is parsed
+ * by systemd itself. They need different serializers — POSIX single quotes for
+ * the former, C-style escapes inside one quoted item for the latter. These tests
+ * round-trip awkward paths through a decoder written to systemd's documented
+ * rules, so a serializer that silently mangles a path fails here.
+ */
+describe("systemd unit quoting", () => {
+  function systemdUnquote(item: string, options: { expandable: boolean }): string {
+    if (!(item.startsWith('"') && item.endsWith('"'))) throw new Error(`expected one quoted item, got ${item}`);
+    const body = item.slice(1, -1);
+    let out = "";
+    for (let i = 0; i < body.length; i += 1) {
+      const char = body[i];
+      if (char === "\\") {
+        const next = body[i + 1];
+        i += 1;
+        out += next === "n" ? "\n" : next === "t" ? "\t" : next === "r" ? "\r" : next;
+        continue;
+      }
+      if (char === "$" && options.expandable && body[i + 1] === "$") {
+        out += "$";
+        i += 1;
+        continue;
+      }
+      if (char === "%" && body[i + 1] === "%") {
+        out += "%";
+        i += 1;
+        continue;
+      }
+      out += char;
+    }
+    return out;
+  }
+
+  const AWKWARD = [
+    "/Users/Me/First Tree/bin/first-tree",
+    "/opt/O'Brien tools/cli",
+    "C:\\tools\\node\\node.exe",
+    "/srv/100% ready/bin",
+    "/tmp/$HOME/bin",
+    '/tmp/he said "hi"/bin',
+    "/srv/line\nbreak/bin",
+    "/srv/tab\there/bin",
+  ];
+
+  it("round-trips ExecStart arguments", () => {
+    for (const value of AWKWARD) {
+      expect(systemdUnquote(systemdExecQuote(value), { expandable: true })).toBe(value);
+    }
+  });
+
+  it("round-trips full Environment assignments as one item", () => {
+    for (const value of AWKWARD) {
+      const item = systemdValueQuote(`FIRST_TREE_HOME=${value}`);
+      expect(item.startsWith('"')).toBe(true);
+      expect(systemdUnquote(item, { expandable: false })).toBe(`FIRST_TREE_HOME=${value}`);
+    }
+  });
+
+  it("does not leave a bare dollar or specifier for systemd to expand", () => {
+    expect(systemdExecQuote("/tmp/$HOME/bin")).not.toMatch(/(?<!\$)\$HOME/u);
+    expect(systemdExecQuote("/srv/100%/bin")).toContain("%%");
+    expect(systemdValueQuote("PATH=/srv/100%")).toContain("%%");
+  });
+
+  it("renders the unit with one quoted item per argument and assignment", () => {
+    const unit = renderSystemdUnit(
+      { kind: "bin", program: "/usr/local/bin/first tree" },
+      "user",
+      "/opt/node/bin:/usr/bin",
+    );
+    expect(unit).toContain('ExecStart="/usr/local/bin/first tree" daemon start --no-interactive');
+    expect(unit).toContain(`Environment="FIRST_TREE_HOME=${defaultHome()}"`);
+    expect(unit).toContain('Environment="PATH=/opt/node/bin:/usr/bin"');
   });
 });
