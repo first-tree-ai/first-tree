@@ -137,7 +137,7 @@ At the "connect a computer" step, setup gives you the channel-aware commands
 to install the CLI and link the machine. Hosted production uses:
 
 ```bash
-curl -fsSL https://download.first-tree.ai/releases/prod/install.sh | sh
+curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/prod/install.sh | sh
 ~/.local/bin/first-tree login <connect-code>
 ```
 

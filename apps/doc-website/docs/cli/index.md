@@ -6,14 +6,14 @@ the computer in with a connect code from the First Tree web console.
 ## Production
 
 ```bash
-curl -fsSL https://download.first-tree.ai/releases/prod/install.sh | sh
+curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/prod/install.sh | sh
 ~/.local/bin/first-tree login <connect-code>
 ```
 
 ## Staging
 
 ```bash
-curl -fsSL https://download.first-tree.ai/releases/staging/install.sh | sh
+curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/staging/install.sh | sh
 ~/.local/bin/first-tree-staging login <connect-code>
 ```
 
@@ -39,7 +39,7 @@ on a terminal as well.
 Flags go after `--` when piping:
 
 ```bash
-curl -fsSL https://download.first-tree.ai/releases/prod/install.sh | sh -s -- --quiet
+curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/prod/install.sh | sh -s -- --quiet
 ```
 
 `--quiet` prints only errors and the final summary, and `--no-banner` drops the

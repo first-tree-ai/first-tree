@@ -25,7 +25,7 @@ describe("connect bootstrap commands", () => {
         defaultServerUrl: "https://dev.cloud.first-tree.ai",
       }),
     ).toBe(
-      "curl -fsSL https://download.first-tree.ai/releases/staging/install.sh | sh\n" +
+      "curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/staging/install.sh | sh\n" +
         "~/.local/bin/first-tree-staging login FT-CODE",
     );
   });
@@ -42,7 +42,7 @@ describe("connect bootstrap commands", () => {
         defaultServerUrl: "https://dev.cloud.first-tree.ai",
       }),
     ).toBe(
-      "curl -fsSL 'https://downloads.example.test/releases/$(id)/staging/install.sh' | " +
+      "curl -fsSL --proto '=https' --proto-redir '=https' 'https://downloads.example.test/releases/$(id)/staging/install.sh' | " +
         "FIRST_TREE_PORTABLE_DOWNLOAD_BASE_URL='https://downloads.example.test/releases/$(id)' sh\n" +
         "FIRST_TREE_SERVER_URL='https://preview.example.test' ~/.local/bin/first-tree-staging login FT-CODE",
     );
@@ -80,7 +80,7 @@ describe("connect bootstrap commands", () => {
         defaultServerUrl: "https://dev.cloud.first-tree.ai",
       }),
     ).toBe(
-      "curl -fsSL https://download.first-tree.ai/releases/staging/install.sh | sh\n" +
+      "curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/staging/install.sh | sh\n" +
         "~/.local/bin/first-tree-staging login FT-CODE",
     );
   });

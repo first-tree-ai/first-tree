@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isTrustedInstallerUrl, trustedInstallerUrlSchema } from "../url-policy.js";
+import { curlInstallerProtocolFlags, isTrustedInstallerUrl, trustedInstallerUrlSchema } from "../url-policy.js";
 
 /**
  * SEC-025 (#1631): the portable installer URL is rendered into a
@@ -31,5 +31,19 @@ describe("isTrustedInstallerUrl", () => {
       "https://downloads.example.test/prod/install.sh",
     );
     expect(() => trustedInstallerUrlSchema.parse("http://downloads.example.test/prod/install.sh")).toThrow(/https/iu);
+  });
+});
+
+describe("curlInstallerProtocolFlags", () => {
+  it("pins https starts and every redirect hop to https", () => {
+    expect(curlInstallerProtocolFlags("https://downloads.example.test/prod/install.sh")).toBe(
+      "--proto '=https' --proto-redir '=https'",
+    );
+  });
+
+  it("keeps the loopback http development path working", () => {
+    expect(curlInstallerProtocolFlags("http://127.0.0.1:8000/prod/install.sh")).toBe(
+      "--proto '=http,https' --proto-redir '=http,https'",
+    );
   });
 });

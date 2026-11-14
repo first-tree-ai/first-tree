@@ -16,8 +16,8 @@ already have.
 | Channel | Install via | Bin | Default home | Supervisor identifier |
 |---|---|---|---|---|
 | dev | `scripts/dev-install.sh` (in-tree, symlinked) | `first-tree-dev` / `ftd` | `~/.first-tree-dev/` | `first-tree-dev.service` / `\FirstTree\first-tree-dev` |
-| staging | `curl -fsSL https://download.first-tree.ai/releases/staging/install.sh \| sh` | `first-tree-staging` / `fts` | `~/.first-tree-staging/` | `first-tree-staging.service` / `\FirstTree\first-tree-staging` |
-| prod | `curl -fsSL https://download.first-tree.ai/releases/prod/install.sh \| sh` | `first-tree` / `ft` | `~/.first-tree/` | `first-tree.service` / `\FirstTree\first-tree` |
+| staging | `curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/staging/install.sh \| sh` | `first-tree-staging` / `fts` | `~/.first-tree-staging/` | `first-tree-staging.service` / `\FirstTree\first-tree-staging` |
+| prod | `curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/prod/install.sh \| sh` | `first-tree` / `ft` | `~/.first-tree/` | `first-tree.service` / `\FirstTree\first-tree` |
 
 Each install registers as a separate `clientId` on whichever server it
 connects to (dev → local server, staging → `dev.cloud.first-tree.ai`,
@@ -126,7 +126,7 @@ If you need to swap dev for staging without `git pull`, install staging
 side-by-side:
 
 ```bash
-curl -fsSL https://download.first-tree.ai/releases/staging/install.sh | sh
+curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/staging/install.sh | sh
 ```
 
 After the installer completes successfully, sign in with the staging binary:

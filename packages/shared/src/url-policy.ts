@@ -29,6 +29,19 @@ export const installerUrlMessage =
   "must use https:// (plain http is only accepted for loopback hosts such as http://127.0.0.1)";
 
 /**
+ * curl flags that make the installer download obey the same transport policy.
+ *
+ * `-fsSL` follows redirects by default, so an https URL can still land on a
+ * plaintext one. `--proto` pins the scheme of the requested URL and
+ * `--proto-redir` pins every redirect hop: https starts may only stay on https,
+ * while a loopback http start (local development) may still upgrade to https.
+ */
+export function curlInstallerProtocolFlags(installerUrl: string): string {
+  const isHttps = installerUrl.startsWith("https:");
+  return isHttps ? "--proto '=https' --proto-redir '=https'" : "--proto '=http,https' --proto-redir '=http,https'";
+}
+
+/**
  * Wire/response shape for a bootstrap installer URL. The server also enforces
  * this on its own download base URL, so a client never has to render a
  * plaintext `curl | sh` command; the refinement here keeps older or mirrored
