@@ -3,6 +3,7 @@ import { fail } from "../../cli/output.js";
 import { ensureFreshAccessToken, resolveServerUrl } from "../../core/bootstrap.js";
 import { cliFetch } from "../../core/cli-fetch.js";
 import { print } from "../../core/output.js";
+import { sanitizeTerminalText } from "../../core/terminal-safety.js";
 import { resolveAgent } from "../_shared/resolve-agent.js";
 
 export function registerChatOpenCommand(chat: Command): void {
@@ -32,7 +33,14 @@ export function registerChatOpenCommand(chat: Command): void {
         }
         const dm = (await dmRes.json()) as { id: string };
 
-        print.line(`\n  Chat with ${targetAgent.displayName ?? targetAgent.name ?? targetAgent.uuid}\n`);
+        // SEC-050: both the display name and the message bodies below are
+        // server-provided. They are written to a terminal, so control bytes are
+        // stripped before rendering; `chat history` keeps the exact JSON.
+        const headerLabel = sanitizeTerminalText(targetAgent.displayName ?? targetAgent.name ?? targetAgent.uuid);
+        // The message prefix has always fallen back to the literal "agent"
+        // rather than the uuid; keep that split so the transcript stays stable.
+        const senderLabel = sanitizeTerminalText(targetAgent.displayName ?? targetAgent.name ?? "agent");
+        print.line(`\n  Chat with ${headerLabel}\n`);
         print.line(`  Chat ID: ${dm.id}\n`);
         print.line(`  Type a message and press Enter. Ctrl+C to exit.\n\n`);
 
@@ -65,8 +73,8 @@ export function registerChatOpenCommand(chat: Command): void {
 
             for (const msg of newMessages) {
               const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
-              const preview = content.length > 500 ? `${content.slice(0, 500)}...` : content;
-              print.line(`\r  [${targetAgent.displayName ?? targetAgent.name ?? "agent"}] ${preview}\n`);
+              const preview = sanitizeTerminalText(content.length > 500 ? `${content.slice(0, 500)}...` : content);
+              print.line(`\r  [${senderLabel}] ${preview}\n`);
             }
 
             if (msgData.items.length > 0 && msgData.items[0]) {

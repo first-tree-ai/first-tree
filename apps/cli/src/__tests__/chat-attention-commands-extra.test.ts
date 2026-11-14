@@ -1165,6 +1165,53 @@ describe("chat command behavior", () => {
     expect(() => genericEmitter.emit("close")).toThrow("process.exit");
   });
 
+  it("chat open strips terminal control bytes from names and message bodies", async () => {
+    const emitter = new EventEmitter() as EventEmitter & { prompt: () => void };
+    emitter.prompt = vi.fn();
+    readlineMocks.createInterface.mockReturnValueOnce(emitter);
+    let interval: (() => void) | undefined;
+    globalThis.setInterval = vi.fn((callback: () => void) => {
+      interval = callback;
+      return 103 as unknown as NodeJS.Timeout;
+    }) as unknown as typeof setInterval;
+    globalThis.clearInterval = vi.fn() as unknown as typeof clearInterval;
+
+    // SEC-050: a participant can put ANSI/OSC bytes and a bare CR in either the
+    // agent display name or the message body; neither may reach the terminal.
+    resolveAgentMock.mockResolvedValueOnce({ uuid: "agent-evil", displayName: "\u001b]0;pwned\u0007Bot" });
+    cliFetchMock.mockResolvedValueOnce(jsonResponse({ id: "dm-evil" })).mockResolvedValueOnce(
+      jsonResponse({
+        items: [{ id: "old", senderId: "agent-evil", content: "old", createdAt: "2026-06-01T00:00:00.000Z" }],
+      }),
+    );
+
+    await runChat(["open", "evil"]);
+    cliFetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        items: [
+          {
+            id: "new",
+            senderId: "agent-evil",
+            content: "\u001b[31mred\u001b[0m safe\rFORGED",
+            createdAt: "2026-06-01T00:00:02.000Z",
+          },
+        ],
+      }),
+    );
+    interval?.();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const printed = printLineMock.mock.calls.map((call) => String(call[0])).join("");
+    expect(printed).toContain("]0;pwnedBot");
+    expect(printed).toContain("[31mred[0m safe");
+    expect(printed).toContain("safe\nFORGED");
+    // No control byte survives into the terminal stream.
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting their absence is the point
+    expect(printed).not.toMatch(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/u);
+    expect(() => emitter.emit("close")).toThrow("process.exit");
+  });
+
   it("chat open reports non-Error top-level failures", async () => {
     resolveAgentMock.mockRejectedValueOnce("agent lookup failed");
 
