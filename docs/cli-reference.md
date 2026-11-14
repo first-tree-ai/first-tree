@@ -357,6 +357,10 @@ first-tree agent config
 ├── append-prompt <agent> [-f <file>]               # deprecated alias of `prompt set`
 ├── add-mcp <agent> --name <id> --transport <t> [--command <c> --args <a>... | --url <u>]
 ├── set-env <agent> KEY=VALUE [--sensitive]
+│                                                   #   or: ... | set-env <agent> KEY --value-stdin [--sensitive]
+│                                                   #   --value-stdin keeps a secret out of shell history,
+│                                                   #   process listings, and terminal recordings; a positional
+│                                                   #   value with --sensitive still works but prints a nudge.
 ├── add-repo <agent> <url> [--ref <branch>] [--path <local>]
 └── dry-run <agent> -f <patch.json>                 # validate + diff, no persist
 ```

@@ -2,29 +2,12 @@ import { readFile, stat } from "node:fs/promises";
 import { fail } from "../../../cli/output.js";
 import { channelConfig } from "../../../core/channel.js";
 import { print } from "../../../core/output.js";
+import { MAX_STDIN_BYTES, readStdin } from "../../_shared/stdin.js";
 
-const MAX_STDIN_BYTES = 5 * 1024 * 1024;
-
-/** Buffer stdin (text only). Returns null when stdin is a TTY (no pipe). */
-export function readStdin(): Promise<string | null> {
-  if (process.stdin.isTTY) return Promise.resolve(null);
-
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let totalSize = 0;
-    process.stdin.on("data", (chunk: Buffer) => {
-      totalSize += chunk.length;
-      if (totalSize > MAX_STDIN_BYTES) {
-        process.stdin.destroy();
-        reject(new Error(`stdin exceeds ${MAX_STDIN_BYTES} bytes`));
-        return;
-      }
-      chunks.push(chunk);
-    });
-    process.stdin.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
-    process.stdin.on("error", reject);
-  });
-}
+// Stdin buffering moved to `commands/_shared/stdin.ts` when `agent config
+// set-env` started reading secrets from a pipe (SEC-052). Re-exported so the
+// chat commands and their tests keep importing it from here.
+export { MAX_STDIN_BYTES, readStdin } from "../../_shared/stdin.js";
 
 /**
  * Resolve an outbound body from a `--message-file <path>` spec. `-` reads
