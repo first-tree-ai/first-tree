@@ -128,28 +128,60 @@ export function extractProxyFromPlist(xml: string): Record<string, string> {
   return out;
 }
 
-function unquoteSystemdEnvironmentValue(raw: string): string {
-  let value = raw.trim();
-  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
-    value = value.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+/** Undo the C-style escapes `systemdValueQuote` writes, given an unquoted body. */
+function decodeSystemdBody(body: string): string {
+  let out = "";
+  for (let i = 0; i < body.length; i += 1) {
+    const char = body[i];
+    if (char === "\\") {
+      const next = body[i + 1];
+      i += 1;
+      out += next === "n" ? "\n" : next === "t" ? "\t" : next;
+      continue;
+    }
+    if (char === "%" && body[i + 1] === "%") {
+      out += "%";
+      i += 1;
+      continue;
+    }
+    out += char;
   }
-  return value;
+  return out;
+}
+
+/**
+ * Read `KEY=…` out of the unit's `Environment=` items.
+ *
+ * Two shapes exist in the wild: the current one quotes the whole assignment
+ * (`Environment="KEY=value"`, one item) and older hand-written or pre-quoting
+ * units quote only the value (`Environment=KEY="value"`). Both decode to the
+ * same value.
+ */
+function readSystemdEnvironment(text: string, key: string): string | undefined {
+  for (const line of text.split(/\r?\n/u)) {
+    const match = line.match(/^Environment=(.*)$/u);
+    if (!match) continue;
+    const raw = match[1].trim();
+    const quotesWholeItem = raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"');
+    const item = quotesWholeItem ? decodeSystemdBody(raw.slice(1, -1)) : raw;
+    if (!item.startsWith(`${key}=`)) continue;
+    const value = item.slice(key.length + 1);
+    return quotesWholeItem ? value : decodeSystemdBody(value.replace(/^"|"$/gu, ""));
+  }
+  return undefined;
 }
 
 /** Read the home pinned into a generated systemd unit. */
 export function extractFirstTreeHomeFromSystemd(text: string): string | undefined {
-  const match = text.match(/^Environment=FIRST_TREE_HOME=(.*)$/mu);
-  return match ? unquoteSystemdEnvironmentValue(match[1]) : undefined;
+  return readSystemdEnvironment(text, "FIRST_TREE_HOME");
 }
 
 /** Lift proxy env vars baked into a previous systemd unit (pre-compat units). */
 export function extractProxyFromSystemd(text: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const key of PROXY_ENV_KEYS) {
-    const match = text.match(new RegExp(`^Environment=${key}=(.*)$`, "m"));
-    if (!match) continue;
-    const value = unquoteSystemdEnvironmentValue(match[1]);
-    if (value.length > 0) out[key] = value;
+    const value = readSystemdEnvironment(text, key);
+    if (value !== undefined && value.length > 0) out[key] = value;
   }
   return out;
 }
@@ -278,6 +310,34 @@ export function shellQuote(value: string): string {
   // stay live inside them, so a path like `/tmp/$(id)` would execute when the
   // generated launcher runs (SEC-028).
   return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+/**
+ * Quote one item for a systemd unit file.
+ *
+ * This is NOT shell quoting: systemd parses unit values itself, with C-style
+ * escapes inside double quotes and one quoted item per argument. Adjacent quote
+ * segments (the POSIX way of embedding an apostrophe) are not a thing there, and
+ * a backslash written for /bin/sh would arrive as a literal backslash.
+ *
+ * `%` is doubled because systemd expands specifiers (`%h`, `%t`, …) in unit file
+ * values. `ExecStart=` additionally expands `$VAR`, so callers that render a
+ * command line pass `expandable: true` to get a literal `$` (`$$`).
+ */
+function systemdQuote(value: string, options: { expandable: boolean }): string {
+  let body = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%");
+  if (options.expandable) body = body.replace(/\$/g, "$$$$");
+  return `"${body}"`;
+}
+
+/** Quote one `ExecStart=` argument (whole item, with `$` escaped). */
+export function systemdExecQuote(value: string): string {
+  return systemdQuote(value, { expandable: true });
+}
+
+/** Quote one full `Environment=` assignment, e.g. `FIRST_TREE_HOME=/x`. */
+export function systemdValueQuote(value: string): string {
+  return systemdQuote(value, { expandable: false });
 }
 
 export function readFileOrFlagDrift(path: string, expected: string): boolean {

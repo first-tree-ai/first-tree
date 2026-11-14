@@ -236,8 +236,8 @@ describe("service install helpers", () => {
     expect(execFileSyncMock).not.toHaveBeenCalled();
 
     const unit = renderSystemdUnit(invocation);
-    expect(unit).toContain(`ExecStart=${join(binDir, channelConfig.binName)} daemon start --no-interactive`);
-    expect(unit).toContain(`Environment=PATH=${binDir}:${root}/node/bin:/usr/local/bin:/usr/bin:/bin`);
+    expect(unit).toContain(`ExecStart="${join(binDir, channelConfig.binName)}" daemon start --no-interactive`);
+    expect(unit).toContain(`Environment="PATH=${binDir}:${root}/node/bin:/usr/local/bin:/usr/bin:/bin"`);
     expect(unit).not.toContain("/versions/");
 
     const plist = renderPlist("/tmp/First Tree");
@@ -262,8 +262,8 @@ describe("service install helpers", () => {
     expect(wrapper).toContain(`'/opt/My Node/node' '/tmp/cli path/index.mjs' daemon start --no-interactive`);
 
     const unit = renderSystemdUnit({ kind: "bin", program: "/usr/local/bin/first tree" });
-    expect(unit).toContain(`ExecStart='/usr/local/bin/first tree' daemon start --no-interactive`);
-    expect(unit).toContain(`Environment=FIRST_TREE_HOME=${process.env.FIRST_TREE_HOME}`);
+    expect(unit).toContain('ExecStart="/usr/local/bin/first tree" daemon start --no-interactive');
+    expect(unit).toContain(`Environment="FIRST_TREE_HOME=${process.env.FIRST_TREE_HOME}"`);
     expect(unit).toContain("WantedBy=default.target");
     expect(unit).not.toContain("HTTPS_PROXY");
 
@@ -511,8 +511,8 @@ describe("service install helpers", () => {
       unitPath,
     });
     expect(existsSync(join(process.env.FIRST_TREE_HOME ?? "", "logs"))).toBe(true);
-    expect(unit).toContain(`${process.execPath} ${process.argv[1]} daemon start --no-interactive`);
-    expect(unit).toContain(`Environment=FIRST_TREE_HOME=${process.env.FIRST_TREE_HOME}`);
+    expect(unit).toContain(`ExecStart="${process.execPath}" "${process.argv[1]}" daemon start --no-interactive`);
+    expect(unit).toContain(`Environment="FIRST_TREE_HOME=${process.env.FIRST_TREE_HOME}"`);
     expect(spawnSyncMock.mock.calls.map((call) => [call[0], call[1]])).toEqual([
       ["systemctl", ["--user", "daemon-reload"]],
       ["loginctl", ["show-user", "gandy", "-p", "Linger", "--value"]],
@@ -545,7 +545,7 @@ describe("service install helpers", () => {
       managerScope: "system",
     });
     expect(unit).toContain("WantedBy=multi-user.target");
-    expect(unit).toContain(`Environment=FIRST_TREE_HOME=${process.env.FIRST_TREE_HOME}`);
+    expect(unit).toContain(`Environment="FIRST_TREE_HOME=${process.env.FIRST_TREE_HOME}"`);
     expect(spawnSyncMock.mock.calls.map((call) => [call[0], call[1]])).toEqual([
       ["systemctl", ["daemon-reload"]],
       ["systemctl", ["enable", "--now", channelConfig.serviceUnitFile]],
