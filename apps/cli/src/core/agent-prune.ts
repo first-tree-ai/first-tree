@@ -1,5 +1,5 @@
-import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { AGENT_NAME_REGEX } from "@first-tree/shared";
 import { defaultConfigDir, defaultDataDir } from "@first-tree/shared/config";
 import { parse as parseYaml } from "yaml";
@@ -156,12 +156,53 @@ export function removeLocalAgent(name: string): void {
   removeWithinStateRoot(defaultDataDir(), join("sessions", `${name}.json`));
 }
 
-/** Delete `relative` under `root`, refusing anything that resolves outside it. */
+/**
+ * Delete `relative` under `root`, refusing anything whose on-disk location is
+ * outside it.
+ *
+ * The lexical check alone answers "does the string escape?" — it cannot see a
+ * symlinked ancestor (`config/agents -> /elsewhere`), so the comparison runs on
+ * filesystem-resolved paths: the deepest existing ancestor of the target is
+ * realpath'd, and the not-yet-existing tail is appended to it. A missing target
+ * stays a no-op, and a symlink leaf is deleted as a link rather than followed.
+ */
 function removeWithinStateRoot(root: string, relative: string): void {
-  const resolvedRoot = resolve(root);
+  const resolvedRoot = resolveThroughExisting(root);
   const target = resolve(resolvedRoot, relative);
-  if (target === resolvedRoot || !target.startsWith(`${resolvedRoot}${sep}`)) {
-    throw new Error(`Refusing to delete ${target}: it is outside ${resolvedRoot}.`);
+  const targetParent = resolveThroughExisting(dirname(target));
+  if (targetParent !== resolvedRoot && !targetParent.startsWith(`${resolvedRoot}${sep}`)) {
+    throw new Error(`Refusing to delete ${target}: it resolves outside ${resolvedRoot}.`);
+  }
+  if (!isSymbolicLink(target)) {
+    const resolvedTarget = resolveThroughExisting(target);
+    if (resolvedTarget !== resolvedRoot && !resolvedTarget.startsWith(`${resolvedRoot}${sep}`)) {
+      throw new Error(`Refusing to delete ${target}: it resolves outside ${resolvedRoot}.`);
+    }
   }
   rmSync(target, { recursive: true, force: true });
+}
+
+/** Real path of `path`, or of its deepest existing ancestor with the rest appended. */
+function resolveThroughExisting(path: string): string {
+  let current = resolve(path);
+  const missing: string[] = [];
+  for (;;) {
+    try {
+      const real = realpathSync.native(current);
+      return missing.length === 0 ? real : resolve(real, ...missing.reverse());
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return resolve(path);
+      missing.push(basename(current));
+      current = parent;
+    }
+  }
+}
+
+function isSymbolicLink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
 }

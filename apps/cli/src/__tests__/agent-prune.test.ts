@@ -1,4 +1,13 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -205,6 +214,32 @@ describe("findStaleAliases", () => {
     expect(() => removeLocalAgent("../../outside")).toThrow(/not a canonical agent name/);
     expect(existsSync(join(outside, "keep.txt"))).toBe(true);
     expect(readFileSync(join(outside, "keep.txt"), "utf8")).toBe("keep\n");
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("refuses to delete through a state-root symlink that resolves outside", () => {
+    const home = mkdtempSync(join(tmpdir(), "fthub-prune-home-"));
+    process.env.FIRST_TREE_HOME = home;
+    // A canonical name, but the containing directory resolves elsewhere on disk.
+    // `path.resolve` alone cannot see this; the guard must realpath it.
+    const elsewhere = join(home, "elsewhere");
+    mkdirSync(join(elsewhere, "victim"), { recursive: true });
+    writeFileSync(join(elsewhere, "victim", "keep.txt"), "keep\n");
+    mkdirSync(join(home, "config"), { recursive: true });
+    symlinkSync(elsewhere, join(home, "config", "agents"));
+
+    expect(() => removeLocalAgent("victim")).toThrow(/resolves outside/);
+    expect(existsSync(join(elsewhere, "victim", "keep.txt"))).toBe(true);
+    expect(readFileSync(join(elsewhere, "victim", "keep.txt"), "utf8")).toBe("keep\n");
+    // The link itself is untouched too — nothing was attempted.
+    expect(lstatSync(join(home, "config", "agents")).isSymbolicLink()).toBe(true);
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("keeps a missing target a no-op", () => {
+    const home = mkdtempSync(join(tmpdir(), "fthub-prune-home-"));
+    process.env.FIRST_TREE_HOME = home;
+    expect(() => removeLocalAgent("never-installed")).not.toThrow();
     rmSync(home, { recursive: true, force: true });
   });
 });
