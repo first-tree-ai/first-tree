@@ -315,7 +315,7 @@ describe("systemd unit quoting", () => {
       if (char === "\\") {
         const next = body[i + 1];
         i += 1;
-        out += next === "n" ? "\n" : next === "t" ? "\t" : next;
+        out += next === "n" ? "\n" : next === "t" ? "\t" : next === "r" ? "\r" : next;
         continue;
       }
       if (char === "$" && options.expandable && body[i + 1] === "$") {
@@ -340,6 +340,8 @@ describe("systemd unit quoting", () => {
     "/srv/100% ready/bin",
     "/tmp/$HOME/bin",
     '/tmp/he said "hi"/bin',
+    "/srv/line\nbreak/bin",
+    "/srv/tab\there/bin",
   ];
 
   it("round-trips ExecStart arguments", () => {

@@ -136,7 +136,7 @@ function decodeSystemdBody(body: string): string {
     if (char === "\\") {
       const next = body[i + 1];
       i += 1;
-      out += next === "n" ? "\n" : next === "t" ? "\t" : next;
+      out += next === "n" ? "\n" : next === "t" ? "\t" : next === "r" ? "\r" : next;
       continue;
     }
     if (char === "%" && body[i + 1] === "%") {
@@ -325,7 +325,15 @@ export function shellQuote(value: string): string {
  * command line pass `expandable: true` to get a literal `$` (`$$`).
  */
 function systemdQuote(value: string, options: { expandable: boolean }): string {
-  let body = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%");
+  let body = value
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    // A literal newline/tab/CR inside a unit value would break the directive
+    // across lines; systemd reads these as C escapes.
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t")
+    .replace(/%/g, "%%");
   if (options.expandable) body = body.replace(/\$/g, "$$$$");
   return `"${body}"`;
 }
