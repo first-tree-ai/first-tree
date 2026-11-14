@@ -155,7 +155,7 @@ pnpm coverage:summary                       # 汇总覆盖率报告
 ```
 
 架构、约定、按 package 的开发流程详见 [AGENTS.md](AGENTS.md)。PR 流程详见
-[CONTRIBUTING.md](CONTRIBUTING.md)。
+[CONTRIBUTING.zh-CN.md](CONTRIBUTING.zh-CN.md)（英文 [CONTRIBUTING.md](CONTRIBUTING.md) 为准）。
 
 ## 许可证
 
