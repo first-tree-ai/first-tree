@@ -681,6 +681,21 @@ export async function meRoutes(app: FastifyInstance): Promise<void> {
    * to authoritatively map `agents.runtime_provider` and retain suspended
    * local aliases without treating them as unowned.
    */
+  /**
+   * GET /me/cron-jobs — every schedule the caller owns, across orgs, ordered
+   * by what runs next. The per-chat listing (`/chats/:chatId/cron-jobs`)
+   * answers "what runs from this chat"; a client asking "what do I have
+   * scheduled" had to fan out one request per chat to find the few that had
+   * any. Ownership is already the mutation boundary for a job, so listing by
+   * owner exposes nothing new — it returns the jobs the caller can already
+   * read and change one id at a time.
+   */
+  app.get("/me/cron-jobs", async (request) => {
+    const { userId } = requireUser(request);
+    const { listCronJobsForUser } = await import("../services/chat/scheduled-jobs/job.js");
+    return { items: await listCronJobsForUser(app.db, userId) };
+  });
+
   app.get("/me/pinned-agents", async (request) => {
     const { userId } = requireUser(request);
     const { listMyPinnedAgents } = await import("../services/runtime/client.js");
