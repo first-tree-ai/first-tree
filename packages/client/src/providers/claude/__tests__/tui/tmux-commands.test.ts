@@ -163,6 +163,42 @@ describe("tmux command helpers", () => {
     );
   });
 
+  it("masks -e values in a failed new-session diagnostic", async () => {
+    // SEC-032: `-e KEY=value` carries the agent's decrypted provider env, and
+    // this message reaches the client log.
+    installSpawnMock((record) => closeSoon(record, { code: 1, stderr: "server exited" }));
+    const { newSession } = await import("../../tui/tmux-session.js");
+
+    await expect(
+      newSession({
+        name: "ftth-secret",
+        cwd: "/repo",
+        command: "claude",
+        env: { OPENAI_API_KEY: "sk-live-do-not-log", PATH: "/usr/bin" },
+      }),
+    ).rejects.toThrow(
+      "tmux new-session -d -s ftth-secret -x 220 -y 60 -c /repo -e OPENAI_API_KEY=*** -e PATH=*** claude failed (code=1): server exited",
+    );
+
+    await expect(
+      newSession({
+        name: "ftth-secret-2",
+        cwd: "/repo",
+        command: "claude",
+        env: { OPENAI_API_KEY: "sk-live-do-not-log" },
+      }),
+    ).rejects.not.toThrow("sk-live-do-not-log");
+  });
+
+  it("keeps non-env arguments verbatim in diagnostics", async () => {
+    installSpawnMock((record) => closeSoon(record, { code: 2, stderr: "bad" }));
+    const { newSession } = await import("../../tui/tmux-session.js");
+
+    await expect(newSession({ name: "ftth-plain", cwd: "/repo", command: "claude --flag" })).rejects.toThrow(
+      "tmux new-session -d -s ftth-plain -x 220 -y 60 -c /repo claude --flag failed (code=2): bad",
+    );
+  });
+
   it("captures normal and full-scrollback panes", async () => {
     const { records } = installSpawnMock((record) => closeSoon(record, { stdout: "pane text" }));
     const { capturePane } = await import("../../tui/tmux-session.js");

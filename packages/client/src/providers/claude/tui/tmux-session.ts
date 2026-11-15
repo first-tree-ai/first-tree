@@ -43,10 +43,36 @@ function runTmux(args: string[], timeoutMs = DEFAULT_TMUX_TIMEOUT_MS): Promise<T
   });
 }
 
+/**
+ * Render tmux argv for a diagnostic with every `-e KEY=value` value masked.
+ *
+ * `new-session -e` carries the agent's resolved environment, which includes
+ * provider credentials; a failed start used to stringify the whole argv into the
+ * error message, and that message reaches the client log (SEC-032). The key stays
+ * so the diagnostic still says which variable was involved.
+ */
+export function redactTmuxArgsForLog(args: readonly string[]): string {
+  const rendered: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (arg === "-e" && index + 1 < args.length) {
+      const assignment = args[index + 1] ?? "";
+      const separator = assignment.indexOf("=");
+      rendered.push(arg, separator === -1 ? assignment : `${assignment.slice(0, separator)}=***`);
+      index += 1;
+      continue;
+    }
+    rendered.push(arg);
+  }
+  return rendered.join(" ");
+}
+
 async function tmuxOrThrow(args: string[], timeoutMs?: number): Promise<string> {
   const result = await runTmux(args, timeoutMs);
   if (!result.ok) {
-    throw new Error(`tmux ${args.join(" ")} failed (code=${result.code ?? "n/a"}): ${result.stderr.trim()}`);
+    throw new Error(
+      `tmux ${redactTmuxArgsForLog(args)} failed (code=${result.code ?? "n/a"}): ${result.stderr.trim()}`,
+    );
   }
   return result.stdout;
 }
