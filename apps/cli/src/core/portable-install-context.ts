@@ -1,4 +1,4 @@
-import { accessSync, constants, existsSync, readFileSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, readFileSync, type Stats } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { channelConfig } from "./channel.js";
@@ -61,6 +61,80 @@ function isLegacyDefaultShimForRoot(path: string, root: string): boolean {
     body.includes('export FIRST_TREE_PORTABLE_ROOT="$root"') &&
     body.includes('exec "$root/node/bin/node" "$root/app/cli/index.mjs" "$@"')
   );
+}
+
+/**
+ * True when existing shim content already targets this stable root, in any shape
+ * this repo has ever written: the current single-quoted form with an explicit bin
+ * directory, or the pre-bin-dir double-quoted form. Ownership is a property of
+ * the target, not of the shape, so an old install stays upgradable.
+ */
+function shimTargetsRoot(body: string, root: string): boolean {
+  const escapedRoot = root.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const namesRoot = body.includes(`root=${shellSingleQuote(root)}`) || body.includes(`root="${escapedRoot}"`);
+  return namesRoot && body.includes("FIRST_TREE_INSTALL_MODE=portable") && body.includes("FIRST_TREE_PORTABLE_ROOT");
+}
+
+/**
+ * Guard one shim path before it is written.
+ *
+ * The bin directory is user-supplied and the alias (`ft`) is a generic name that
+ * another tool may already own. Replacing that file would delete an executable
+ * this install does not manage (SEC-057), so anything that is not already one of
+ * our shims for `root` is refused with the two ways out spelled out.
+ */
+export function assertReplaceableShimSlot(path: string, root: string, binDir: string): void {
+  let stats: Stats;
+  try {
+    stats = lstatSync(path);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return; // Nothing at the path: safe to create.
+    // Anything else (EACCES on a parent, ELOOP, EIO) is not evidence that the
+    // slot is free, so refuse instead of overwriting something we cannot see.
+    throw new Error(
+      `Refusing to overwrite ${path}: cannot inspect it (${code ?? "unknown error"}). ` +
+        "Move it aside, or point FIRST_TREE_PORTABLE_BIN_DIR at another directory, then rerun the installer.",
+    );
+  }
+
+  // Only a regular file can be one of our shims. Reading a FIFO would block this
+  // process forever, and a symlink or directory is somebody else's entry either
+  // way — refuse on the type before any read happens.
+  if (!stats.isFile()) {
+    throw new Error(
+      `Refusing to overwrite ${path}: it exists but is ${describeFileKind(stats)}, not a regular file. ` +
+        "Move it aside, or point FIRST_TREE_PORTABLE_BIN_DIR at another directory, then rerun the installer.",
+    );
+  }
+
+  let body: string;
+  try {
+    body = readFileSync(path, "utf8");
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    throw new Error(
+      `Refusing to overwrite ${path}: it exists but cannot be read (${code ?? "unknown error"}). ` +
+        "Move it aside, or point FIRST_TREE_PORTABLE_BIN_DIR at another directory, then rerun the installer.",
+    );
+  }
+  if (body === portableShimContents(root, binDir) || shimTargetsRoot(body, root)) return;
+
+  throw new Error(
+    `Refusing to overwrite ${path}: it exists but is not a First Tree portable shim for ${root}. ` +
+      "Move it aside, or point FIRST_TREE_PORTABLE_BIN_DIR at another directory, then rerun the installer.",
+  );
+}
+
+/** Name an `lstat` entry type for the refusal message. */
+function describeFileKind(stats: Stats): string {
+  if (stats.isSymbolicLink()) return "a symbolic link";
+  if (stats.isDirectory()) return "a directory";
+  if (stats.isFIFO()) return "a named pipe";
+  if (stats.isSocket()) return "a socket";
+  if (stats.isBlockDevice()) return "a block device";
+  if (stats.isCharacterDevice()) return "a character device";
+  return "not a regular file";
 }
 
 function assertShimIdentity(path: string, root: string, binDir: string, allowLegacyDefault: boolean): void {
