@@ -2,6 +2,7 @@ import { contextTreeBranchSchema } from "@first-tree/shared";
 import type { Command } from "commander";
 import { fail, success } from "../../cli/output.js";
 import { ensureFreshAccessToken, resolveServerUrl } from "../../core/bootstrap.js";
+import { cliFetch } from "../../core/cli-fetch.js";
 import { print } from "../../core/output.js";
 
 export function registerOrgBindTreeCommand(org: Command): void {
@@ -43,7 +44,7 @@ export function registerOrgBindTreeCommand(org: Command): void {
         // to guess for users with multiple orgs and no default.
         const orgId = options.org?.trim() || (await resolveDefaultOrgId(serverUrl, accessToken));
 
-        const res = await fetch(`${serverUrl}/api/v1/orgs/${encodeURIComponent(orgId)}/settings/context_tree`, {
+        const res = await cliFetch(`${serverUrl}/api/v1/orgs/${encodeURIComponent(orgId)}/settings/context_tree`, {
           method: "PUT",
           headers: {
             Authorization: `Bearer ${accessToken}`,
@@ -70,7 +71,7 @@ export function registerOrgBindTreeCommand(org: Command): void {
 }
 
 async function resolveDefaultOrgId(serverUrl: string, accessToken: string): Promise<string> {
-  const res = await fetch(`${serverUrl}/api/v1/me`, {
+  const res = await cliFetch(`${serverUrl}/api/v1/me`, {
     headers: { Authorization: `Bearer ${accessToken}` },
     signal: AbortSignal.timeout(10_000),
   });

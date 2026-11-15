@@ -14,6 +14,7 @@ import {
 import type { Command } from "commander";
 import { ensureFreshAccessToken, resolveServerUrl } from "../../core/bootstrap.js";
 import { channelConfig } from "../../core/channel.js";
+import { cliFetch } from "../../core/cli-fetch.js";
 import {
   adoptContextTreeRemote,
   createContextTreeRemote,
@@ -26,6 +27,7 @@ import {
   ContextTreeSeedPreflightCliError,
   preflightContextTreeSeed,
 } from "../../core/context-tree-seed.js";
+import { CredentialOriginMismatchError } from "../../core/credential-origin.js";
 import { createMemberSdk } from "../_shared/member.js";
 import type { CommandContext, SubcommandModule } from "../types.js";
 import {
@@ -174,7 +176,7 @@ type BindContext = { orgId: string; isAdmin: boolean };
 // `/me` read. Binding (`settings/context_tree`) is admin-only, so knowing this
 // up front lets the command fail before it creates any remote GitHub state.
 async function resolveBindContext(serverUrl: string, accessToken: string, override?: string): Promise<BindContext> {
-  const res = await fetch(`${serverUrl}/api/v1/me`, {
+  const res = await cliFetch(`${serverUrl}/api/v1/me`, {
     headers: { Authorization: `Bearer ${accessToken}` },
     signal: AbortSignal.timeout(10_000),
   });
@@ -234,11 +236,14 @@ type InstallationLookup = { kind: "ok"; data: InstallationInfo } | { kind: "none
 async function fetchInstallation(serverUrl: string, accessToken: string, orgId: string): Promise<InstallationLookup> {
   let res: Response;
   try {
-    res = await fetch(`${serverUrl}/api/v1/orgs/${encodeURIComponent(orgId)}/context-tree/installation`, {
+    res = await cliFetch(`${serverUrl}/api/v1/orgs/${encodeURIComponent(orgId)}/context-tree/installation`, {
       headers: { Authorization: `Bearer ${accessToken}` },
       signal: AbortSignal.timeout(10_000),
     });
-  } catch {
+  } catch (error) {
+    // A credential-origin refusal is not a transient read failure; the caller
+    // must surface it instead of degrading to "installation unknown" (SEC-023).
+    if (error instanceof CredentialOriginMismatchError) throw error;
     return { kind: "error", status: 0 };
   }
   if (res.status === 404) {
@@ -341,14 +346,14 @@ async function readContextTreeBinding(
   accessToken: string,
   orgId: string,
 ): Promise<{ repo: string | null; branch: string; supportsConditionalFinalize: boolean }> {
-  const raw = await fetch(`${serverUrl}/api/v1/orgs/${encodeURIComponent(orgId)}/settings/context_tree/raw`, {
+  const raw = await cliFetch(`${serverUrl}/api/v1/orgs/${encodeURIComponent(orgId)}/settings/context_tree/raw`, {
     headers: { Authorization: `Bearer ${accessToken}` },
     signal: AbortSignal.timeout(10_000),
   });
   const rawSupported = raw.status !== 404;
   const res = rawSupported
     ? raw
-    : await fetch(`${serverUrl}/api/v1/orgs/${encodeURIComponent(orgId)}/settings/context_tree`, {
+    : await cliFetch(`${serverUrl}/api/v1/orgs/${encodeURIComponent(orgId)}/settings/context_tree`, {
         headers: { Authorization: `Bearer ${accessToken}` },
         signal: AbortSignal.timeout(10_000),
       });
@@ -423,13 +428,14 @@ async function bindOrgToTree(args: {
   const createdButNotBound = createdButNotBoundGuidance(args.repoUrl);
   let res: Response;
   try {
-    res = await fetch(endpoint, {
+    res = await cliFetch(endpoint, {
       method: args.rebind ? "PUT" : "POST",
       headers: { Authorization: `Bearer ${args.accessToken}`, "Content-Type": "application/json" },
       body: JSON.stringify(requestBody),
       signal: AbortSignal.timeout(10_000),
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof CredentialOriginMismatchError) throw error;
     const retry = explicitBindCommand(args.repoUrl, args.orgId, args.branch);
     throw new Error(
       `${createdButNotBound} Repo created and pushed, but the binding outcome is unknown for organization ${args.orgId} after a network or timeout failure. Do not retry the write until you read back /api/v1/orgs/${encodeURIComponent(args.orgId)}/settings/context_tree. The intended binding is repo ${args.repoUrl} at branch ${args.branch}. If that setting is still unbound and you intentionally want to bind it, run \`${retry}\`.`,

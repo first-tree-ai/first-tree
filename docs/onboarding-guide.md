@@ -155,7 +155,7 @@ retained as a read-only debug endpoint.
 | Variable | Purpose |
 |---|---|
 | `FIRST_TREE_HOME` | Override config/data home directory. By default this is channel-dependent: `~/.first-tree` for prod, `~/.first-tree-staging` for staging, `~/.first-tree-dev` for dev. |
-| `FIRST_TREE_SERVER_URL` | Server URL override for `login <code>` and fallback for SDK/non-login commands. |
+| `FIRST_TREE_SERVER_URL` | Server URL override for `login <code>` and fallback for SDK/non-login commands. Saved credentials are bound to the origin that issued them: if this points at a different origin than `credentials.json`, commands refuse to send the saved token and ask you to `login` there explicitly. |
 
 ## Using the SDK
 

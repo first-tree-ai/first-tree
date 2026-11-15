@@ -2,7 +2,8 @@ import { readFileSync } from "node:fs";
 import { FirstTreeHubSDK } from "@first-tree/client";
 import type { Command } from "commander";
 import semver from "semver";
-import { ensureFreshAccessToken, resolveServerUrl } from "../../core/bootstrap.js";
+import { accessTokenForOrigin } from "../../core/access-token.js";
+import { resolveServerUrl } from "../../core/bootstrap.js";
 import { channelConfig } from "../../core/channel.js";
 import {
   activateExternalContext,
@@ -156,9 +157,10 @@ export async function runContextActivate(
       });
       return;
     }
+    const serverUrl = resolveServerUrl(process.env.FIRST_TREE_SERVER_URL);
     const sdk = new FirstTreeHubSDK({
-      serverUrl: resolveServerUrl(process.env.FIRST_TREE_SERVER_URL),
-      getAccessToken: (refreshOptions) => ensureFreshAccessToken(refreshOptions),
+      serverUrl,
+      getAccessToken: (refreshOptions) => accessTokenForOrigin(serverUrl, refreshOptions),
       userAgent: CLI_USER_AGENT,
     });
     const activation = await activateExternalContext(sdk, { provider, project: resolution.project });

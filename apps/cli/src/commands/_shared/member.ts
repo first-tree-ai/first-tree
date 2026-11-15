@@ -1,6 +1,7 @@
 import { FirstTreeHubSDK } from "@first-tree/client";
 import { fail } from "../../cli/output.js";
-import { ensureFreshAccessToken, resolveServerUrl } from "../../core/bootstrap.js";
+import { accessTokenForOrigin } from "../../core/access-token.js";
+import { resolveServerUrl } from "../../core/bootstrap.js";
 import { CLI_USER_AGENT } from "../../core/version.js";
 
 /** Build an SDK that speaks only as the currently signed-in human member. */
@@ -14,7 +15,7 @@ export function createMemberSdk(): FirstTreeHubSDK {
   }
   return new FirstTreeHubSDK({
     serverUrl,
-    getAccessToken: (options) => ensureFreshAccessToken(options),
+    getAccessToken: (options) => accessTokenForOrigin(serverUrl, options),
     userAgent: CLI_USER_AGENT,
   });
 }

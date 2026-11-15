@@ -10,8 +10,9 @@ import {
   resolveConfigReadonly,
 } from "@first-tree/shared/config";
 import { fail } from "../../cli/output.js";
+import { accessTokenForOrigin } from "../../core/access-token.js";
 import { resolveSenderName } from "../../core/agent-messaging.js";
-import { ensureFreshAccessToken, resolveServerUrl } from "../../core/bootstrap.js";
+import { resolveServerUrl } from "../../core/bootstrap.js";
 import { channelConfig } from "../../core/channel.js";
 import { CLI_USER_AGENT } from "../../core/version.js";
 
@@ -136,7 +137,7 @@ export function resolveRuntimeLocalAgent(): ResolvedRuntimeAgentConfig {
 export function createSdkFromResolvedRuntimeAgent(agent: ResolvedRuntimeAgentConfig): FirstTreeHubSDK {
   return new FirstTreeHubSDK({
     serverUrl: agent.serverUrl,
-    getAccessToken: (opts) => ensureFreshAccessToken(opts),
+    getAccessToken: (opts) => accessTokenForOrigin(agent.serverUrl, opts),
     agentId: agent.agentId,
     runtimeSessionToken: () => agent.runtimeSessionToken,
     userAgent: CLI_USER_AGENT,
@@ -148,7 +149,7 @@ export function createSdk(agentName?: string): FirstTreeHubSDK {
   const { serverUrl, agentId } = resolveLocalAgent(agentName);
   return new FirstTreeHubSDK({
     serverUrl,
-    getAccessToken: (opts) => ensureFreshAccessToken(opts),
+    getAccessToken: (opts) => accessTokenForOrigin(serverUrl, opts),
     agentId,
     runtimeSessionToken: () => resolveRuntimeSessionToken(agentId),
     userAgent: CLI_USER_AGENT,

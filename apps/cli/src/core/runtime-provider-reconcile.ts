@@ -4,6 +4,7 @@ import { FirstTreeHubSDK } from "@first-tree/client";
 import type { ClientCapabilities, RuntimeProvider, SkillDescriptor } from "@first-tree/shared";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { cliFetch } from "./cli-fetch.js";
+import { assertCredentialOriginForToken } from "./credential-origin.js";
 import { CLI_USER_AGENT } from "./version.js";
 
 type LogFn = (level: "info" | "warn", msg: string) => void;
@@ -97,7 +98,10 @@ export async function uploadClientCapabilities(opts: {
 }): Promise<void> {
   const sdk = new FirstTreeHubSDK({
     serverUrl: opts.serverUrl,
-    getAccessToken: () => opts.accessToken,
+    getAccessToken: () => {
+      assertCredentialOriginForToken(opts.serverUrl, opts.accessToken);
+      return opts.accessToken;
+    },
     userAgent: CLI_USER_AGENT,
   });
   await sdk.updateCapabilities(opts.clientId, opts.capabilities);

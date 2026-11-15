@@ -1,3 +1,4 @@
+import { assertCredentialOriginForToken } from "./credential-origin.js";
 import { CLI_USER_AGENT } from "./version.js";
 
 /**
@@ -19,9 +20,27 @@ import { CLI_USER_AGENT } from "./version.js";
  * Header precedence: caller-provided `User-Agent` in `init.headers` wins,
  * so callers can override (e.g. tests injecting a deterministic UA).
  */
-export function cliFetch(input: string | URL, init?: RequestInit): Promise<Response> {
+export async function cliFetch(input: string | URL, init?: RequestInit): Promise<Response> {
   const merged = mergeHeaders(init?.headers as HeadersInput | undefined);
+  // SEC-023: the target URL and the persisted credential are resolved
+  // separately, so an override (`--server`, `FIRST_TREE_SERVER_URL`, config)
+  // used to ship the token saved for another origin. Direct `fetch` callers
+  // funnel through here; SDK callers bind their token with
+  // `accessTokenForOrigin`. The daemon's own connection (`core/client-runtime`)
+  // speaks to the server recorded at login and is not covered here.
+  const token = bearerToken(merged);
+  if (token) assertCredentialOriginForToken(String(input), token);
   return fetch(input, { ...init, headers: merged });
+}
+
+/** `Bearer <token>` from an Authorization header, if the caller set one. */
+function bearerToken(headers: Record<string, string>): string | null {
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() !== "authorization") continue;
+    const match = /^\s*Bearer\s+(\S+)\s*$/iu.exec(value);
+    if (match?.[1]) return match[1];
+  }
+  return null;
 }
 
 type HeadersInput = Headers | Record<string, string> | [string, string][];

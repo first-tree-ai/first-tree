@@ -12,6 +12,7 @@ import {
   resetConfigMeta,
 } from "@first-tree/shared/config";
 import { z } from "zod";
+import { accessTokenForOrigin } from "../../core/access-token.js";
 import type { CheckResult } from "../../core/doctor.js";
 import {
   CLI_USER_AGENT,
@@ -22,7 +23,6 @@ import {
   checkNodeVersion,
   checkServerReachable,
   checkWebSocket,
-  ensureFreshAccessToken,
   inspectContextTreeCli,
   inspectLocalContextTree,
   listLocalContextDataLoss,
@@ -220,7 +220,7 @@ export async function runDaemonChecks(): Promise<CheckResult[]> {
     const cfg = await initConfig({ schema: clientConfigSchema, role: "client" });
     const sdk = new FirstTreeHubSDK({
       serverUrl,
-      getAccessToken: (opts) => ensureFreshAccessToken(opts),
+      getAccessToken: (opts) => accessTokenForOrigin(serverUrl, opts),
       userAgent: CLI_USER_AGENT,
     });
     agentCheck = await reconcileAgentConfigs({
