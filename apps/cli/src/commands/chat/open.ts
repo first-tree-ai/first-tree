@@ -111,7 +111,9 @@ export function registerChatOpenCommand(chat: Command): void {
               signal: AbortSignal.timeout(10_000),
             });
             if (!sendRes.ok) {
-              const body = await sendRes.text();
+              // The response body is server-provided text on a human-readable
+              // path, so it gets the same treatment as an incoming message.
+              const body = sanitizeTerminalText(await sendRes.text());
               print.line(`  [error] Failed to send: ${sendRes.status} — ${body}\n`);
             } else {
               const sent = (await sendRes.json()) as { createdAt: string };

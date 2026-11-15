@@ -1063,6 +1063,36 @@ describe("chat command behavior", () => {
     expect(globalThis.clearInterval).toHaveBeenCalledWith(99);
   });
 
+  it("chat open strips terminal control bytes from a failed-send response body", async () => {
+    const emitter = new EventEmitter() as EventEmitter & { prompt: () => void };
+    emitter.prompt = vi.fn();
+    readlineMocks.createInterface.mockReturnValueOnce(emitter);
+    globalThis.setInterval = vi.fn(() => 104 as unknown as NodeJS.Timeout) as unknown as typeof setInterval;
+    globalThis.clearInterval = vi.fn() as unknown as typeof clearInterval;
+    cliFetchMock
+      .mockResolvedValueOnce(jsonResponse({ id: "dm-send-fail" }))
+      .mockResolvedValueOnce(
+        jsonResponse({ items: [{ id: "old", senderId: "agent-1", content: "old", createdAt: "1" }] }),
+      );
+
+    await runChat(["open", "nova"]);
+    // The server's error body is displayed verbatim; an error object echoed back
+    // from the request must not be able to repaint the operator's terminal.
+    cliFetchMock.mockResolvedValueOnce(jsonResponse("\u001b[2Jbad request\rFORGED", false, 422));
+    emitter.emit("line", "hello");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const printed = printLineMock.mock.calls.map((call) => String(call[0])).join("");
+    expect(printed).toContain("Failed to send: 422");
+    // Diagnostic value survives: the status and the words are still there.
+    expect(printed).toContain("[2Jbad request");
+    expect(printed).toContain("bad request\nFORGED");
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting their absence is the point
+    expect(printed).not.toMatch(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/u);
+    expect(() => emitter.emit("close")).toThrow("process.exit");
+  });
+
   it("chat open uses agent id fallbacks and ignores failed polling responses", async () => {
     resolveAgentMock.mockResolvedValueOnce({ uuid: "agent-fallback" });
     const emitter = new EventEmitter() as EventEmitter & { prompt: () => void };
