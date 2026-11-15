@@ -191,6 +191,7 @@ export {
   getRepoLocalPathSafetyError,
   gitRepoSchema,
   isAmpRuntimeMode,
+  isCanonicalEnvKey,
   isRedactedEnvValue,
   isSafeRepoLocalPath,
   type KimiCodeRuntimeConfigPayload,
