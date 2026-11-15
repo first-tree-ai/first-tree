@@ -161,10 +161,15 @@ export function removeLocalAgent(name: string): void {
   }));
 
   for (const item of planned) {
-    // Re-check immediately before the delete: the path can change between the
-    // preflight and the write (a directory swapped for a symlink).
-    assertContainedTarget(item.root, item.relative);
-    rmSync(item.target, { recursive: true, force: true });
+    // Re-check immediately before the delete, and delete exactly what passed.
+    // If the state root now resolves somewhere else, the successful check would
+    // describe a different path from the one this loop is about to remove, so
+    // treat any change as drift and refuse instead of deleting the stale one.
+    const verified = assertContainedTarget(item.root, item.relative);
+    if (verified !== item.target) {
+      throw new Error(`Refusing to delete ${item.target}: it now resolves to ${verified}.`);
+    }
+    rmSync(verified, { recursive: true, force: true });
   }
 }
 
