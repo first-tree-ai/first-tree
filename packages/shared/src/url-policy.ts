@@ -28,17 +28,34 @@ export function isTrustedInstallerUrl(value: string): boolean {
 export const installerUrlMessage =
   "must use https:// (plain http is only accepted for loopback hosts such as http://127.0.0.1)";
 
+/** Every hop on https. Also the fail-closed answer for URLs we cannot classify. */
+const HTTPS_ONLY_FLAGS = "--proto '=https' --proto-redir '=https'";
+
 /**
  * curl flags that make the installer download obey the same transport policy.
  *
  * `-fsSL` follows redirects by default, so an https URL can still land on a
  * plaintext one. `--proto` pins the scheme of the requested URL and
- * `--proto-redir` pins every redirect hop: https starts may only stay on https,
- * while a loopback http start (local development) may still upgrade to https.
+ * `--proto-redir` pins every redirect hop.
+ *
+ * Only a loopback plaintext start gets the relaxed request policy, and even then
+ * a redirect may not stay plaintext: it has to upgrade to https. Anything else —
+ * https, a non-loopback http, or a value this function cannot parse — pins every
+ * hop to https, so the command fails closed instead of downloading over
+ * plaintext. The scheme comes from `URL`, the same parser the schema uses, so
+ * `HTTPS://…` cannot select the development flags by spelling.
  */
 export function curlInstallerProtocolFlags(installerUrl: string): string {
-  const isHttps = installerUrl.startsWith("https:");
-  return isHttps ? "--proto '=https' --proto-redir '=https'" : "--proto '=http,https' --proto-redir '=http,https'";
+  let parsed: URL;
+  try {
+    parsed = new URL(installerUrl);
+  } catch {
+    return HTTPS_ONLY_FLAGS;
+  }
+  if (parsed.protocol === "http:" && LOOPBACK_HOSTNAMES.has(parsed.hostname)) {
+    return "--proto '=http,https' --proto-redir '=https'";
+  }
+  return HTTPS_ONLY_FLAGS;
 }
 
 /**

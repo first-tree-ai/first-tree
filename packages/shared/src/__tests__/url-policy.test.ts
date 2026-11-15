@@ -41,9 +41,30 @@ describe("curlInstallerProtocolFlags", () => {
     );
   });
 
-  it("keeps the loopback http development path working", () => {
-    expect(curlInstallerProtocolFlags("http://127.0.0.1:8000/prod/install.sh")).toBe(
-      "--proto '=http,https' --proto-redir '=http,https'",
+  it("lets a loopback http start proceed but forces any redirect onto https", () => {
+    // Plaintext is tolerated for the first hop only (local dev / self-hosting);
+    // a redirect can still carry the pipe somewhere else, so it must upgrade.
+    for (const url of ["http://127.0.0.1:8000/prod/install.sh", "http://localhost/prod/install.sh", "http://[::1]/p"]) {
+      expect(curlInstallerProtocolFlags(url)).toBe("--proto '=http,https' --proto-redir '=https'");
+    }
+  });
+
+  it("fails closed for schemes and hosts the policy does not trust", () => {
+    // Non-loopback plaintext is refused by the schema, but the flags must not
+    // disagree with it if one ever reaches this function.
+    expect(curlInstallerProtocolFlags("http://downloads.example.test/prod/install.sh")).toBe(
+      "--proto '=https' --proto-redir '=https'",
+    );
+    expect(curlInstallerProtocolFlags("ftp://downloads.example.test/x.sh")).toBe(
+      "--proto '=https' --proto-redir '=https'",
+    );
+    expect(curlInstallerProtocolFlags("not a url")).toBe("--proto '=https' --proto-redir '=https'");
+  });
+
+  it("classifies the scheme with the URL parser, not by spelling", () => {
+    // `startsWith("https:")` would read this as the loopback development shape.
+    expect(curlInstallerProtocolFlags("HTTPS://downloads.example.test/prod/install.sh")).toBe(
+      "--proto '=https' --proto-redir '=https'",
     );
   });
 });
