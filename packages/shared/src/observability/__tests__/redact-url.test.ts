@@ -15,6 +15,42 @@ describe("redactUrl", () => {
     expect(redactUrl("/api/v1/webhooks/gitlab/secret-bearer/extra")).toBe("/api/v1/webhooks/gitlab/***/extra");
   });
 
+  it("redacts the invitation capability token in the path", () => {
+    expect(redactUrl("/api/v1/invitations/inv_2b7c1f9e/preview")).toBe("/api/v1/invitations/***/preview");
+    expect(redactUrl("https://first-tree.test/api/v1/invitations/inv_2b7c1f9e/preview?x=1")).toBe(
+      "https://first-tree.test/api/v1/invitations/***/preview?x=1",
+    );
+    // Ids that only look like a capability stay readable.
+    expect(redactUrl("/api/v1/invitations")).toBe("/api/v1/invitations");
+  });
+
+  it("redacts the OAuth callback code and state", () => {
+    expect(redactUrl("/api/v1/auth/github/callback?code=abc123&state=xyz789")).toBe(
+      "/api/v1/auth/github/callback?code=***&state=***",
+    );
+    expect(redactUrl("/api/v1/auth/github/callback?error=access_denied&state=xyz789")).toBe(
+      "/api/v1/auth/github/callback?error=access_denied&state=***",
+    );
+  });
+
+  it("leaves code/state readable outside auth routes", () => {
+    // `state` is an ordinary session filter and `code` an ordinary error field;
+    // masking them everywhere would cost diagnostics for no confidentiality.
+    expect(redactUrl("/api/v1/agents/agent_1/sessions?state=active")).toBe(
+      "/api/v1/agents/agent_1/sessions?state=active",
+    );
+    expect(redactUrl("/api/v1/runs?code=ENOENT")).toBe("/api/v1/runs?code=ENOENT");
+  });
+
+  it("leaves the admin invitations route readable", () => {
+    // Only the public preview path is a capability link; the org-scoped admin
+    // route is an id lookup and stays useful in logs.
+    expect(redactUrl("/api/v1/orgs/org_1/invitations/inv_2b7c1f9e")).toBe(
+      "/api/v1/orgs/org_1/invitations/inv_2b7c1f9e",
+    );
+    expect(redactUrl("/api/v1/invitations/inv_2b7c1f9e/preview")).toBe("/api/v1/invitations/***/preview");
+  });
+
   it("returns the URL unchanged when the query string is empty", () => {
     // Path ends with `?` but no params — keep the trailing `?` to preserve
     // the original shape, since we only redact values, never structure.

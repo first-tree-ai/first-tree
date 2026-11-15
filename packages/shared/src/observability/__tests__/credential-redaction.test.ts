@@ -49,6 +49,11 @@ describe("redactCredentialText", () => {
     expect(redactCredentialText("https://example.com/callback?token=abc123&safe=1")).toBe(
       "https://example.com/callback?token=[REDACTED]&safe=1",
     );
+    // OAuth code/state inside free text: the URL form is unambiguous enough to
+    // mask even though the same names are ordinary object fields elsewhere.
+    expect(redactCredentialText("callback failed: /auth/github/callback?code=abc&state=xyz")).toBe(
+      "callback failed: /auth/github/callback?code=[REDACTED]&state=[REDACTED]",
+    );
   });
 
   it("redacts common provider credentials", () => {
