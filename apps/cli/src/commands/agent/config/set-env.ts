@@ -1,3 +1,4 @@
+import { isCanonicalEnvKey } from "@first-tree/shared";
 import type { Command } from "commander";
 import { fail, success } from "../../../cli/output.js";
 import { ensureFreshAdminToken, resolveServerUrl } from "../../../core/bootstrap.js";
@@ -79,10 +80,14 @@ async function resolveKeyValue(
   const key = kv.slice(0, eqIdx);
   const value = kv.slice(eqIdx + 1);
   if (opts.sensitive === true) {
+    // The key is whatever the operator typed, and this string is presented as a
+    // command to copy. Render it only when it is a canonical env key; otherwise
+    // fall back to a placeholder rather than turning input into shell syntax.
+    const exampleKey = isCanonicalEnvKey(key) ? key : "KEY";
     print.line(
       "  warning: --sensitive keeps the value out of the server response, not out of shell history or process " +
         "listings. Use --value-stdin to keep the secret out of the shell:\n\n" +
-        `  printf %s "$SECRET" | first-tree agent config set-env ${"<agent>"} ${key} --sensitive --value-stdin\n\n`,
+        `  printf %s "$SECRET" | first-tree agent config set-env <agent> ${exampleKey} --sensitive --value-stdin\n\n`,
     );
   }
   return { key, value };

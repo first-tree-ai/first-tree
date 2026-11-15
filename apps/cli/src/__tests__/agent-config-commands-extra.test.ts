@@ -196,6 +196,21 @@ describe("agent config command behavior", () => {
     await runConfig(["set-env", "nova", "SECRET=inline", "--sensitive"]);
     expect(printMock.line.mock.calls.map((call) => String(call[0])).join("")).toContain("--value-stdin");
 
+    // The warning is meant to be copied, so the key must not arrive as shell
+    // syntax. A canonical key is rendered verbatim; anything else falls back to
+    // a placeholder. The request itself still fails server-side validation —
+    // the warning is printed before it, which is exactly the window that matters.
+    printMock.line.mockClear();
+    await runConfig(["set-env", "nova", "ANOTHER_KEY=inline", "--sensitive"]);
+    expect(printMock.line.mock.calls.map((call) => String(call[0])).join("")).toContain(
+      "set-env <agent> ANOTHER_KEY --sensitive --value-stdin",
+    );
+    printMock.line.mockClear();
+    await expect(runConfig(["set-env", "nova", "A$(id)=inline", "--sensitive"])).rejects.toThrow();
+    const warning = printMock.line.mock.calls.map((call) => String(call[0])).join("");
+    expect(warning).toContain("set-env <agent> KEY --sensitive --value-stdin");
+    expect(warning).not.toContain("$(id)");
+
     await runConfig(["set-model", "nova", "opus"]);
     expect(fetcherMocks.patchConfig).toHaveBeenLastCalledWith("https://hub.example", "admin-token", "agent-uuid", 1, {
       model: "opus",
