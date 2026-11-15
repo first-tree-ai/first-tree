@@ -151,13 +151,33 @@ export function removeLocalAgent(name: string): void {
   if (!AGENT_NAME_REGEX.test(name)) {
     throw new Error(`Refusing to remove local agent "${name}": not a canonical agent name.`);
   }
-  removeWithinStateRoot(defaultConfigDir(), join("agents", name));
-  removeWithinStateRoot(defaultDataDir(), join("workspaces", name));
-  removeWithinStateRoot(defaultDataDir(), join("sessions", `${name}.json`));
+
+  // Preflight all three targets before the first deletion. `agent remove` finds
+  // the agent through the config directory, so deleting it and then refusing on
+  // a later path would leave an agent the operator can no longer retry.
+  const planned = removalTargets(name).map((item) => ({
+    ...item,
+    target: assertContainedTarget(item.root, item.relative),
+  }));
+
+  for (const item of planned) {
+    // Re-check immediately before the delete: the path can change between the
+    // preflight and the write (a directory swapped for a symlink).
+    assertContainedTarget(item.root, item.relative);
+    rmSync(item.target, { recursive: true, force: true });
+  }
+}
+
+function removalTargets(name: string): Array<{ root: string; relative: string }> {
+  return [
+    { root: defaultConfigDir(), relative: join("agents", name) },
+    { root: defaultDataDir(), relative: join("workspaces", name) },
+    { root: defaultDataDir(), relative: join("sessions", `${name}.json`) },
+  ];
 }
 
 /**
- * Delete `relative` under `root`, refusing anything whose on-disk location is
+ * Resolve `relative` under `root`, refusing anything whose on-disk location is
  * outside it.
  *
  * The lexical check alone answers "does the string escape?" — it cannot see a
@@ -166,7 +186,7 @@ export function removeLocalAgent(name: string): void {
  * realpath'd, and the not-yet-existing tail is appended to it. A missing target
  * stays a no-op, and a symlink leaf is deleted as a link rather than followed.
  */
-function removeWithinStateRoot(root: string, relative: string): void {
+function assertContainedTarget(root: string, relative: string): string {
   const resolvedRoot = resolveThroughExisting(root);
   const target = resolve(resolvedRoot, relative);
   const targetParent = resolveThroughExisting(dirname(target));
@@ -179,7 +199,7 @@ function removeWithinStateRoot(root: string, relative: string): void {
       throw new Error(`Refusing to delete ${target}: it resolves outside ${resolvedRoot}.`);
     }
   }
-  rmSync(target, { recursive: true, force: true });
+  return target;
 }
 
 /** Real path of `path`, or of its deepest existing ancestor with the rest appended. */

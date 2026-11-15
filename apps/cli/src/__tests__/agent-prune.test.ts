@@ -236,6 +236,26 @@ describe("findStaleAliases", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
+  it("refuses before deleting anything when a later target fails containment", () => {
+    const home = mkdtempSync(join(tmpdir(), "fthub-prune-home-"));
+    process.env.FIRST_TREE_HOME = home;
+    mkdirSync(join(home, "config", "agents", "victim"), { recursive: true });
+    writeFileSync(join(home, "config", "agents", "victim", "agent.yaml"), "agentId: a\n");
+    mkdirSync(join(home, "data", "workspaces", "victim"), { recursive: true });
+    // The third target (data/sessions/<name>.json) resolves outside its root.
+    // Preflight must catch it *before* the first two deletions happen: the
+    // config alias is how `agent remove` finds the agent on a retry.
+    const elsewhere = join(home, "elsewhere");
+    mkdirSync(elsewhere, { recursive: true });
+    mkdirSync(join(home, "data"), { recursive: true });
+    symlinkSync(elsewhere, join(home, "data", "sessions"));
+
+    expect(() => removeLocalAgent("victim")).toThrow(/resolves outside/);
+    expect(existsSync(join(home, "config", "agents", "victim", "agent.yaml"))).toBe(true);
+    expect(existsSync(join(home, "data", "workspaces", "victim"))).toBe(true);
+    rmSync(home, { recursive: true, force: true });
+  });
+
   it("keeps a missing target a no-op", () => {
     const home = mkdtempSync(join(tmpdir(), "fthub-prune-home-"));
     process.env.FIRST_TREE_HOME = home;
