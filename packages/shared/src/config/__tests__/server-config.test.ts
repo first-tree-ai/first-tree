@@ -383,6 +383,32 @@ describe("server config", () => {
     expect(serverConfigSchema.connectBootstrap).not.toHaveProperty("method");
   });
 
+  it("rejects a plaintext portable download base URL outside loopback", async () => {
+    stubRequiredProductionConfig();
+    vi.stubEnv("FIRST_TREE_PORTABLE_DOWNLOAD_BASE_URL", "http://downloads.example.test/releases");
+
+    await expect(
+      initConfig({
+        schema: createServerConfigSchema({ autoGenerateSecrets: false }),
+        role: "server",
+        configDir: makeTempConfigDir(),
+      }),
+    ).rejects.toThrow(/https/iu);
+  });
+
+  it("accepts a loopback http portable download base URL for local testing", async () => {
+    stubRequiredProductionConfig();
+    vi.stubEnv("FIRST_TREE_PORTABLE_DOWNLOAD_BASE_URL", "http://127.0.0.1:8000/releases");
+
+    const config = await initConfig({
+      schema: createServerConfigSchema({ autoGenerateSecrets: false }),
+      role: "server",
+      configDir: makeTempConfigDir(),
+    });
+
+    expect(config.connectBootstrap.portableDownloadBaseUrl).toBe("http://127.0.0.1:8000/releases");
+  });
+
   it("uses inbox delivery fairness defaults when the inbox group is active", () => {
     expect(serverConfigSchema.inbox.shape.maxInFlightPerAgent.schema.parse(undefined)).toBe(8192);
     expect(serverConfigSchema.inbox.shape.maxInFlightPerAgentChat.schema.parse(undefined)).toBe(8);

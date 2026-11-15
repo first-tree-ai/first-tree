@@ -81,14 +81,16 @@ const CASES: ChannelCase[] = [
     binName: "first-tree",
     installerPath: "prod/install.sh",
     downloadBaseUrl: "https://download.first-tree.ai/releases",
-    expected: "curl -fsSL https://download.first-tree.ai/releases/prod/install.sh | sh",
+    expected:
+      "curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/prod/install.sh | sh",
   },
   {
     channel: "staging",
     binName: "first-tree-staging",
     installerPath: "staging/install.sh",
     downloadBaseUrl: "https://download.first-tree.ai/releases/",
-    expected: "curl -fsSL https://download.first-tree.ai/releases/staging/install.sh | sh",
+    expected:
+      "curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/staging/install.sh | sh",
   },
   {
     channel: "dev",

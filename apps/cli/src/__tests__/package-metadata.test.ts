@@ -58,9 +58,13 @@ describe("npm package metadata", () => {
 
     const readme = readText(readmePath);
 
-    expect(readme).toContain("curl -fsSL https://download.first-tree.ai/releases/prod/install.sh | sh");
+    expect(readme).toContain(
+      "curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/prod/install.sh | sh",
+    );
     expect(readme).toContain("~/.local/bin/first-tree login <connect-code>");
-    expect(readme).toContain("curl -fsSL https://download.first-tree.ai/releases/staging/install.sh | sh");
+    expect(readme).toContain(
+      "curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/staging/install.sh | sh",
+    );
     expect(readme).toContain("~/.local/bin/first-tree-staging login <connect-code>");
     expect(readme).not.toContain("npm install -g first-tree");
     expect(readme).toContain("https://github.com/agent-team-foundation/first-tree/blob/main/docs/cli-reference.md");

@@ -93,7 +93,7 @@ First Tree 围绕 Context Tree 连接五个部分：
 命令。托管生产环境使用：
 
 ```bash
-curl -fsSL https://download.first-tree.ai/releases/prod/install.sh | sh
+curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/prod/install.sh | sh
 ~/.local/bin/first-tree login <connect-code>
 ```
 

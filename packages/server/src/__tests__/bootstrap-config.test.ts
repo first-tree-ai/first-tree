@@ -23,7 +23,7 @@ describe("GET /bootstrap/config", () => {
       channel: "dev",
       connectBootstrapCommandTemplate: {
         command:
-          "curl -fsSL https://download.first-tree.ai/releases/staging/install.sh | sh\n" +
+          "curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/staging/install.sh | sh\n" +
           `FIRST_TREE_SERVER_URL='http://127.0.0.1:8000' ~/.local/bin/first-tree-staging login ${CONNECT_BOOTSTRAP_CODE_PLACEHOLDER}`,
         codePlaceholder: CONNECT_BOOTSTRAP_CODE_PLACEHOLDER,
       },
@@ -48,7 +48,7 @@ describe("GET /bootstrap/config — non-dev channel", () => {
       channel: "staging",
       connectBootstrapCommandTemplate: {
         command:
-          "curl -fsSL https://download.first-tree.ai/releases/staging/install.sh | sh\n" +
+          "curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/staging/install.sh | sh\n" +
           `~/.local/bin/first-tree-staging login ${CONNECT_BOOTSTRAP_CODE_PLACEHOLDER}`,
         codePlaceholder: CONNECT_BOOTSTRAP_CODE_PLACEHOLDER,
       },
@@ -67,7 +67,7 @@ describe("GET /bootstrap/config — non-dev channel", () => {
         headers: { host: "staging.example.test", "x-forwarded-proto": "https" },
       });
       expect(res.json().connectBootstrapCommandTemplate.command).toBe(
-        "curl -fsSL 'https://downloads.example.test/releases/$(id)/staging/install.sh' | " +
+        "curl -fsSL --proto '=https' --proto-redir '=https' 'https://downloads.example.test/releases/$(id)/staging/install.sh' | " +
           "FIRST_TREE_PORTABLE_DOWNLOAD_BASE_URL='https://downloads.example.test/releases/$(id)////' sh\n" +
           `FIRST_TREE_SERVER_URL='https://staging.example.test' ~/.local/bin/first-tree-staging login ${CONNECT_BOOTSTRAP_CODE_PLACEHOLDER}`,
       );

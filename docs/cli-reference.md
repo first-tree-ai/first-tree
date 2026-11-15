@@ -17,14 +17,14 @@ human-friendly index over them.
 Production:
 
 ```bash
-curl -fsSL https://download.first-tree.ai/releases/prod/install.sh | sh
+curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/prod/install.sh | sh
 ~/.local/bin/first-tree login <connect-code>
 ```
 
 Staging:
 
 ```bash
-curl -fsSL https://download.first-tree.ai/releases/staging/install.sh | sh
+curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/staging/install.sh | sh
 ~/.local/bin/first-tree-staging login <connect-code>
 ```
 
@@ -49,7 +49,7 @@ The installer reports each phase as it runs — preflight, metadata, download
 activation, and PATH/service setup. Pass flags after `--` when piping:
 
 ```bash
-curl -fsSL https://download.first-tree.ai/releases/prod/install.sh | sh -s -- --quiet
+curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/prod/install.sh | sh -s -- --quiet
 ```
 
 | Flag | Effect |

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { trustedInstallerUrlSchema } from "../url-policy.js";
 
 export const loginSchema = z.object({
   username: z.string().min(1),
@@ -42,7 +43,7 @@ export const connectTokenResponseSchema = z.object({
    * Public installer URL for prod/staging. Connect tokens never appear here;
    * the token is only in the local login command. `null` for dev.
    */
-  installerUrl: z.string().url().nullable(),
+  installerUrl: trustedInstallerUrlSchema.nullable(),
   /**
    * Bin name the operator types after install. Channel-aware:
    *   - prod    → "first-tree"

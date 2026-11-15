@@ -25,7 +25,7 @@ describe("connect bootstrap commands", () => {
         defaultServerUrl: "https://dev.cloud.first-tree.ai",
       }),
     ).toBe(
-      "curl -fsSL https://download.first-tree.ai/releases/staging/install.sh | sh\n" +
+      "curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/staging/install.sh | sh\n" +
         "~/.local/bin/first-tree-staging login FT-CODE",
     );
   });
@@ -42,9 +42,28 @@ describe("connect bootstrap commands", () => {
         defaultServerUrl: "https://dev.cloud.first-tree.ai",
       }),
     ).toBe(
-      "curl -fsSL 'https://downloads.example.test/releases/$(id)/staging/install.sh' | " +
+      "curl -fsSL --proto '=https' --proto-redir '=https' 'https://downloads.example.test/releases/$(id)/staging/install.sh' | " +
         "FIRST_TREE_PORTABLE_DOWNLOAD_BASE_URL='https://downloads.example.test/releases/$(id)' sh\n" +
         "FIRST_TREE_SERVER_URL='https://preview.example.test' ~/.local/bin/first-tree-staging login FT-CODE",
+    );
+  });
+
+  it("pins the loopback development bootstrap to https redirects", () => {
+    // Local self-hosting may start on plaintext, but the redirect policy must
+    // still refuse to carry `curl | sh` back onto http.
+    expect(
+      buildPortableBootstrapCommand({
+        installerUrl: "http://127.0.0.1:8000/releases/prod/install.sh",
+        portableDownloadBaseUrl: "http://127.0.0.1:8000/releases",
+        defaultPortableDownloadBaseUrl: "http://127.0.0.1:8000/releases",
+        binName: "first-tree",
+        token: "FT-CODE",
+        serverUrl: "http://127.0.0.1:8000",
+        defaultServerUrl: "http://127.0.0.1:8000",
+      }),
+    ).toBe(
+      "curl -fsSL --proto '=http,https' --proto-redir '=https' http://127.0.0.1:8000/releases/prod/install.sh | sh\n" +
+        "~/.local/bin/first-tree login FT-CODE",
     );
   });
 
@@ -80,7 +99,7 @@ describe("connect bootstrap commands", () => {
         defaultServerUrl: "https://dev.cloud.first-tree.ai",
       }),
     ).toBe(
-      "curl -fsSL https://download.first-tree.ai/releases/staging/install.sh | sh\n" +
+      "curl -fsSL --proto '=https' --proto-redir '=https' https://download.first-tree.ai/releases/staging/install.sh | sh\n" +
         "~/.local/bin/first-tree-staging login FT-CODE",
     );
   });

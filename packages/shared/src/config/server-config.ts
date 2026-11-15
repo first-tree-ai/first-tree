@@ -3,6 +3,7 @@ import { z } from "zod";
 import { logFormatSchema, logLevelSchema } from "../observability/logger-core.js";
 import { CRON_POLLING_INTERVAL_MAX_SECONDS, CRON_POLLING_INTERVAL_MIN_SECONDS } from "../schemas/cron-job.js";
 import { runtimeProviderSchema } from "../schemas/runtime-provider.js";
+import { trustedInstallerUrlSchema } from "../url-policy.js";
 import { defaultDataDir } from "./resolver.js";
 import { defineConfig, field, optional } from "./schema.js";
 import { getConfig } from "./singleton.js";
@@ -461,7 +462,7 @@ export const serverConfigSchema = defineConfig({
      * Base URL for prod/staging portable installers and artifacts. Mirrors
      * may override it; dev remains source-only.
      */
-    portableDownloadBaseUrl: field(z.string().url().default("https://download.first-tree.ai/releases"), {
+    portableDownloadBaseUrl: field(trustedInstallerUrlSchema.default("https://download.first-tree.ai/releases"), {
       env: "FIRST_TREE_PORTABLE_DOWNLOAD_BASE_URL",
     }),
   },

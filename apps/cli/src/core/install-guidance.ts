@@ -1,3 +1,4 @@
+import { curlInstallerProtocolFlags } from "@first-tree/shared";
 import type { ChannelConfig } from "@first-tree/shared/channel";
 import { channelConfig } from "./channel.js";
 
@@ -15,5 +16,6 @@ export function getChannelInstallCommand(config: ChannelConfig = channelConfig):
     throw new Error(`Portable installer is not configured for the ${config.channel} channel`);
   }
 
-  return `curl -fsSL ${baseUrl}/${installerPath} | sh`;
+  const installerUrl = `${baseUrl}/${installerPath}`;
+  return `curl -fsSL ${curlInstallerProtocolFlags(installerUrl)} ${installerUrl} | sh`;
 }
