@@ -1176,3 +1176,42 @@ exec "$root/node/bin/node" "$root/app/cli/index.mjs" "$@"
     await expect(fetchPortableLatestVersion()).resolves.toEqual({ ok: true, version: "3.0.0" });
   });
 });
+
+/**
+ * The bin directory is user-supplied, so whatever sits at the alias slot may be
+ * anything the user's own tooling put there. The guard must classify the entry
+ * with `lstat` *before* it reads: `readFileSync` on a FIFO blocks forever, and a
+ * hang while installing looks exactly like a slow network until the job dies.
+ */
+describe("assertReplaceableShimSlot entry types", () => {
+  const root = "/opt/first-tree/current";
+  const binDir = "/opt/first-tree/bin";
+
+  it("refuses a directory without reading it", async () => {
+    const { assertReplaceableShimSlot } = await import("../core/portable-install-context.js");
+    const dir = join(tempDir("ft-shim-slot-"), "ft");
+    mkdirSync(dir);
+    // Reading first would surface EISDIR ("cannot be read"); naming the type
+    // proves the lstat classification ran first.
+    expect(() => assertReplaceableShimSlot(dir, root, binDir)).toThrow(/is a directory, not a regular file/);
+  });
+
+  it("refuses a dangling symlink without reading it", async () => {
+    const { assertReplaceableShimSlot } = await import("../core/portable-install-context.js");
+    const link = join(tempDir("ft-shim-slot-"), "ft");
+    await symlink(join(tmpdir(), "ft-shim-slot-does-not-exist"), link);
+    // A read-first implementation reports ENOENT; the type is the diagnosis.
+    expect(() => assertReplaceableShimSlot(link, root, binDir)).toThrow(/is a symbolic link, not a regular file/);
+  });
+
+  it("refuses a named pipe instead of blocking on it", async () => {
+    if (process.platform === "win32") return;
+    const { assertReplaceableShimSlot } = await import("../core/portable-install-context.js");
+    const fifo = join(tempDir("ft-shim-slot-"), "ft");
+    const mkfifo = spawnSync("mkfifo", [fifo]);
+    if (mkfifo.status !== 0) return; // no mkfifo on this host
+    // If this ever regresses to a read, this test hangs rather than fails —
+    // which is precisely the production failure being pinned.
+    expect(() => assertReplaceableShimSlot(fifo, root, binDir)).toThrow(/is a named pipe, not a regular file/);
+  });
+});
