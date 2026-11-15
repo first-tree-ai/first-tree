@@ -18,6 +18,15 @@ import type { runtimeProviderSchema } from "./runtime-provider.js";
 export const PROMPT_APPEND_MAX_LENGTH = 32_000;
 const MCP_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
 const ENV_KEY_PATTERN = /^[A-Z][A-Z0-9_]*$/;
+
+/**
+ * Canonical env key form. Exported so human-facing callers that render a key
+ * into a shell example can check it against the same contract the schema
+ * enforces, instead of trusting arbitrary input as shell syntax.
+ */
+export function isCanonicalEnvKey(value: string): boolean {
+  return ENV_KEY_PATTERN.test(value);
+}
 const WINDOWS_DRIVE_PATH_PATTERN = /^[A-Za-z]:/;
 
 export const promptSectionScopeSchema = z.enum(["team", "agent"]);
