@@ -324,6 +324,48 @@ describe("bodyCaptureOnSendHook", () => {
     expect(decoded.refreshToken).toBe("***");
   });
 
+  it("scrubs credentials nested inside arrays and objects", async () => {
+    // SEC-018: a top-level-only key match cannot see `env[].value` or an MCP
+    // header buried in an array element, so the serialized body is passed
+    // through the shared credential scrubber as well.
+    const tracer = trace.getTracer("test");
+    const span = tracer.startSpan("t");
+    const traceId = span.spanContext().traceId;
+
+    const req = makeRequestWith(
+      span,
+      { otelRecordBody: true },
+      {
+        env: [
+          { key: "OPENAI_API_KEY", value: `sk-proj-${"z".repeat(30)}`, sensitive: true },
+          { key: "PLAIN", value: "visible" },
+          // Shapeless secret: only the `sensitive: true` sibling identifies it.
+          { key: "DB_PASSWORD", value: "hunter2", sensitive: true },
+        ],
+        mcpServers: [
+          { name: "tools", headers: { authorization: "Bearer abcdefgh12345678" } },
+          { name: "other", headers: { "x-api-key": "plain-looking-secret" } },
+        ],
+      },
+    );
+    await bodyCaptureOnSendHook(req, makeReply(400), null);
+    span.end();
+
+    const raw = findFinished(traceId).attributes[FIRST_TREE_ATTR.HTTP_REQUEST_BODY] as string;
+    expect(raw).not.toContain("sk-proj-");
+    expect(raw).not.toContain("abcdefgh12345678");
+    expect(raw).not.toContain("hunter2");
+    expect(raw).not.toContain("plain-looking-secret");
+    // Structure survives: the operator can still see which variable failed.
+    const decoded = JSON.parse(raw) as { env: string; mcpServers: string };
+    const env = JSON.parse(decoded.env) as Array<{ key: string; value: string }>;
+    expect(env[0]?.key).toBe("OPENAI_API_KEY");
+    expect(env[2]?.key).toBe("DB_PASSWORD");
+    expect(env[2]?.value).toBe("***");
+    // A non-sensitive value stays readable.
+    expect(env[1]?.value).toBe("visible");
+  });
+
   it("does not stamp the body when statusCode < 400 (success path)", async () => {
     const tracer = trace.getTracer("test");
     const span = tracer.startSpan("t");

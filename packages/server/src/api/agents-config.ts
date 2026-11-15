@@ -17,7 +17,11 @@ export async function agentConfigRoutes(app: FastifyInstance): Promise<void> {
     return app.resourcesService.resolveRuntimeConfig(cfg);
   });
 
-  app.patch<{ Params: { uuid: string } }>("/:uuid/config", { config: { otelRecordBody: true } }, async (request) => {
+  // Body capture stays off on the two write routes: the payload carries agent
+  // credentials (`env[].value`, MCP `Authorization` headers) and the capture
+  // hook redacts top-level keys only, so a nested secret would reach the trace
+  // on any 400/409/500 (SEC-018).
+  app.patch<{ Params: { uuid: string } }>("/:uuid/config", { config: { otelRecordBody: false } }, async (request) => {
     const { agent, scope } = await requireAgentAccess(request, app.db, "manage");
     assertMutableAgentIsNotLandingCampaignTrial(agent);
     assertNoRuntimeSwitchInProgress(agent);
@@ -28,7 +32,7 @@ export async function agentConfigRoutes(app: FastifyInstance): Promise<void> {
 
   app.post<{ Params: { uuid: string } }>(
     "/:uuid/config/dry-run",
-    { config: { otelRecordBody: true } },
+    { config: { otelRecordBody: false } },
     async (request) => {
       await requireAgentAccess(request, app.db, "manage");
       const body = dryRunAgentRuntimeConfigSchema.parse(request.body);

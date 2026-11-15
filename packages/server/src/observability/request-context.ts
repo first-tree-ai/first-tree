@@ -11,10 +11,10 @@
  * `user.id` etc. landed on a hook wrapper span instead of the route row).
  */
 
-import { FIRST_TREE_ATTR } from "@first-tree/shared/observability";
+import { FIRST_TREE_ATTR, redactCredentialText } from "@first-tree/shared/observability";
 import type { Span } from "@opentelemetry/api";
 import type { FastifyReply, FastifyRequest } from "fastify";
-import { normalizeAttrs } from "./otel-helpers.js";
+import { isSensitiveKey, normalizeAttrs } from "./otel-helpers.js";
 
 type AutotelicAccessor = () => { activeSpan: Span | null; tracer: unknown; context: unknown };
 
@@ -166,6 +166,50 @@ declare module "fastify" {
 const MAX_BODY_ATTR_LEN = 4096;
 
 /**
+ * Key names that carry a credential inside a nested object.
+ *
+ * `isSensitiveKey` matches the tracing vocabulary by substring, which misses
+ * hyphenated header names (`x-api-key`); normalising separators out closes that
+ * without widening the shared pattern list used for attribute keys.
+ */
+function isCredentialKeyName(key: string): boolean {
+  if (isSensitiveKey(key)) return true;
+  const normalized = key.toLowerCase().replace(/[-_.\s]/gu, "");
+  return /apikey|authorization|credential|password|secret|token/u.test(normalized);
+}
+
+/** Longest string leaf the text scrubber walks; the attribute is cut to 4 KiB anyway. */
+const MAX_SCRUBBED_LEAF_LEN = 8 * 1024;
+
+/**
+ * Redact a request body recursively. Three passes over each object level:
+ * a sensitive key name masks its value, a `sensitive: true` sibling marks the
+ * neighbouring `value` (the agent-env shape), and every remaining string leaf
+ * goes through the shared text scrubber. Applied before `normalizeAttrs` so its
+ * `***` placeholders are not themselves rewritten.
+ */
+function scrubCredentialStrings(value: unknown): unknown {
+  if (typeof value === "string") {
+    if (value.length <= MAX_SCRUBBED_LEAF_LEN) return redactCredentialText(value);
+    const head = redactCredentialText(value.slice(0, MAX_SCRUBBED_LEAF_LEN));
+    return `${head}…[scrubbed ${value.length - MAX_SCRUBBED_LEAF_LEN} chars]`;
+  }
+  if (Array.isArray(value)) return value.map((item) => scrubCredentialStrings(item));
+  if (!value || typeof value !== "object") return value;
+  const record = value as Record<string, unknown>;
+  const markedSensitive = record.sensitive === true;
+  const out: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(record)) {
+    if (isCredentialKeyName(key) || (markedSensitive && key === "value")) {
+      out[key] = "***";
+      continue;
+    }
+    out[key] = scrubCredentialStrings(item);
+  }
+  return out;
+}
+
+/**
  * onSend hook that records redacted request body / query string for
  * routes that opted in via `config.otelRecordBody`. Records on **failures
  * only** (`statusCode >= 400`) so the production path doesn't pay a
@@ -174,15 +218,21 @@ const MAX_BODY_ATTR_LEN = 4096;
  * Registered globally in `buildApp`; gated per-route by
  * `request.routeOptions.config?.otelRecordBody`.
  *
- * **Redaction caveat — TOP-LEVEL ONLY.** `normalizeAttrs` applies sensitive-key
- * matching only to top-level keys; nested objects are JSON-serialized whole,
- * so a sensitive field buried inside a nested object would survive.
- * Currently every opt-in route's body is flat (`/auth/login`, `/auth/refresh`,
- * `/auth/connect-token`, `/messages` …), so this is fine. Before flagging a
- * NEW route with `otelRecordBody: true`, confirm the body is flat — or pre-
- * redact in the handler before throwing — until/unless we move to a
- * recursive scrubber. Logfire's own scrubber (configured in `logfire-init.ts`)
- * is a second-line defence on the export side.
+ * **Redaction is two-layered, and neither layer is schema-aware.**
+ * `scrubCredentialStrings` runs the shared text scrubber over every string leaf,
+ * which removes shaped credentials wherever they sit (vendor tokens, URL
+ * userinfo, `Authorization:` headers, `token=…` pairs). `normalizeAttrs` then
+ * masks values whose *key* is sensitive — top-level keys only, because a nested
+ * object is serialised whole before it becomes an attribute.
+ *
+ * The gap that leaves: a nested value whose key is meaningless to the scrubber
+ * and whose content carries no recognisable shape — `{ env: [{ key: "X",
+ * value: "hunter2" }] }` — still survives. That is why the agent runtime-config
+ * routes, whose bodies are exactly that shape, keep `otelRecordBody: false`
+ * (SEC-018). Before opting a NEW route in, check whether its body can carry
+ * credentials in a nested field; if it can, leave capture off. Logfire's own
+ * scrubber (configured in `logfire-init.ts`) is a second-line defence on the
+ * export side.
  */
 export async function bodyCaptureOnSendHook(
   request: FastifyRequest,
@@ -196,7 +246,12 @@ export async function bodyCaptureOnSendHook(
   if (!span) return payload;
 
   if (request.body && typeof request.body === "object") {
-    const redacted = normalizeAttrs(request.body as Record<string, unknown>);
+    // `normalizeAttrs` only knows top-level keys, so a credential nested inside
+    // an array or object (agent `env[].value`, an MCP `Authorization` header)
+    // survives it. Scrub the string leaves first with the shared text scrubber
+    // (SEC-018): routes that carry credentials keep body capture off entirely,
+    // and this covers the routes that stay enabled.
+    const redacted = normalizeAttrs(scrubCredentialStrings(request.body) as Record<string, unknown>);
     const serialized = JSON.stringify(redacted);
     span.setAttribute(
       FIRST_TREE_ATTR.HTTP_REQUEST_BODY,
