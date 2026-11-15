@@ -59,4 +59,17 @@ describe("agent briefing template assets", () => {
       rmSync(tempRoot, { recursive: true, force: true });
     }
   });
+
+  it("ships a DeepSeek cordis template the harness can actually boot", () => {
+    const cordis = readFileSync(
+      join(repoRoot, "packages", "client", "src", "providers", "deepseek-harness", "cordis.yml"),
+      "utf8",
+    );
+    // `toolBash` accepts `false` or an options object; `true` fails schema validation
+    // and kills the harness at boot with a ValidationError.
+    expect(cordis).not.toMatch(/^\s+toolBash:\s*true\s*$/m);
+    // `dsh-bash-local` injects the `subprocess` service. With no provider mounted the
+    // entry never activates and boot fails with "1 entry did not activate".
+    expect(cordis).toMatch(/name:\s*'@deepseek-ai\/dsh-subprocess'/);
+  });
 });
