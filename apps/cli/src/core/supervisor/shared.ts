@@ -343,6 +343,19 @@ export function systemdExecQuote(value: string): string {
   return systemdQuote(value, { expandable: true });
 }
 
+/**
+ * Quote the `ExecStart=` executable path — the first token only.
+ *
+ * The executable is resolved before argv expansion, so `$$` there would stay two
+ * literal dollars and the supervisor would look for a path containing `$$`. It
+ * therefore takes literal serialization, while the arguments that follow keep
+ * `systemdExecQuote`'s `$$`. Specifier escaping still applies: `%` is a
+ * specifier in every part of the value.
+ */
+export function systemdProgramQuote(value: string): string {
+  return systemdQuote(value, { expandable: false });
+}
+
 /** Quote one full `Environment=` assignment, e.g. `FIRST_TREE_HOME=/x`. */
 export function systemdValueQuote(value: string): string {
   return systemdQuote(value, { expandable: false });

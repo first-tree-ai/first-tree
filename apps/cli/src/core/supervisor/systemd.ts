@@ -17,6 +17,7 @@ import {
   runCaptureOut,
   systemdExecQuote,
   systemdPathEnv,
+  systemdProgramQuote,
   systemdValueQuote,
 } from "./shared.js";
 import type { ResolvedBinary, ServiceInfo, ServiceOpResult, ServiceState, SupervisorBackend } from "./types.js";
@@ -91,8 +92,8 @@ export function renderSystemdUnit(
 ): string {
   const execStart: string =
     invocation.kind === "bin"
-      ? `${systemdExecQuote(invocation.program)} daemon start --no-interactive`
-      : `${systemdExecQuote(invocation.program)} ${invocation.args.map(systemdExecQuote).join(" ")} daemon start --no-interactive`;
+      ? `${systemdProgramQuote(invocation.program)} daemon start --no-interactive`
+      : `${systemdProgramQuote(invocation.program)} ${invocation.args.map(systemdExecQuote).join(" ")} daemon start --no-interactive`;
 
   // Always pin FIRST_TREE_HOME into the unit. Without this line, systemd's
   // launched process inherits only the user manager's env — FIRST_TREE_HOME

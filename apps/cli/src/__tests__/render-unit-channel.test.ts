@@ -16,7 +16,7 @@ import {
   windowsSupervisorLogPath,
   windowsSupervisorWrapperLogPath,
 } from "../core/service-install.js";
-import { systemdExecQuote, systemdValueQuote } from "../core/supervisor/shared.js";
+import { systemdExecQuote, systemdProgramQuote, systemdValueQuote } from "../core/supervisor/shared.js";
 
 /**
  * Lock the channel → unit-file contract at the unit-template layer.
@@ -362,6 +362,30 @@ describe("systemd unit quoting", () => {
     expect(systemdExecQuote("/tmp/$HOME/bin")).not.toMatch(/(?<!\$)\$HOME/u);
     expect(systemdExecQuote("/srv/100%/bin")).toContain("%%");
     expect(systemdValueQuote("PATH=/srv/100%")).toContain("%%");
+  });
+
+  it("does not escape `$` in the executable, which systemd never expands", () => {
+    // systemd resolves the program before it expands argv, so `$$` in the first
+    // token would be looked up literally and the binary would not be found.
+    for (const value of AWKWARD) {
+      expect(systemdUnquote(systemdProgramQuote(value), { expandable: false })).toBe(value);
+    }
+    expect(systemdProgramQuote("/opt/$bin/first-tree")).toBe('"/opt/$bin/first-tree"');
+    // Specifier escaping still applies to the executable.
+    expect(systemdProgramQuote("/srv/100%/bin")).toBe('"/srv/100%%/bin"');
+    // Args keep the argv expansion form.
+    expect(systemdExecQuote("/opt/$bin/x")).toBe('"/opt/$$bin/x"');
+  });
+
+  it("renders a dollar-bearing executable path literally", () => {
+    const unit = renderSystemdUnit(
+      { kind: "node", program: "/opt/$channel/bin/first-tree", args: ["/opt/$channel/app"] },
+      "user",
+      "/opt/node/bin:/usr/bin",
+    );
+    expect(unit).toContain(
+      'ExecStart="/opt/$channel/bin/first-tree" "/opt/$$channel/app" daemon start --no-interactive',
+    );
   });
 
   it("renders the unit with one quoted item per argument and assignment", () => {
