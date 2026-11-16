@@ -53,6 +53,7 @@ import {
   resolveDeepseekModel,
   resolveDeepseekRuntimeBinary,
 } from "./binary.js";
+import { resolveDeepseekApiKeyForLaunch } from "./credentials.js";
 import { classifyDeepseekRunFailure, mapDeepseekSessionEvent, sessionEventFromNotification } from "./events.js";
 
 export const DEEPSEEK_PENDING_SESSION_PREFIX = "deepseek-harness-pending-";
@@ -222,6 +223,10 @@ export const createDeepseekHandler: HandlerFactory = (config) => {
     const env: Record<string, string> = {};
     for (const [key, value] of Object.entries(merged)) {
       if (typeof value === "string") env[key] = value;
+    }
+    if (!env.DEEPSEEK_API_KEY) {
+      const fallbackKey = resolveDeepseekApiKeyForLaunch({ env: base });
+      if (fallbackKey) env.DEEPSEEK_API_KEY = fallbackKey;
     }
     env.DSH_SESSION_ROOT = deepseekSessionRoot(workspaceCwd);
     env.DSH_SKILLS_ROOT = PROVIDER_SKILL_ROOTS["deepseek-harness"];
