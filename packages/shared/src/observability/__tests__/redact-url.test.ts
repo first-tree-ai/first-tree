@@ -33,6 +33,27 @@ describe("redactUrl", () => {
     );
   });
 
+  it("matches percent-encoded query keys, the way the router decodes them", () => {
+    // Fastify hands the route the decoded name, so `%74oken` is `token` there.
+    expect(redactUrl("/api/v1/me?%74oken=abc123")).toBe("/api/v1/me?%74oken=***");
+    expect(redactUrl("/api/v1/auth/github/callback?%63ode=abc&state=xyz")).toBe(
+      "/api/v1/auth/github/callback?%63ode=***&state=***",
+    );
+    // The key keeps its original spelling; only the value is replaced.
+    expect(redactUrl("/api/v1/me?access%5Ftoken=abc")).toBe("/api/v1/me?access%5Ftoken=***");
+  });
+
+  it("leaves malformed escapes alone instead of rewriting the URL", () => {
+    expect(redactUrl("/api/v1/me?%E0%A4%A=x&safe=1")).toBe("/api/v1/me?%E0%A4%A=x&safe=1");
+    expect(redactUrl("/api/v1/me?%zz=1")).toBe("/api/v1/me?%zz=1");
+  });
+
+  it("does not decode values or unrelated bytes", () => {
+    // A percent-encoded *value* must survive verbatim: the scrubber only ever
+    // touches values whose key is sensitive.
+    expect(redactUrl("/api/v1/x?a=%74oken&token=1")).toBe("/api/v1/x?a=%74oken&token=***");
+  });
+
   it("leaves code/state readable outside auth routes", () => {
     // `state` is an ordinary session filter and `code` an ordinary error field;
     // masking them everywhere would cost diagnostics for no confidentiality.

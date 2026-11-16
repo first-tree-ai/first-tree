@@ -45,6 +45,24 @@ const OAUTH_CALLBACK_PATH_RE = /(?:\/auth\/|\/oauth\/)/u;
 
 const REDACTED = "***";
 
+/**
+ * Decode a query key the way the HTTP layer does before routing.
+ *
+ * Fastify hands handlers the *decoded* parameter names, so `?%74oken=…` is
+ * `token` to the route and must be redacted here too — otherwise a client can
+ * keep a credential out of the log line while the server still reads it.
+ * `+` is a space in form-encoded queries. Malformed escapes return `null` and
+ * the caller falls back to matching the raw key, which is the previous
+ * behaviour.
+ */
+function decodeQueryKey(key: string): string | null {
+  try {
+    return decodeURIComponent(key.replace(/\+/gu, " "));
+  } catch {
+    return null;
+  }
+}
+
 /** Routes whose path segment is itself a capability token. */
 const SECRET_PATH_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/(\/api\/v1\/webhooks\/gitlab\/)[^/?#]+/g, `$1${REDACTED}`],
@@ -60,9 +78,11 @@ const SECRET_PATH_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
  *
  * Two shapes are masked: capability tokens that live in a path segment (see
  * `SECRET_PATH_PATTERNS`), and query values whose key is in `REDACT_QUERY_KEYS`.
- * The query is walked by `&` then by the **first** `=`; only the key is matched,
- * the value is never inspected, so `?organizationId=019dfb...` is preserved
- * regardless of how the value happens to look.
+ * The query is walked by `&` then by the **first** `=`; the key is decoded
+ * (percent escapes and `+`, as the router does) and matched against the sets,
+ * while the value is never inspected, so `?organizationId=019dfb...` is
+ * preserved regardless of how the value happens to look — and so is the key's
+ * original spelling.
  */
 export function redactUrl(url: string): string {
   let pathRedacted = url;
@@ -81,7 +101,10 @@ export function redactUrl(url: string): string {
       const eq = pair.indexOf("=");
       if (eq === -1) return pair;
       const key = pair.slice(0, eq);
-      const sensitive = REDACT_QUERY_KEYS.has(key) || (oauthCallback && OAUTH_CALLBACK_QUERY_KEYS.has(key));
+      // Only the key is decoded: a sensitive pair is re-emitted with its value
+      // replaced and every other byte of the URL left as it arrived.
+      const keyName = decodeQueryKey(key) ?? key;
+      const sensitive = REDACT_QUERY_KEYS.has(keyName) || (oauthCallback && OAUTH_CALLBACK_QUERY_KEYS.has(keyName));
       return sensitive ? `${key}=${REDACTED}` : pair;
     })
     .join("&");
