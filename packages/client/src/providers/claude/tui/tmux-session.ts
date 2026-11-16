@@ -79,34 +79,21 @@ function carriesEnvironment(args: readonly string[]): boolean {
 }
 
 /**
- * Remove the values of every `-e KEY=value` assignment from arbitrary text.
+ * Free-form stderr is withheld for a credential-bearing launch.
  *
  * tmux echoes argument and environment problems on stderr, and a server that
- * rejects a variable can quote the value back. We know the secrets because they
- * are in the argv we built, so they can be removed without discarding the rest
- * of the diagnostic (SEC-032).
+ * rejects a variable can quote its value back in a form we cannot predict
+ * (truncated, re-quoted, re-ordered). Substituting the strings we happen to know
+ * cannot guarantee the result is safe, so nothing free-form is forwarded at all
+ * (SEC-032). The exit code still identifies the failure, and launches without
+ * `-e` keep their stderr verbatim.
  */
-export function redactEnvValues(text: string, args: readonly string[]): string {
-  let out = text;
-  for (let index = 0; index < args.length; index += 1) {
-    if (args[index] !== "-e") continue;
-    const assignment = args[index + 1] ?? "";
-    const separator = assignment.indexOf("=");
-    if (separator === -1) continue;
-    const value = assignment.slice(separator + 1);
-    // Very short values would shred unrelated text for no confidentiality gain.
-    if (value.length < 4) continue;
-    out = out.split(value).join("***");
-  }
-  return out;
-}
+const WITHHELD_STDERR = "stderr withheld: this launch carries -e environment values";
 
 async function tmuxOrThrow(args: string[], timeoutMs?: number): Promise<string> {
   const result = await runTmux(args, timeoutMs);
   if (!result.ok) {
-    const stderr = carriesEnvironment(args)
-      ? `${redactEnvValues(result.stderr.trim(), args)} [stderr redacted against -e values]`
-      : result.stderr.trim();
+    const stderr = carriesEnvironment(args) ? WITHHELD_STDERR : result.stderr.trim();
     throw new Error(`tmux ${redactTmuxArgsForLog(args)} failed (code=${result.code ?? "n/a"}): ${stderr}`);
   }
   return result.stdout;

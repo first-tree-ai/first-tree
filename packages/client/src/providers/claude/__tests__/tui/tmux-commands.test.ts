@@ -177,7 +177,7 @@ describe("tmux command helpers", () => {
         env: { OPENAI_API_KEY: "sk-live-do-not-log", PATH: "/usr/bin" },
       }),
     ).rejects.toThrow(
-      "tmux new-session -d -s ftth-secret -x 220 -y 60 -c /repo -e OPENAI_API_KEY=*** -e PATH=*** claude failed (code=1): server exited [stderr redacted against -e values]",
+      "tmux new-session -d -s ftth-secret -x 220 -y 60 -c /repo -e OPENAI_API_KEY=*** -e PATH=*** claude failed (code=1): stderr withheld: this launch carries -e environment values",
     );
 
     await expect(
@@ -190,10 +190,11 @@ describe("tmux command helpers", () => {
     ).rejects.not.toThrow("sk-live-do-not-log");
   });
 
-  it("removes credential values that tmux echoes on stderr", async () => {
+  it("withholds free-form stderr when tmux quotes a credential value back", async () => {
     // SEC-032: tmux quotes the offending assignment back, e.g.
-    // "invalid environment variable: OPENAI_API_KEY=sk-live-…". Masking argv is
-    // not enough; the value has to be removed from stderr too.
+    // "invalid environment variable: OPENAI_API_KEY=sk-live-…". Substituting the
+    // values we know cannot cover re-quoted/truncated forms, so the whole stream
+    // is withheld and only the exit code is forwarded.
     installSpawnMock((record) =>
       closeSoon(record, { code: 1, stderr: "server exited: OPENAI_API_KEY=sk-live-do-not-log (invalid)" }),
     );
@@ -209,8 +210,9 @@ describe("tmux command helpers", () => {
     expect(error).toBeInstanceOf(Error);
     const message = (error as Error).message;
     expect(message).not.toContain("sk-live-do-not-log");
-    expect(message).toContain("OPENAI_API_KEY=*** (invalid)");
-    expect(message).toContain("stderr redacted against -e values");
+    expect(message).toContain("OPENAI_API_KEY=***");
+    expect(message).toContain("stderr withheld: this launch carries -e environment values");
+    expect(message).not.toContain("invalid");
   });
 
   it("keeps stderr verbatim when the launch carries no environment", async () => {

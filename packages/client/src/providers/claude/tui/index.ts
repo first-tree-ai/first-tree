@@ -218,8 +218,8 @@ export const createClaudeCodeTuiHandler: HandlerFactory = (config) => {
       args.push("--model", shellQuote(payload.model));
     }
 
-    // Runtime-owned scratch dir, not the agent-writable workspace (SEC-032).
-    const tempDir = ensureConfigTempDir(sessionId);
+    // Runtime-owned, freshly created scratch dir per launch (SEC-032).
+    const tempDir = ensureConfigTempDir();
     configTempDir = tempDir;
 
     if (payload.mcpServers.length > 0) {

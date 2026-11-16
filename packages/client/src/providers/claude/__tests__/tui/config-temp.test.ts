@@ -1,14 +1,14 @@
-import { chmodSync, existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { configTempRoot, ensureConfigTempDir, writeConfigTempFile } from "../../tui/config-temp.js";
 
 /**
- * SEC-032: the per-session config dir holds MCP server definitions (with
- * `Authorization` headers) and the rendered prompt. It used to live inside the
- * agent-writable workspace and to be chmod'ed after the write, so a wide umask
- * or a crash left a readable credential file behind.
+ * SEC-032: the launch scratch dir holds MCP server definitions (with
+ * `Authorization` headers) and the rendered prompt. It must not live in the
+ * agent-writable workspace, must not be reused across launches, and its files
+ * must not be able to overwrite an existing path.
  */
 describe("config temp dir", () => {
   const dirs: string[] = [];
@@ -35,46 +35,48 @@ describe("config temp dir", () => {
 
   it("defaults to a runtime-owned root, not the workspace", () => {
     const workspace = scratch();
-    const dir = ensureConfigTempDir("session-1");
+    const dir = ensureConfigTempDir();
 
     expect(dir.startsWith(workspace)).toBe(false);
     expect(dir.startsWith(configTempRoot())).toBe(true);
     expect(dir.startsWith(process.env.FIRST_TREE_HOME ?? "")).toBe(true);
   });
 
-  it("creates the session directory 0700", () => {
-    const dir = ensureConfigTempDir("session-1", scratch());
-    expect(statSync(dir).mode & 0o777).toBe(0o700);
-    expect(statSync(join(dir, "..")).mode & 0o777).toBe(0o700);
-  });
-
-  it("tightens a directory that already exists with a wider mode", () => {
+  it("creates a fresh 0700 directory per launch", () => {
     const root = scratch();
-    const dir = ensureConfigTempDir("session-1", root);
-    chmodSync(dir, 0o755);
+    const first = ensureConfigTempDir(root);
+    const second = ensureConfigTempDir(root);
 
-    expect(ensureConfigTempDir("session-1", root)).toBe(dir);
-    expect(statSync(dir).mode & 0o777).toBe(0o700);
+    expect(first).not.toBe(second);
+    expect(statSync(first).mode & 0o777).toBe(0o700);
+    expect(statSync(second).mode & 0o777).toBe(0o700);
+    expect(statSync(root).mode & 0o777).toBe(0o700);
   });
 
-  it("writes files 0600, including over a wider pre-existing file", () => {
-    const dir = ensureConfigTempDir("session-1", scratch());
+  it("writes files 0600", () => {
+    const dir = ensureConfigTempDir(scratch());
     const path = join(dir, "mcp-config.json");
 
     writeConfigTempFile(path, '{"mcpServers":{}}');
-    expect(statSync(path).mode & 0o777).toBe(0o600);
 
-    // A credential file left by an older build must not stay group-readable,
-    // even for the instant before the rewrite finishes.
-    chmodSync(path, 0o644);
-    writeConfigTempFile(path, '{"mcpServers":{"x":{}}}');
     expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(readFileSync(path, "utf8")).toBe('{"mcpServers":{}}');
   });
 
-  it("replaces contents instead of appending", () => {
-    const dir = ensureConfigTempDir("session-1", scratch());
+  it("refuses to overwrite an existing path instead of truncating it", () => {
+    const dir = ensureConfigTempDir(scratch());
     const path = join(dir, "runtime-context.md");
-    writeFileSync(path, "stale");
+    writeFileSync(path, "stale", { mode: 0o644 });
+
+    expect(() => writeConfigTempFile(path, "fresh")).toThrow(/EEXIST/u);
+    // The original bytes are untouched: the failure happened at open, not
+    // after a truncate.
+    expect(readFileSync(path, "utf8")).toBe("stale");
+  });
+
+  it("replaces contents within a fresh directory", () => {
+    const dir = ensureConfigTempDir(scratch());
+    const path = join(dir, "runtime-context.md");
 
     writeConfigTempFile(path, "fresh");
     expect(statSync(path).size).toBe("fresh".length);
@@ -82,7 +84,7 @@ describe("config temp dir", () => {
 
   it("does not write into the workspace it is given", () => {
     const workspace = scratch();
-    const dir = ensureConfigTempDir("session-1", scratch());
+    const dir = ensureConfigTempDir(scratch());
     writeConfigTempFile(join(dir, "runtime-context.md"), "x");
 
     expect(existsSync(join(workspace, ".claude-code-tui"))).toBe(false);
