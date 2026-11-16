@@ -4,8 +4,7 @@ import { open, realpath, stat } from "node:fs/promises";
 import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { defaultDataDir } from "@first-tree/shared/config";
 import { AppError, ForbiddenError, NotFoundError } from "../../../errors.js";
-
-const MAX_DOC_BYTES = 5 * 1024 * 1024;
+import { MAX_DOC_BYTES, readBounded } from "./bounded-read.js";
 
 /**
  * `O_NONBLOCK` keeps a workspace entry that is not a file (a FIFO an agent
@@ -14,27 +13,6 @@ const MAX_DOC_BYTES = 5 * 1024 * 1024;
  */
 const READ_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0);
 
-/**
- * Read at most `MAX_DOC_BYTES` from an already-validated descriptor.
- *
- * `handle.readFile()` reads until EOF, so a file that grows between the size
- * check and the read could return more than the preview limit. Reading one byte
- * past the limit makes the overflow visible instead of silently truncating.
- */
-async function readBounded(handle: FileHandle): Promise<string> {
-  const buffer = Buffer.alloc(MAX_DOC_BYTES + 1);
-  let filled = 0;
-  for (;;) {
-    const { bytesRead } = await handle.read(buffer, filled, buffer.length - filled, filled);
-    if (bytesRead === 0) break;
-    filled += bytesRead;
-    if (filled > MAX_DOC_BYTES) {
-      throw new AppError(413, "Document is larger than the 5MB preview limit");
-    }
-  }
-  return buffer.subarray(0, filled).toString("utf8");
-}
-
 export type WorkspaceDocPreviewInput = {
   chatId: string;
   agentId: string;
@@ -42,6 +20,12 @@ export type WorkspaceDocPreviewInput = {
   path: string;
   basePath?: string;
   workspacesRoot?: string;
+  /**
+   * Descriptor factory. Production uses `open`; tests pass a fake descriptor to
+   * model a file that reports a small size and then yields more bytes, which no
+   * real filesystem can be made to do deterministically.
+   */
+  openFile?: (path: string, flags: number) => Promise<FileHandle>;
 };
 
 export type MeDocPreview = {
@@ -79,7 +63,8 @@ export async function getMeDocPreview(input: WorkspaceDocPreviewInput): Promise<
     throw new ForbiddenError("Document preview only supports markdown files in the agent workspace");
   }
 
-  const handle = await open(candidate, READ_FLAGS).catch(() => {
+  const openFile = input.openFile ?? open;
+  const handle = await openFile(candidate, READ_FLAGS).catch(() => {
     throw new NotFoundError("Document not found");
   });
 

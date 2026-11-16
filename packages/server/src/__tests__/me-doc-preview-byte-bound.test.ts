@@ -1,82 +1,85 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { AppError } from "../errors.js";
+import { MAX_DOC_BYTES } from "../services/chat/workspace/bounded-read.js";
 import { getMeDocPreview } from "../services/chat/workspace/document-preview.js";
 
 /**
- * SEC-020 follow-up: the descriptor check is only worth something if the read
- * from that same descriptor is bounded too. A file that passes a 5 MiB size
- * check and then grows — or a descriptor whose reported size is simply a lie —
- * must not stream past the limit into the response.
+ * SEC-020: the descriptor check is only worth something if the read from that
+ * same descriptor is bounded too.
+ *
+ * A real file cannot be made to report one size and then serve more bytes on
+ * demand, so the descriptor is injected (`openFile`) rather than mocked through
+ * a Node builtin — that keeps the case deterministic and independent of module
+ * cache / test-file order.
  */
-const growth = vi.hoisted(() => ({ armed: false, payload: "" }));
-
-vi.mock("node:fs/promises", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return {
-    ...actual,
-    open: (async (path: unknown, ...rest: unknown[]) => {
-      const real = await (actual.open as (...args: unknown[]) => Promise<Awaited<ReturnType<typeof actual.open>>>)(
-        path,
-        ...rest,
-      );
-      if (!growth.armed) return real;
-      const reported = await real.stat();
-      growth.armed = false;
-      const bytes = Buffer.from(growth.payload, "utf8");
-      return {
-        stat: async () => reported,
-        // Serves the payload while the reported stat above says it is small.
-        read: async (buffer: Buffer, offset: number, length: number, position: number) => {
-          const slice = bytes.subarray(position, position + length);
-          buffer.set(slice, offset);
-          return { bytesRead: slice.length, buffer };
-        },
-        close: async () => real.close(),
-        readFile: async () => {
-          throw new Error("readFile() is unbounded and must not be used");
-        },
-      };
-    }) as typeof actual.open,
-  };
-});
-
 const input = { chatId: "chat-1", agentId: "agent-1", agentName: "coder" };
 
-async function fixture(): Promise<{ workspacesRoot: string; workspaceRoot: string }> {
+async function fixture(): Promise<{ workspacesRoot: string; file: string }> {
   const workspacesRoot = await mkdtemp(join(tmpdir(), "first-tree-doc-growth-"));
   const workspaceRoot = join(workspacesRoot, input.agentName, input.chatId);
   await mkdir(workspaceRoot, { recursive: true });
-  await writeFile(join(workspaceRoot, "guide.md"), "# Guide", "utf8");
-  return { workspacesRoot, workspaceRoot };
+  const file = join(workspaceRoot, "guide.md");
+  await writeFile(file, "# Guide", "utf8");
+  return { workspacesRoot, file };
 }
-
-const FIVE_MIB = 5 * 1024 * 1024;
 
 describe("getMeDocPreview byte bound", () => {
   it("returns 413 when the descriptor yields more than the preview limit", async () => {
-    const { workspacesRoot } = await fixture();
-    growth.armed = true;
-    growth.payload = "a".repeat(FIVE_MIB + 1);
+    const { workspacesRoot, file } = await fixture();
+    // The identity check compares the descriptor stat with the path stat, so the
+    // fake reports the real inode and then serves one byte past the limit.
+    const real = await stat(file);
 
-    const error = await getMeDocPreview({ ...input, path: "guide.md", workspacesRoot }).catch(
-      (thrown: unknown) => thrown,
-    );
+    const error = await getMeDocPreview({
+      ...input,
+      path: "guide.md",
+      workspacesRoot,
+      openFile: async () =>
+        ({
+          stat: async () => real,
+          read: async (buffer: Buffer, offset: number, length: number) => {
+            const available = Math.min(length, MAX_DOC_BYTES + 1);
+            buffer.fill("a", offset, offset + available);
+            return { bytesRead: available, buffer };
+          },
+          readFile: async () => {
+            throw new Error("readFile() is unbounded and must not be used");
+          },
+          close: async () => undefined,
+        }) as never,
+    }).catch((thrown: unknown) => thrown);
 
     expect(error).toBeInstanceOf(AppError);
     expect((error as AppError).statusCode).toBe(413);
     expect((error as Error).message).toContain("5MB preview limit");
   });
 
-  it("still reads a file that fits, through the checked descriptor", async () => {
-    const { workspacesRoot } = await fixture();
-    growth.armed = true;
-    growth.payload = "# Guide";
+  it("still reads a file that fits through the injected descriptor", async () => {
+    const { workspacesRoot, file } = await fixture();
+    const real = await stat(file);
 
-    const preview = await getMeDocPreview({ ...input, path: "guide.md", workspacesRoot });
+    const preview = await getMeDocPreview({
+      ...input,
+      path: "guide.md",
+      workspacesRoot,
+      openFile: async () => {
+        const bytes = Buffer.from("# Guide", "utf8");
+        return {
+          stat: async () => real,
+          read: async (buffer: Buffer, offset: number, length: number, position: number) => {
+            const slice = bytes.subarray(position, position + length);
+            buffer.set(slice, offset);
+            return { bytesRead: slice.length, buffer };
+          },
+          close: async () => undefined,
+        } as never;
+      },
+    });
+
     expect(preview.content).toBe("# Guide");
-    expect(preview.path).toBe("guide.md");
+    expect(preview.ref.path).toBe("guide.md");
   });
 });
