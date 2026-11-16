@@ -99,7 +99,11 @@ function noticeLead(payload: ProviderRetryEventPayload): string {
         return `${provider} could not ${action}: credentials need attention. On this machine run \`amp login\`, then retry.`;
       }
       if (payload.provider === "deepseek-harness") {
-        return `${provider} could not ${action}: credentials need attention. On this machine set \`DEEPSEEK_API_KEY\`, then retry.`;
+        return (
+          `${provider} could not ${action}: credentials need attention. On this machine set \`DEEPSEEK_API_KEY\` via ` +
+          `${daemonEnvFile()}, or allow reusing the DSH desktop credential for this agent by setting ` +
+          `\`FIRST_TREE_DEEPSEEK_ALLOW_DESKTOP_CREDENTIALS\` there, then retry.`
+        );
       }
       if (payload.provider === "pi") {
         return `${provider} could not ${action}: credentials need attention. On this machine run \`pi\`, then enter \`/login\`, and retry.`;
