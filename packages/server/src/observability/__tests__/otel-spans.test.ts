@@ -41,6 +41,8 @@ import {
 import {
   attachRequestContext,
   bodyCaptureOnSendHook,
+  createScrubBudget,
+  scrubCredentialStrings,
   stampAgentResource,
   stampClientResource,
 } from "../request-context.js";
@@ -385,29 +387,67 @@ describe("bodyCaptureOnSendHook", () => {
     expect(raw).not.toContain("sk-proj-");
   });
 
-  it("bounds the walk by node count on a very wide body", async () => {
-    const tracer = trace.getTracer("test");
-    const span = tracer.startSpan("t");
-    const traceId = span.spanContext().traceId;
-
-    // 20 000 entries: without a node budget the walk would visit every leaf and
-    // then serialise all of them. What the attribute shows is the 4 KiB head,
-    // so the proof is that the walk terminates quickly and the tail (both the
-    // remaining fields and the credential parked after them) is never reached.
+  it("stops adding object entries once the budget is spent", () => {
+    // 20 000 entries with the credential last: the proof is structural, not a
+    // wall-clock threshold — the budget reaches zero, the container stops
+    // growing, one marker is appended, and the tail is never read.
     const wide: Record<string, unknown> = {};
     for (let index = 0; index < 20_000; index += 1) wide[`field${index}`] = "value";
     wide.secretAtTheEnd = "hunter2";
 
-    const started = Date.now();
+    const budget = createScrubBudget();
+    const scrubbed = scrubCredentialStrings(wide, 0, budget) as Record<string, unknown>;
+    const keys = Object.keys(scrubbed);
+
+    expect(budget.steps).toBe(0);
+    expect(keys.at(-1)).toBe("…");
+    expect(scrubbed["…"]).toBe("…[omitted]");
+    expect(keys.filter((key) => key === "…")).toHaveLength(1);
+    expect(keys.length).toBeLessThan(2_100);
+    expect(scrubbed.secretAtTheEnd).toBeUndefined();
+    expect(Object.values(scrubbed)).not.toContain("hunter2");
+  });
+
+  it("stops an array at the budget instead of mapping every element", () => {
+    const items = Array.from({ length: 20_000 }, () => "value");
+
+    const budget = createScrubBudget();
+    const scrubbed = scrubCredentialStrings(items, 0, budget) as unknown[];
+
+    expect(budget.steps).toBe(0);
+    expect(scrubbed.length).toBeLessThan(2_100);
+    expect(scrubbed.at(-1)).toBe("…[omitted]");
+    expect(scrubbed.filter((item) => item === "…[omitted]")).toHaveLength(1);
+  });
+
+  it("bounds the characters handed to serialization", () => {
+    // Without a character budget 50 × 8 KiB leaves would be stringified whole
+    // (400 KiB) even though the attribute keeps 4 KiB.
+    const leaves = Array.from({ length: 50 }, () => "x".repeat(8 * 1024));
+
+    const budget = createScrubBudget();
+    const scrubbed = scrubCredentialStrings({ leaves }, 0, budget);
+
+    expect(budget.chars).toBe(0);
+    expect(JSON.stringify(scrubbed).length).toBeLessThan(80 * 1024);
+  });
+
+  it("does not leak a credential parked past the budget", async () => {
+    const tracer = trace.getTracer("test");
+    const span = tracer.startSpan("t");
+    const traceId = span.spanContext().traceId;
+
+    const wide: Record<string, unknown> = {};
+    for (let index = 0; index < 20_000; index += 1) wide[`field${index}`] = "value";
+    wide.secretAtTheEnd = "hunter2";
+
     const req = makeRequestWith(span, { otelRecordBody: true }, wide);
     await bodyCaptureOnSendHook(req, makeReply(400), null);
-    const elapsed = Date.now() - started;
     span.end();
 
     const raw = findFinished(traceId).attributes[FIRST_TREE_ATTR.HTTP_REQUEST_BODY] as string;
     expect(raw).toContain("…[truncated");
     expect(raw).not.toContain("hunter2");
-    expect(elapsed).toBeLessThan(2_000);
   });
 
   it("never changes the response when capture itself throws", async () => {

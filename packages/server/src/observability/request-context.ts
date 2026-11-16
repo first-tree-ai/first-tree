@@ -185,14 +185,26 @@ const MAX_SCRUBBED_LEAF_LEN = 8 * 1024;
  * Bounds on the recursive walk. The leaf limit caps each string, but not the
  * number of strings: a client controls this body, so a deeply nested or very
  * wide payload could otherwise spend unbounded time (and stack) on a failing
- * request. The remainder is replaced with a marker rather than dropped silently.
+ * request, and the result would then be handed to `JSON.stringify` in full.
+ *
+ * Three budgets are therefore shared by one walk: nodes visited, characters
+ * carried, and depth. All three **stop** the walk instead of only trimming its
+ * output, so the structure handed to serialization is bounded by construction
+ * rather than by whatever `JSON.stringify` then produces.
  */
 const MAX_SCRUB_DEPTH = 8;
 const MAX_SCRUB_STEPS = 2_000;
+const MAX_SCRUB_CHARS = 64 * 1024;
 const SCRUB_OMITTED = "…[omitted]";
+/** Reserved key for the single truncation marker inside an object. */
+const SCRUB_OMITTED_KEY = "…";
 
-/** Redaction budget shared by one body walk; steps are nodes visited. */
-type ScrubBudget = { steps: number };
+/** Shared redaction budget: nodes visited, and characters of string content. */
+export type ScrubBudget = { steps: number; chars: number };
+
+export function createScrubBudget(): ScrubBudget {
+  return { steps: MAX_SCRUB_STEPS, chars: MAX_SCRUB_CHARS };
+}
 
 /**
  * Redact a request body recursively. Three passes over each object level:
@@ -201,30 +213,54 @@ type ScrubBudget = { steps: number };
  * goes through the shared text scrubber. Applied before `normalizeAttrs` so its
  * `***` placeholders are not themselves rewritten.
  *
- * The walk is bounded by depth and visited-node count, not only per string.
+ * The walk is bounded by depth, visited nodes **and** carried characters. When a
+ * budget is spent the container stops growing and gets one omission marker; keys
+ * after that point are never read, so a credential parked behind them is never
+ * reached either.
  */
-function scrubCredentialStrings(value: unknown, depth = 0, budget: ScrubBudget = { steps: MAX_SCRUB_STEPS }): unknown {
-  if (budget.steps <= 0) return SCRUB_OMITTED;
+export function scrubCredentialStrings(value: unknown, depth = 0, budget: ScrubBudget = createScrubBudget()): unknown {
+  if (budget.steps <= 0 || budget.chars <= 0) return SCRUB_OMITTED;
   budget.steps -= 1;
   if (typeof value === "string") {
-    if (value.length <= MAX_SCRUBBED_LEAF_LEN) return redactCredentialText(value);
-    const head = redactCredentialText(value.slice(0, MAX_SCRUBBED_LEAF_LEN));
-    return `${head}…[scrubbed ${value.length - MAX_SCRUBBED_LEAF_LEN} chars]`;
+    const allowance = Math.min(MAX_SCRUBBED_LEAF_LEN, budget.chars);
+    budget.chars -= Math.min(value.length, allowance);
+    if (value.length <= allowance) return redactCredentialText(value);
+    const head = redactCredentialText(value.slice(0, allowance));
+    return `${head}…[scrubbed ${value.length - allowance} chars]`;
   }
   if (!Array.isArray(value) && (!value || typeof value !== "object")) return value;
   if (depth >= MAX_SCRUB_DEPTH) return SCRUB_OMITTED;
+
   if (Array.isArray(value)) {
-    return value.map((item) => scrubCredentialStrings(item, depth + 1, budget));
+    const out: unknown[] = [];
+    // Indexed loop, not `map`: `map` visits every element, so a 20 000-element
+    // array would still be walked after the budget was gone.
+    for (let index = 0; index < value.length; index += 1) {
+      if (budget.steps <= 0 || budget.chars <= 0) {
+        out.push(SCRUB_OMITTED);
+        break;
+      }
+      out.push(scrubCredentialStrings(value[index], depth + 1, budget));
+    }
+    return out;
   }
+
   const record = value as Record<string, unknown>;
   const markedSensitive = record.sensitive === true;
   const out: Record<string, unknown> = {};
-  for (const [key, item] of Object.entries(record)) {
+  // `for…in` walks own keys lazily; `Object.entries` would allocate the whole
+  // entry list for a body that is about to be cut short anyway.
+  for (const key in record) {
+    if (!Object.hasOwn(record, key)) continue;
+    if (budget.steps <= 0 || budget.chars <= 0) {
+      out[SCRUB_OMITTED_KEY] = SCRUB_OMITTED;
+      break;
+    }
     if (isCredentialKeyName(key) || (markedSensitive && key === "value")) {
       out[key] = "***";
       continue;
     }
-    out[key] = scrubCredentialStrings(item, depth + 1, budget);
+    out[key] = scrubCredentialStrings(record[key], depth + 1, budget);
   }
   return out;
 }
@@ -272,6 +308,11 @@ export async function bodyCaptureOnSendHook(
       // survives it. Scrub the string leaves first with the shared text scrubber
       // (SEC-018): routes that carry credentials keep body capture off entirely,
       // and this covers the routes that stay enabled.
+      //
+      // The walk returns a structure whose string content is already bounded
+      // (nodes, characters and depth), so `JSON.stringify` below receives a
+      // bounded input instead of a client-sized one. The 4 KiB cut is a second,
+      // stricter bound on what reaches the span.
       const redacted = normalizeAttrs(scrubCredentialStrings(request.body) as Record<string, unknown>);
       const serialized = JSON.stringify(redacted);
       span.setAttribute(
