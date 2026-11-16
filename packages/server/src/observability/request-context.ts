@@ -182,20 +182,40 @@ function isCredentialKeyName(key: string): boolean {
 const MAX_SCRUBBED_LEAF_LEN = 8 * 1024;
 
 /**
+ * Bounds on the recursive walk. The leaf limit caps each string, but not the
+ * number of strings: a client controls this body, so a deeply nested or very
+ * wide payload could otherwise spend unbounded time (and stack) on a failing
+ * request. The remainder is replaced with a marker rather than dropped silently.
+ */
+const MAX_SCRUB_DEPTH = 8;
+const MAX_SCRUB_STEPS = 2_000;
+const SCRUB_OMITTED = "…[omitted]";
+
+/** Redaction budget shared by one body walk; steps are nodes visited. */
+type ScrubBudget = { steps: number };
+
+/**
  * Redact a request body recursively. Three passes over each object level:
  * a sensitive key name masks its value, a `sensitive: true` sibling marks the
  * neighbouring `value` (the agent-env shape), and every remaining string leaf
  * goes through the shared text scrubber. Applied before `normalizeAttrs` so its
  * `***` placeholders are not themselves rewritten.
+ *
+ * The walk is bounded by depth and visited-node count, not only per string.
  */
-function scrubCredentialStrings(value: unknown): unknown {
+function scrubCredentialStrings(value: unknown, depth = 0, budget: ScrubBudget = { steps: MAX_SCRUB_STEPS }): unknown {
+  if (budget.steps <= 0) return SCRUB_OMITTED;
+  budget.steps -= 1;
   if (typeof value === "string") {
     if (value.length <= MAX_SCRUBBED_LEAF_LEN) return redactCredentialText(value);
     const head = redactCredentialText(value.slice(0, MAX_SCRUBBED_LEAF_LEN));
     return `${head}…[scrubbed ${value.length - MAX_SCRUBBED_LEAF_LEN} chars]`;
   }
-  if (Array.isArray(value)) return value.map((item) => scrubCredentialStrings(item));
-  if (!value || typeof value !== "object") return value;
+  if (!Array.isArray(value) && (!value || typeof value !== "object")) return value;
+  if (depth >= MAX_SCRUB_DEPTH) return SCRUB_OMITTED;
+  if (Array.isArray(value)) {
+    return value.map((item) => scrubCredentialStrings(item, depth + 1, budget));
+  }
   const record = value as Record<string, unknown>;
   const markedSensitive = record.sensitive === true;
   const out: Record<string, unknown> = {};
@@ -204,7 +224,7 @@ function scrubCredentialStrings(value: unknown): unknown {
       out[key] = "***";
       continue;
     }
-    out[key] = scrubCredentialStrings(item);
+    out[key] = scrubCredentialStrings(item, depth + 1, budget);
   }
   return out;
 }
@@ -245,27 +265,34 @@ export async function bodyCaptureOnSendHook(
   const span = rootSpanOf(request);
   if (!span) return payload;
 
-  if (request.body && typeof request.body === "object") {
-    // `normalizeAttrs` only knows top-level keys, so a credential nested inside
-    // an array or object (agent `env[].value`, an MCP `Authorization` header)
-    // survives it. Scrub the string leaves first with the shared text scrubber
-    // (SEC-018): routes that carry credentials keep body capture off entirely,
-    // and this covers the routes that stay enabled.
-    const redacted = normalizeAttrs(scrubCredentialStrings(request.body) as Record<string, unknown>);
-    const serialized = JSON.stringify(redacted);
-    span.setAttribute(
-      FIRST_TREE_ATTR.HTTP_REQUEST_BODY,
-      serialized.length <= MAX_BODY_ATTR_LEN
-        ? serialized
-        : `${serialized.slice(0, MAX_BODY_ATTR_LEN)}…[truncated ${serialized.length - MAX_BODY_ATTR_LEN} chars]`,
-    );
-  }
-
-  if (request.query && typeof request.query === "object" && Object.keys(request.query).length > 0) {
-    const redacted = normalizeAttrs(request.query as Record<string, unknown>);
-    for (const [k, v] of Object.entries(redacted)) {
-      span.setAttribute(`http.query.${k}`, v as string | number | boolean);
+  try {
+    if (request.body && typeof request.body === "object") {
+      // `normalizeAttrs` only knows top-level keys, so a credential nested inside
+      // an array or object (agent `env[].value`, an MCP `Authorization` header)
+      // survives it. Scrub the string leaves first with the shared text scrubber
+      // (SEC-018): routes that carry credentials keep body capture off entirely,
+      // and this covers the routes that stay enabled.
+      const redacted = normalizeAttrs(scrubCredentialStrings(request.body) as Record<string, unknown>);
+      const serialized = JSON.stringify(redacted);
+      span.setAttribute(
+        FIRST_TREE_ATTR.HTTP_REQUEST_BODY,
+        serialized.length <= MAX_BODY_ATTR_LEN
+          ? serialized
+          : `${serialized.slice(0, MAX_BODY_ATTR_LEN)}…[truncated ${serialized.length - MAX_BODY_ATTR_LEN} chars]`,
+      );
     }
+
+    if (request.query && typeof request.query === "object" && Object.keys(request.query).length > 0) {
+      const redacted = normalizeAttrs(request.query as Record<string, unknown>);
+      for (const [k, v] of Object.entries(redacted)) {
+        span.setAttribute(`http.query.${k}`, v as string | number | boolean);
+      }
+    }
+  } catch {
+    // Diagnostic capture must never change the response the client was going to
+    // get: this hook runs in the onSend chain, so a throw here would replace a
+    // 4xx with a 500 (or drop the body) for a telemetry bug.
+    return payload;
   }
 
   return payload;

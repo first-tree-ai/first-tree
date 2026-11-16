@@ -366,6 +366,75 @@ describe("bodyCaptureOnSendHook", () => {
     expect(env[1]?.value).toBe("visible");
   });
 
+  it("bounds the recursive walk by depth and node count", async () => {
+    const tracer = trace.getTracer("test");
+    const span = tracer.startSpan("t");
+    const traceId = span.spanContext().traceId;
+
+    // Depth: the credential sits below the walk limit, so it is omitted rather
+    // than visited (which is what makes the bound safe, not just fast).
+    let deep: Record<string, unknown> = { password: `sk-proj-${"deep".repeat(10)}` };
+    for (let level = 0; level < 20; level += 1) deep = { nested: deep };
+
+    const req = makeRequestWith(span, { otelRecordBody: true }, deep);
+    await bodyCaptureOnSendHook(req, makeReply(400), null);
+    span.end();
+
+    const raw = findFinished(traceId).attributes[FIRST_TREE_ATTR.HTTP_REQUEST_BODY] as string;
+    expect(raw).toContain("…[omitted]");
+    expect(raw).not.toContain("sk-proj-");
+  });
+
+  it("bounds the walk by node count on a very wide body", async () => {
+    const tracer = trace.getTracer("test");
+    const span = tracer.startSpan("t");
+    const traceId = span.spanContext().traceId;
+
+    // 20 000 entries: without a node budget the walk would visit every leaf and
+    // then serialise all of them. What the attribute shows is the 4 KiB head,
+    // so the proof is that the walk terminates quickly and the tail (both the
+    // remaining fields and the credential parked after them) is never reached.
+    const wide: Record<string, unknown> = {};
+    for (let index = 0; index < 20_000; index += 1) wide[`field${index}`] = "value";
+    wide.secretAtTheEnd = "hunter2";
+
+    const started = Date.now();
+    const req = makeRequestWith(span, { otelRecordBody: true }, wide);
+    await bodyCaptureOnSendHook(req, makeReply(400), null);
+    const elapsed = Date.now() - started;
+    span.end();
+
+    const raw = findFinished(traceId).attributes[FIRST_TREE_ATTR.HTTP_REQUEST_BODY] as string;
+    expect(raw).toContain("…[truncated");
+    expect(raw).not.toContain("hunter2");
+    expect(elapsed).toBeLessThan(2_000);
+  });
+
+  it("never changes the response when capture itself throws", async () => {
+    const tracer = trace.getTracer("test");
+    const span = tracer.startSpan("t");
+    const traceId = span.spanContext().traceId;
+
+    // A body whose own-key enumeration throws stands in for any unexpected
+    // runtime failure inside the scrubber.
+    const hostile = new Proxy(
+      {},
+      {
+        ownKeys: () => {
+          throw new Error("enumeration failed");
+        },
+        getOwnPropertyDescriptor: () => ({ enumerable: true, configurable: true }),
+      },
+    );
+
+    const payload = JSON.stringify({ error: "validation failed" });
+    const req = makeRequestWith(span, { otelRecordBody: true }, hostile);
+    await expect(bodyCaptureOnSendHook(req, makeReply(400), payload)).resolves.toBe(payload);
+    span.end();
+
+    expect(findFinished(traceId).attributes[FIRST_TREE_ATTR.HTTP_REQUEST_BODY]).toBeUndefined();
+  });
+
   it("does not stamp the body when statusCode < 400 (success path)", async () => {
     const tracer = trace.getTracer("test");
     const span = tracer.startSpan("t");
