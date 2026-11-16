@@ -1,5 +1,6 @@
 import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { fetchSameOrigin } from "../http-redirect.js";
 import { FirstTreeHubSDK } from "../sdk.js";
 
 /**
@@ -95,6 +96,63 @@ describe("cross-origin redirects", () => {
       await new Promise<void>((resolve) => sameOrigin.close(() => resolve()));
     }
     expect(seen[1]).toEqual({ method: "GET", hasBody: false, contentType: undefined });
+  });
+
+  it("keeps a redirected PUT as a PUT with its body", async () => {
+    const seen: Array<{ method?: string; body: string }> = [];
+    const sameOrigin = createServer((request, response) => {
+      let body = "";
+      request.on("data", (chunk) => {
+        body += String(chunk);
+      });
+      request.on("end", () => {
+        seen.push({ method: request.method, body });
+        if (request.url === "/moved-put") {
+          // 302, not 307: the reported bug was that *all* non-GET methods were
+          // rewritten to GET for 301/302. Only POST may be.
+          response.writeHead(302, { location: "/final" });
+          response.end();
+          return;
+        }
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ repo: "acme/tree", branch: "main" }));
+      });
+    });
+    const origin = await listen(sameOrigin);
+    try {
+      // 301/302 rewrite only POST; a PUT keeps its method and body.
+      await fetchSameOrigin(`${origin}/moved-put`, {
+        method: "PUT",
+        body: JSON.stringify({ repo: "acme/tree" }),
+        headers: { "content-type": "application/json" },
+      });
+    } finally {
+      await new Promise<void>((resolve) => sameOrigin.close(() => resolve()));
+    }
+    expect(seen.map((entry) => entry.method)).toEqual(["PUT", "PUT"]);
+    expect(seen[1]?.body).toContain("acme/tree");
+  });
+
+  it("keeps HEAD a HEAD across a 303", async () => {
+    const methods: Array<string | undefined> = [];
+    const sameOrigin = createServer((request, response) => {
+      methods.push(request.method);
+      if (request.url === "/head") {
+        response.writeHead(303, { location: "/head-result" });
+        response.end();
+        return;
+      }
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{}");
+    });
+    const origin = await listen(sameOrigin);
+    try {
+      // The fetch standard rewrites every method except HEAD for 303.
+      await fetchSameOrigin(`${origin}/head`, { method: "HEAD" });
+    } finally {
+      await new Promise<void>((resolve) => sameOrigin.close(() => resolve()));
+    }
+    expect(methods).toEqual(["HEAD", "HEAD"]);
   });
 
   it("still follows a same-origin redirect", async () => {

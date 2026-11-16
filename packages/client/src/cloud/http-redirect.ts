@@ -71,14 +71,22 @@ export async function fetchSameOrigin(input: string, init: RequestInit): Promise
     }
     await response.body?.cancel().catch(() => undefined);
 
-    // 303 always switches to GET; 301/302 do the same for non-GET in practice,
-    // and replaying a JSON body across a redirect is never what the API means.
+    // Match the fetch standard rather than "GET for everything": 301/302
+    // rewrite only POST, and 303 rewrites everything except HEAD. A PUT with a
+    // body must stay a PUT with a body, and a HEAD must stay a HEAD.
+    // https://fetch.spec.whatwg.org/#http-redirect-fetch
     const method = (current.method ?? "GET").toUpperCase();
-    if (response.status === 303 || ((response.status === 301 || response.status === 302) && method !== "GET")) {
+    const rewriteToGet =
+      (response.status === 303 && method !== "HEAD") ||
+      ((response.status === 301 || response.status === 302) && method === "POST");
+    if (rewriteToGet) {
       const headers = new Headers(current.headers);
       headers.delete("content-type");
       headers.delete("content-length");
       current = { ...current, method: "GET", body: undefined, headers };
+    } else if (current.body instanceof ReadableStream) {
+      // The standard retains the body here, and a stream cannot be replayed.
+      throw new Error(`Refusing to follow a redirect with a streaming body: ${input} -> ${next.toString()}`);
     }
     url = next.toString();
   }
