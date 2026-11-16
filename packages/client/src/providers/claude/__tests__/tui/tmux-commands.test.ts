@@ -177,7 +177,7 @@ describe("tmux command helpers", () => {
         env: { OPENAI_API_KEY: "sk-live-do-not-log", PATH: "/usr/bin" },
       }),
     ).rejects.toThrow(
-      "tmux new-session -d -s ftth-secret -x 220 -y 60 -c /repo -e OPENAI_API_KEY=*** -e PATH=*** claude failed (code=1): server exited",
+      "tmux new-session -d -s ftth-secret -x 220 -y 60 -c /repo -e OPENAI_API_KEY=*** -e PATH=*** claude failed (code=1): server exited [stderr redacted against -e values]",
     );
 
     await expect(
@@ -188,6 +188,38 @@ describe("tmux command helpers", () => {
         env: { OPENAI_API_KEY: "sk-live-do-not-log" },
       }),
     ).rejects.not.toThrow("sk-live-do-not-log");
+  });
+
+  it("removes credential values that tmux echoes on stderr", async () => {
+    // SEC-032: tmux quotes the offending assignment back, e.g.
+    // "invalid environment variable: OPENAI_API_KEY=sk-live-…". Masking argv is
+    // not enough; the value has to be removed from stderr too.
+    installSpawnMock((record) =>
+      closeSoon(record, { code: 1, stderr: "server exited: OPENAI_API_KEY=sk-live-do-not-log (invalid)" }),
+    );
+    const { newSession } = await import("../../tui/tmux-session.js");
+
+    const error = await newSession({
+      name: "ftth-echo",
+      cwd: "/repo",
+      command: "claude",
+      env: { OPENAI_API_KEY: "sk-live-do-not-log" },
+    }).catch((thrown: unknown) => thrown);
+
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).not.toContain("sk-live-do-not-log");
+    expect(message).toContain("OPENAI_API_KEY=*** (invalid)");
+    expect(message).toContain("stderr redacted against -e values");
+  });
+
+  it("keeps stderr verbatim when the launch carries no environment", async () => {
+    installSpawnMock((record) => closeSoon(record, { code: 2, stderr: "no server running" }));
+    const { newSession } = await import("../../tui/tmux-session.js");
+
+    await expect(newSession({ name: "ftth-noenv", cwd: "/repo", command: "claude" })).rejects.toThrow(
+      "failed (code=2): no server running",
+    );
   });
 
   it("keeps non-env arguments verbatim in diagnostics", async () => {

@@ -201,10 +201,9 @@ export const createClaudeCodeTuiHandler: HandlerFactory = (config) => {
     sessionId: string;
     resumeSessionId: string | null;
     payload: AgentRuntimeConfigPayload;
-    workspaceCwd: string;
     claudeBin: string;
   }): string {
-    const { sessionId, resumeSessionId, payload, workspaceCwd, claudeBin } = input;
+    const { sessionId, resumeSessionId, payload, claudeBin } = input;
     const args: string[] = [
       shellQuote(claudeBin),
       "--dangerously-skip-permissions",
@@ -219,7 +218,8 @@ export const createClaudeCodeTuiHandler: HandlerFactory = (config) => {
       args.push("--model", shellQuote(payload.model));
     }
 
-    const tempDir = ensureConfigTempDir(workspaceCwd, sessionId);
+    // Runtime-owned scratch dir, not the agent-writable workspace (SEC-032).
+    const tempDir = ensureConfigTempDir(sessionId);
     configTempDir = tempDir;
 
     if (payload.mcpServers.length > 0) {
@@ -272,7 +272,6 @@ export const createClaudeCodeTuiHandler: HandlerFactory = (config) => {
       sessionId,
       resumeSessionId,
       payload,
-      workspaceCwd: cwd,
       claudeBin: claudeCodeExecutable,
     });
 

@@ -67,12 +67,47 @@ export function redactTmuxArgsForLog(args: readonly string[]): string {
   return rendered.join(" ");
 }
 
+/**
+ * True when the argv carries an `-e KEY=value` environment assignment.
+ *
+ * Those launches hand tmux the agent's resolved environment, provider keys
+ * included. tmux echoes argument and environment problems on stderr, so that
+ * stream is not safe to forward verbatim (SEC-032).
+ */
+function carriesEnvironment(args: readonly string[]): boolean {
+  return args.includes("-e");
+}
+
+/**
+ * Remove the values of every `-e KEY=value` assignment from arbitrary text.
+ *
+ * tmux echoes argument and environment problems on stderr, and a server that
+ * rejects a variable can quote the value back. We know the secrets because they
+ * are in the argv we built, so they can be removed without discarding the rest
+ * of the diagnostic (SEC-032).
+ */
+export function redactEnvValues(text: string, args: readonly string[]): string {
+  let out = text;
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] !== "-e") continue;
+    const assignment = args[index + 1] ?? "";
+    const separator = assignment.indexOf("=");
+    if (separator === -1) continue;
+    const value = assignment.slice(separator + 1);
+    // Very short values would shred unrelated text for no confidentiality gain.
+    if (value.length < 4) continue;
+    out = out.split(value).join("***");
+  }
+  return out;
+}
+
 async function tmuxOrThrow(args: string[], timeoutMs?: number): Promise<string> {
   const result = await runTmux(args, timeoutMs);
   if (!result.ok) {
-    throw new Error(
-      `tmux ${redactTmuxArgsForLog(args)} failed (code=${result.code ?? "n/a"}): ${result.stderr.trim()}`,
-    );
+    const stderr = carriesEnvironment(args)
+      ? `${redactEnvValues(result.stderr.trim(), args)} [stderr redacted against -e values]`
+      : result.stderr.trim();
+    throw new Error(`tmux ${redactTmuxArgsForLog(args)} failed (code=${result.code ?? "n/a"}): ${stderr}`);
   }
   return result.stdout;
 }
