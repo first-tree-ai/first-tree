@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { resolveDeepseekApiKeyForLaunch } from "../credentials.js";
+import { DSH_CREDENTIALS_FILE, resolveDeepseekApiKeyForLaunch } from "../credentials.js";
 
 describe("DeepSeek launch credential fallback", () => {
   const dirs: string[] = [];
@@ -54,5 +54,26 @@ describe("DeepSeek launch credential fallback", () => {
   it("ignores non-string ref values", () => {
     const home = makeHome("refs:\n  DEEPSEEK_API_KEY: 12345\n");
     expect(resolveDeepseekApiKeyForLaunch({ env: {}, home })).toBeNull();
+  });
+
+  it("resolves the credentials file under a nondefault DSH_HOME", () => {
+    const altHome = mkdtempSync(join(tmpdir(), "ft-dsh-cred-alt-"));
+    dirs.push(altHome);
+    writeFileSync(join(altHome, DSH_CREDENTIALS_FILE), "refs:\n  DEEPSEEK_API_KEY: sk-alt-key\n");
+    const emptyHome = mkdtempSync(join(tmpdir(), "ft-dsh-cred-empty-"));
+    dirs.push(emptyHome);
+    expect(resolveDeepseekApiKeyForLaunch({ env: { DSH_HOME: altHome }, home: emptyHome })).toBe("sk-alt-key");
+  });
+
+  it("expands a tilde DSH_HOME against the operator home", () => {
+    const home = mkdtempSync(join(tmpdir(), "ft-dsh-cred-tilde-"));
+    dirs.push(home);
+    writeFileSync(join(home, DSH_CREDENTIALS_FILE), "refs:\n  DEEPSEEK_API_KEY: sk-tilde-key\n");
+    expect(resolveDeepseekApiKeyForLaunch({ env: { DSH_HOME: "~" }, home })).toBe("sk-tilde-key");
+  });
+
+  it("treats a blank DSH_HOME as unset", () => {
+    const home = makeHome("refs:\n  DEEPSEEK_API_KEY: sk-default-key\n");
+    expect(resolveDeepseekApiKeyForLaunch({ env: { DSH_HOME: "   " }, home })).toBe("sk-default-key");
   });
 });

@@ -5,20 +5,34 @@ import { parse as parseYaml } from "yaml";
 
 /**
  * The official DeepSeek Harness desktop app stores its provider API keys in
- * `~/.dsh/.credentials.yaml` under `refs.<ENV_NAME>`. First Tree's embedded
- * harness runs without a credentials-service plugin, so `llm-deepseek` only
- * resolves `DEEPSEEK_API_KEY` from the launch environment — an operator whose
- * DSH desktop install already holds the key still had to re-enter it on the
- * web Models page. This fallback reuses that host-local credential file when
- * the launch environment does not carry the key.
+ * its harness home under `.credentials.yaml` at `refs.<ENV_NAME>`. The home
+ * follows the DSH home resolution — `$DSH_HOME` when set (tilde-expanded,
+ * blank treated as unset), else `~/.dsh`. First Tree's embedded harness runs
+ * without a credentials-service plugin, so `llm-deepseek` only resolves
+ * `DEEPSEEK_API_KEY` from the launch environment — an operator whose DSH
+ * desktop install already holds the key still had to re-enter it on the web
+ * Models page. This fallback reuses that host-local credential file when the
+ * launch environment does not carry the key.
  */
-export const DSH_CREDENTIALS_FILE = ".dsh/.credentials.yaml";
+export const DSH_HOME_ENV = "DSH_HOME";
+export const DSH_HOME_DIR_NAME = ".dsh";
+export const DSH_CREDENTIALS_FILE = ".credentials.yaml";
 
 export type DeepseekCredentialFallbackDeps = {
   env?: NodeJS.ProcessEnv;
   home?: string;
   readFileSyncImpl?: typeof readFileSync;
 };
+
+function resolveDshHomeDir(env: NodeJS.ProcessEnv, home: string): string {
+  const override = env[DSH_HOME_ENV]?.trim();
+  if (override) {
+    if (override === "~") return home;
+    if (override.startsWith("~/")) return join(home, override.slice(2));
+    return override;
+  }
+  return join(home, DSH_HOME_DIR_NAME);
+}
 
 /**
  * Resolve `DEEPSEEK_API_KEY` for the harness launch environment, falling back
@@ -34,7 +48,7 @@ export function resolveDeepseekApiKeyForLaunch(deps: DeepseekCredentialFallbackD
 
   const read = deps.readFileSyncImpl ?? readFileSync;
   const home = deps.home ?? env.HOME ?? homedir();
-  const credentialsPath = join(home, DSH_CREDENTIALS_FILE);
+  const credentialsPath = join(resolveDshHomeDir(env, home), DSH_CREDENTIALS_FILE);
   if (!existsSync(credentialsPath)) return null;
   try {
     const parsed: unknown = parseYaml(read(credentialsPath, "utf8"));
