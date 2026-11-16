@@ -1,4 +1,5 @@
 import { constants as fsConstants } from "node:fs";
+import type { FileHandle } from "node:fs/promises";
 import { open, realpath, stat } from "node:fs/promises";
 import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { defaultDataDir } from "@first-tree/shared/config";
@@ -12,6 +13,27 @@ const MAX_DOC_BYTES = 5 * 1024 * 1024;
  * descriptor type check below turns it into a plain 404.
  */
 const READ_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0);
+
+/**
+ * Read at most `MAX_DOC_BYTES` from an already-validated descriptor.
+ *
+ * `handle.readFile()` reads until EOF, so a file that grows between the size
+ * check and the read could return more than the preview limit. Reading one byte
+ * past the limit makes the overflow visible instead of silently truncating.
+ */
+async function readBounded(handle: FileHandle): Promise<string> {
+  const buffer = Buffer.alloc(MAX_DOC_BYTES + 1);
+  let filled = 0;
+  for (;;) {
+    const { bytesRead } = await handle.read(buffer, filled, buffer.length - filled, filled);
+    if (bytesRead === 0) break;
+    filled += bytesRead;
+    if (filled > MAX_DOC_BYTES) {
+      throw new AppError(413, "Document is larger than the 5MB preview limit");
+    }
+  }
+  return buffer.subarray(0, filled).toString("utf8");
+}
 
 export type WorkspaceDocPreviewInput = {
   chatId: string;
@@ -97,7 +119,7 @@ export async function getMeDocPreview(input: WorkspaceDocPreviewInput): Promise<
       },
       path: normalizedPath,
       // Same descriptor that passed the checks above — no second lookup by name.
-      content: await handle.readFile("utf8"),
+      content: await readBounded(handle),
     };
   } finally {
     await handle.close();
