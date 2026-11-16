@@ -92,6 +92,7 @@ import {
   uploadAttachmentResponseSchema,
   type WorkspaceChatListResponse,
 } from "@first-tree/shared";
+import { fetchSameOrigin } from "./http-redirect.js";
 import { createLogger } from "./observability/logger.js";
 
 /**
@@ -1276,7 +1277,9 @@ export class FirstTreeHubSDK {
     if (init?.headers) {
       Object.assign(headers, init.headers as Record<string, string>);
     }
-    return fetch(url, { ...init, headers, signal });
+    // SEC-058: Node keeps custom headers (x-agent-id, x-agent-runtime-session)
+    // across a cross-origin redirect; follow same-origin hops only.
+    return fetchSameOrigin(url, { ...init, headers, signal });
   }
 
   private async toSdkError(response: Response): Promise<SdkError> {
