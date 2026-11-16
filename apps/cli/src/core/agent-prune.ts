@@ -1,5 +1,6 @@
-import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
+import { basename, dirname, join, resolve, sep } from "node:path";
+import { AGENT_NAME_REGEX } from "@first-tree/shared";
 import { defaultConfigDir, defaultDataDir } from "@first-tree/shared/config";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
@@ -140,9 +141,93 @@ export function formatStaleReason(reason: StaleAliasReason): string {
  * tree under `data/workspaces/<name>`, and the session-mapping file under
  * `data/sessions/<name>.json`. Mirrors what `agent remove` does, exposed
  * separately so prune and the post-rotation override cleanup can share it.
+ *
+ * SEC-030: the name ends up in three recursive deletions, so it is validated
+ * against the canonical schema and each resolved target must still sit inside
+ * its state root. Without both checks a traversal name (`../../x`) deletes
+ * writable files outside First Tree state.
  */
 export function removeLocalAgent(name: string): void {
-  rmSync(join(defaultConfigDir(), "agents", name), { recursive: true, force: true });
-  rmSync(join(defaultDataDir(), "workspaces", name), { recursive: true, force: true });
-  rmSync(join(defaultDataDir(), "sessions", `${name}.json`), { force: true });
+  if (!AGENT_NAME_REGEX.test(name)) {
+    throw new Error(`Refusing to remove local agent "${name}": not a canonical agent name.`);
+  }
+
+  // Preflight all three targets before the first deletion. `agent remove` finds
+  // the agent through the config directory, so deleting it and then refusing on
+  // a later path would leave an agent the operator can no longer retry.
+  const planned = removalTargets(name).map((item) => ({
+    ...item,
+    target: assertContainedTarget(item.root, item.relative),
+  }));
+
+  for (const item of planned) {
+    // Re-check immediately before the delete, and delete exactly what passed.
+    // If the state root now resolves somewhere else, the successful check would
+    // describe a different path from the one this loop is about to remove, so
+    // treat any change as drift and refuse instead of deleting the stale one.
+    const verified = assertContainedTarget(item.root, item.relative);
+    if (verified !== item.target) {
+      throw new Error(`Refusing to delete ${item.target}: it now resolves to ${verified}.`);
+    }
+    rmSync(verified, { recursive: true, force: true });
+  }
+}
+
+function removalTargets(name: string): Array<{ root: string; relative: string }> {
+  return [
+    { root: defaultConfigDir(), relative: join("agents", name) },
+    { root: defaultDataDir(), relative: join("workspaces", name) },
+    { root: defaultDataDir(), relative: join("sessions", `${name}.json`) },
+  ];
+}
+
+/**
+ * Resolve `relative` under `root`, refusing anything whose on-disk location is
+ * outside it.
+ *
+ * The lexical check alone answers "does the string escape?" — it cannot see a
+ * symlinked ancestor (`config/agents -> /elsewhere`), so the comparison runs on
+ * filesystem-resolved paths: the deepest existing ancestor of the target is
+ * realpath'd, and the not-yet-existing tail is appended to it. A missing target
+ * stays a no-op, and a symlink leaf is deleted as a link rather than followed.
+ */
+function assertContainedTarget(root: string, relative: string): string {
+  const resolvedRoot = resolveThroughExisting(root);
+  const target = resolve(resolvedRoot, relative);
+  const targetParent = resolveThroughExisting(dirname(target));
+  if (targetParent !== resolvedRoot && !targetParent.startsWith(`${resolvedRoot}${sep}`)) {
+    throw new Error(`Refusing to delete ${target}: it resolves outside ${resolvedRoot}.`);
+  }
+  if (!isSymbolicLink(target)) {
+    const resolvedTarget = resolveThroughExisting(target);
+    if (resolvedTarget !== resolvedRoot && !resolvedTarget.startsWith(`${resolvedRoot}${sep}`)) {
+      throw new Error(`Refusing to delete ${target}: it resolves outside ${resolvedRoot}.`);
+    }
+  }
+  return target;
+}
+
+/** Real path of `path`, or of its deepest existing ancestor with the rest appended. */
+function resolveThroughExisting(path: string): string {
+  let current = resolve(path);
+  const missing: string[] = [];
+  for (;;) {
+    try {
+      const real = realpathSync.native(current);
+      return missing.length === 0 ? real : resolve(real, ...missing.reverse());
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return resolve(path);
+      missing.push(basename(current));
+      current = parent;
+    }
+  }
+}
+
+function isSymbolicLink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
 }
