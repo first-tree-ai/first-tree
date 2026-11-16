@@ -27,8 +27,11 @@
       filesystem:
         customSkillDirs:
           - !!js process.env.DSH_SKILLS_ROOT ?? '.agents/skills'
-    toolBash: true
+    toolBash: {}
     toolJobs: false
+
+- id: subprocess
+  name: '@deepseek-ai/dsh-subprocess'
 
 - id: bash-local
   name: '@deepseek-ai/dsh-bash-local'
