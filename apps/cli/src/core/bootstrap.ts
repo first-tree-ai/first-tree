@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { clientConfigSchema, defaultConfigDir, resolveConfigReadonly } from "@first-tree/shared/config";
 import { channelConfig } from "./channel.js";
 import { cliFetch } from "./cli-fetch.js";
+import { rememberCredentialOrigin } from "./credential-origin.js";
 
 // Function rather than top-level const: a `const = join(defaultConfigDir(), …)`
 // would lock at module load — same bundle eval-order foot-gun that
@@ -450,6 +451,8 @@ function isTokenStale(token: string, minValidityMs: number): boolean {
  * (see auth service comment), so atomicity at the file level is enough.
  */
 export function saveCredentials(creds: StoredCredentials): void {
+  rememberCredentialOrigin(creds.accessToken, creds.serverUrl);
+  rememberCredentialOrigin(creds.refreshToken, creds.serverUrl);
   const dir = dirname(credentialsPath());
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const tmp = `${credentialsPath()}.tmp.${process.pid}`;
@@ -476,7 +479,14 @@ export function loadCredentials(): StoredCredentials | null {
   try {
     const raw = JSON.parse(readFileSync(credentialsPath(), "utf-8")) as unknown;
     const data = raw as StoredCredentials;
-    if (data.accessToken && data.refreshToken && data.serverUrl) return data;
+    if (data.accessToken && data.refreshToken && data.serverUrl) {
+      // Pin each token to the origin that issued it while we still know it
+      // (SEC-023): the file can be rewritten by a refresh between this read and
+      // the request that carries the token.
+      rememberCredentialOrigin(data.accessToken, data.serverUrl);
+      rememberCredentialOrigin(data.refreshToken, data.serverUrl);
+      return data;
+    }
     return null;
   } catch {
     return null;

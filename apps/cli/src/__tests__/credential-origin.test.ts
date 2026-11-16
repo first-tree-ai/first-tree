@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CredentialOriginMismatchError, canonicalOrigin } from "../core/credential-origin.js";
+import {
+  CredentialOriginMismatchError,
+  canonicalOrigin,
+  forgetRememberedCredentialOrigins,
+} from "../core/credential-origin.js";
 
 /**
  * SEC-023: the target URL and the persisted credential are resolved
@@ -22,6 +26,7 @@ const originalHome = process.env.FIRST_TREE_HOME;
 const originalUrl = process.env.FIRST_TREE_SERVER_URL;
 
 beforeEach(() => {
+  forgetRememberedCredentialOrigins();
   home = mkdtempSync(join(tmpdir(), "ft-credential-origin-"));
   mkdirSync(join(home, "config"), { recursive: true });
   writeFileSync(
@@ -101,6 +106,56 @@ describe("cliFetch credential origin binding", () => {
       headers: { Authorization: "Bearer some-other-token" },
     });
     expect(sent).toEqual(["http://127.0.0.1:9/api/v1/auth/login"]);
+  });
+});
+
+describe("rotation between load and transport", () => {
+  const OTHER_TOKEN = [
+    Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url"),
+    Buffer.from(JSON.stringify({ sub: "prod-user", exp: Math.floor(Date.now() / 1000) + 7200 })).toString("base64url"),
+    "rotated-signature",
+  ].join(".");
+
+  function rewriteCredentials(serverUrl: string, accessToken: string): void {
+    writeFileSync(
+      join(home, "config", "credentials.json"),
+      JSON.stringify({ accessToken, refreshToken: `${accessToken}-refresh`, serverUrl }),
+      { mode: 0o600 },
+    );
+  }
+
+  it("still refuses a captured token after the file was rewritten", async () => {
+    const { loadCredentials } = await import("../core/bootstrap.js");
+    const { cliFetch } = await import("../core/cli-fetch.js");
+
+    // The command loads the production token, then a refresh (or a re-login in
+    // another terminal) rewrites the store for a different server. The token in
+    // hand is no longer in the file, but it still belongs to production.
+    expect(loadCredentials()?.accessToken).toBe(PROD_TOKEN);
+    rewriteCredentials("https://staging.example", OTHER_TOKEN);
+
+    await expect(
+      cliFetch("https://staging.example/api/v1/me", { headers: { Authorization: `Bearer ${PROD_TOKEN}` } }),
+    ).rejects.toBeInstanceOf(CredentialOriginMismatchError);
+  });
+
+  it("allows the rotated token for its own origin", async () => {
+    const { loadCredentials } = await import("../core/bootstrap.js");
+    const { cliFetch } = await import("../core/cli-fetch.js");
+
+    rewriteCredentials("https://staging.example", OTHER_TOKEN);
+    expect(loadCredentials()?.serverUrl).toBe("https://staging.example");
+
+    const sent: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL) => {
+        sent.push(String(input));
+        return new Response("{}", { status: 200 });
+      }),
+    );
+    await cliFetch("https://staging.example/api/v1/me", { headers: { Authorization: `Bearer ${OTHER_TOKEN}` } });
+    expect(sent).toEqual(["https://staging.example/api/v1/me"]);
   });
 });
 

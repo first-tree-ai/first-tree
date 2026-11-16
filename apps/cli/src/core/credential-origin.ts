@@ -25,6 +25,39 @@ export function canonicalOrigin(value: string): string | null {
   }
 }
 
+/**
+ * Token → origin for credentials this process has already loaded.
+ *
+ * The file is not a stable source of truth for a token that is already in hand:
+ * a refresh (or a re-login in another terminal) rewrites `credentials.json`, and
+ * the check below would then read a file that no longer contains the captured
+ * token and wave it through. Remembering the pair at load time makes the
+ * transport check about the credential being sent, not about whatever the file
+ * says later (SEC-023).
+ *
+ * Bounded: only the most recent pairs matter for an in-flight command.
+ */
+const MAX_REMEMBERED_ORIGINS = 16;
+const rememberedOrigins = new Map<string, string>();
+
+/** Record "this token was issued by this origin". Called wherever the CLI loads or saves credentials. */
+export function rememberCredentialOrigin(token: string, serverUrl: string): void {
+  const origin = canonicalOrigin(serverUrl);
+  if (!token || origin === null) return;
+  rememberedOrigins.delete(token);
+  rememberedOrigins.set(token, origin);
+  while (rememberedOrigins.size > MAX_REMEMBERED_ORIGINS) {
+    const oldest = rememberedOrigins.keys().next();
+    if (oldest.done) break;
+    rememberedOrigins.delete(oldest.value);
+  }
+}
+
+/** Drop the in-process memory (tests, and any code that deliberately switches identity). */
+export function forgetRememberedCredentialOrigins(): void {
+  rememberedOrigins.clear();
+}
+
 /** Stored credential, read once per check: `accessToken`/`refreshToken` + origin. */
 function readStoredCredential(): { tokens: readonly string[]; origin: string | null } | null {
   let raw: unknown;
@@ -67,9 +100,24 @@ export class CredentialOriginMismatchError extends Error {
  * exchanged token that is not persisted yet) is unaffected.
  */
 export function assertCredentialOriginForToken(requestUrl: string, token: string): void {
+  const requestOrigin = canonicalOrigin(requestUrl);
+  if (requestOrigin === null) return;
+
+  // The captured pair wins: the file may have been rewritten since this token
+  // was loaded, which used to make the check silently pass.
+  const remembered = rememberedOrigins.get(token);
+  if (remembered !== undefined) {
+    if (requestOrigin !== remembered) throw new CredentialOriginMismatchError(remembered, requestOrigin);
+    return;
+  }
+
   const stored = readStoredCredential();
   if (!stored || stored.origin === null || !stored.tokens.includes(token)) return;
-  const requestOrigin = canonicalOrigin(requestUrl);
-  if (requestOrigin === null || requestOrigin === stored.origin) return;
+  if (requestOrigin === stored.origin) {
+    // Remember it too, so a later rotation cannot disarm the check for a token
+    // this process is already holding.
+    rememberCredentialOrigin(token, stored.origin);
+    return;
+  }
   throw new CredentialOriginMismatchError(stored.origin, requestOrigin);
 }
