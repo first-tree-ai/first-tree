@@ -43,6 +43,39 @@ describe("redactUrl", () => {
     expect(redactUrl("/api/v1/me?access%5Ftoken=abc")).toBe("/api/v1/me?access%5Ftoken=***");
   });
 
+  it("classifies equivalent path spellings the way the router does", () => {
+    // Fastify matches on the decoded path, so a percent-encoded segment reaches
+    // the same handler. Classification has to use that identity or the filter
+    // is bypassable; emission still keeps the original spelling.
+    expect(redactUrl("/api/v1/%61uth/github/callback?code=abc&state=xyz")).toBe(
+      "/api/v1/%61uth/github/callback?code=***&state=***",
+    );
+    expect(redactUrl("/api/v1/%69nvitations/inv_2b7c1f9e/preview")).toBe("/api/v1/%69nvitations/***/preview");
+    expect(redactUrl("/api/v1/webhooks/%67itlab/secret-bearer")).toBe("/api/v1/webhooks/%67itlab/***");
+    // A capability path behind an encoded prefix still hides its token.
+    expect(redactUrl("/%61pi/v1/invitations/inv_2b7c1f9e/preview")).toBe("/%61pi/v1/invitations/***/preview");
+  });
+
+  it("gives a sensitive route the same redaction however it is spelled", () => {
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      ["/api/v1/auth/github/callback?state=s1", "/api/v1/auth/github/callback?state=***"],
+      ["/%61pi/v1/auth/github/callback?state=s1", "/%61pi/v1/auth/github/callback?state=***"],
+      ["/api/v1/%61uth/github/callback?state=s1", "/api/v1/%61uth/github/callback?state=***"],
+      ["/api/v1/invitations/inv_1/preview", "/api/v1/invitations/***/preview"],
+      ["/api/v1/%69nvitations/inv_1/preview", "/api/v1/%69nvitations/***/preview"],
+      ["/api/v1/webhooks/gitlab/bearer_1", "/api/v1/webhooks/gitlab/***"],
+      ["/api/v1/webhooks/%67itlab/bearer_1", "/api/v1/webhooks/%67itlab/***"],
+    ];
+    for (const [input, expected] of cases) {
+      expect(redactUrl(input)).toBe(expected);
+    }
+  });
+
+  it("does not mask a capability route that names no token", () => {
+    expect(redactUrl("/api/v1/invitations/")).toBe("/api/v1/invitations/");
+    expect(redactUrl("/api/v1/webhooks/gitlab")).toBe("/api/v1/webhooks/gitlab");
+  });
+
   it("leaves malformed escapes alone instead of rewriting the URL", () => {
     expect(redactUrl("/api/v1/me?%E0%A4%A=x&safe=1")).toBe("/api/v1/me?%E0%A4%A=x&safe=1");
     expect(redactUrl("/api/v1/me?%zz=1")).toBe("/api/v1/me?%zz=1");
