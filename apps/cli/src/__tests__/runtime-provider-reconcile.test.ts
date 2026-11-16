@@ -238,7 +238,7 @@ describe("uploadClientCapabilities", () => {
 
     await uploadClientCapabilities({
       serverUrl: "http://first-tree.test",
-      accessToken: "tok-xyz",
+      credential: { token: "tok-xyz", origin: "http://first-tree.test" },
       clientId: "cli-1",
       capabilities: {
         "claude-code": {
@@ -266,7 +266,7 @@ describe("uploadClientCapabilities", () => {
     fetchMock.mockResolvedValue(new Response(null, { status: 204 }));
     await uploadClientCapabilities({
       serverUrl: "http://first-tree.test",
-      accessToken: "tok",
+      credential: { token: "tok", origin: "http://first-tree.test" },
       clientId: "weird/client id",
       capabilities: {},
     });
@@ -281,7 +281,7 @@ describe("uploadClientCapabilities", () => {
     await expect(
       uploadClientCapabilities({
         serverUrl: "http://first-tree.test",
-        accessToken: "tok",
+        credential: { token: "tok", origin: "http://first-tree.test" },
         clientId: "cli-1",
         capabilities: {},
       }),
@@ -298,7 +298,7 @@ describe("uploadClientCapabilities", () => {
 
     const upload = uploadClientCapabilities({
       serverUrl: "http://first-tree.test",
-      accessToken: "tok",
+      credential: { token: "tok", origin: "http://first-tree.test" },
       clientId: "cli-1",
       capabilities: {},
     });
@@ -345,7 +345,7 @@ describe("uploadAgentSkills", () => {
 
     await uploadAgentSkills({
       serverUrl: "http://first-tree.test",
-      accessToken: "tok-xyz",
+      credential: { token: "tok-xyz", origin: "http://first-tree.test" },
       agentId: "agent-1",
       skills: [{ name: "review", description: "Pre-landing PR review", source: "user" }],
     });
@@ -366,7 +366,7 @@ describe("uploadAgentSkills", () => {
     fetchMock.mockResolvedValue(new Response(null, { status: 204 }));
     await uploadAgentSkills({
       serverUrl: "http://first-tree.test",
-      accessToken: "tok",
+      credential: { token: "tok", origin: "http://first-tree.test" },
       agentId: "agent/with slash",
       skills: [],
     });
@@ -381,7 +381,7 @@ describe("uploadAgentSkills", () => {
     await expect(
       uploadAgentSkills({
         serverUrl: "http://first-tree.test",
-        accessToken: "tok",
+        credential: { token: "tok", origin: "http://first-tree.test" },
         agentId: "agent-1",
         skills: [],
       }),

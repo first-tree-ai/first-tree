@@ -7,6 +7,7 @@ export {
   AuthRefreshRateLimitedError,
   ensureFreshAccessToken,
   ensureFreshAdminToken,
+  ensureFreshBoundAccessToken,
   loadCredentials,
   maskToken,
   resolveAccessToken,

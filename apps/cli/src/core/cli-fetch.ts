@@ -1,4 +1,4 @@
-import { assertCredentialOriginForToken } from "./credential-origin.js";
+import { assertStoredCredentialOriginForToken } from "./credential-origin.js";
 import { CLI_USER_AGENT } from "./version.js";
 
 /**
@@ -24,12 +24,14 @@ export async function cliFetch(input: string | URL, init?: RequestInit): Promise
   const merged = mergeHeaders(init?.headers as HeadersInput | undefined);
   // SEC-023: the target URL and the persisted credential are resolved
   // separately, so an override (`--server`, `FIRST_TREE_SERVER_URL`, config)
-  // used to ship the token saved for another origin. Direct `fetch` callers
-  // funnel through here; SDK callers bind their token with
-  // `accessTokenForOrigin`. The daemon's own connection (`core/client-runtime`)
-  // speaks to the server recorded at login and is not covered here.
+  // used to ship the token saved for another origin. This is the *file-derived*
+  // check: it can only classify a token the store still contains, and a token
+  // it does not know (a login code, a one-shot exchange token) is passed
+  // through by design. Callers that hold the credential itself bind it with
+  // `accessTokenForOrigin`, which carries the issuing origin with the value and
+  // does not depend on the file or on any process-wide memory.
   const token = bearerToken(merged);
-  if (token) assertCredentialOriginForToken(String(input), token);
+  if (token) assertStoredCredentialOriginForToken(String(input), token);
   return fetch(input, { ...init, headers: merged });
 }
 

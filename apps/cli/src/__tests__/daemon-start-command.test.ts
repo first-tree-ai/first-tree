@@ -29,6 +29,7 @@ const coreMocks = vi.hoisted(() => ({
   declineUpdate: vi.fn(),
   ensureActiveRootClientIdPersisted: vi.fn(),
   ensureFreshAccessToken: vi.fn(),
+  ensureFreshBoundAccessToken: vi.fn(),
   getClientSwitchStartupBlock: vi.fn(),
   getClientServiceStatus: vi.fn(),
   handleClientOrgMismatch: vi.fn(),
@@ -195,6 +196,10 @@ beforeEach(() => {
   });
   coreMocks.startClientService.mockReturnValue({ ok: true });
   coreMocks.ensureFreshAccessToken.mockResolvedValue("access-token");
+  coreMocks.ensureFreshBoundAccessToken.mockResolvedValue({
+    token: "access-token",
+    origin: "https://first-tree.example",
+  });
   coreMocks.listPinnedAgents.mockResolvedValue([
     { agentId: "agent-1", clientId: "client_1234abcd", runtimeProvider: "claude-code", status: "active" },
   ]);
@@ -699,7 +704,7 @@ describe("daemon start command", () => {
 
     expect(coreMocks.uploadClientCapabilities).toHaveBeenCalledWith({
       serverUrl: "https://first-tree.example",
-      accessToken: "access-token",
+      credential: { token: "access-token", origin: "https://first-tree.example" },
       clientId: "client_1234abcd",
       capabilities: { "claude-code": { state: "ok" } },
     });

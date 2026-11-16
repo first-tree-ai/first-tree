@@ -10,6 +10,20 @@ import { channelConfig } from "./channel.js";
  * command resolves its target URL independently (`--server`,
  * `FIRST_TREE_SERVER_URL`, config). Nothing compared the two, so pointing the
  * CLI at another origin sent the token minted for production to it.
+ *
+ * There are exactly two ways to answer "which origin issued this token?", and
+ * they are kept apart on purpose:
+ *
+ * - **the pair** (`BoundCredential`): the origin is attached when the token is
+ *   loaded or minted, and travels with the value into the request. This is the
+ *   guarantee — it does not consult `credentials.json` again, so a refresh or a
+ *   re-login in another terminal cannot retroactively change what a credential
+ *   in hand is bound to.
+ * - **file-derived** (`assertStoredCredentialOriginForToken`): a caller that
+ *   only has a string (header inspection) can check it against the store. A
+ *   token the store does not contain is *intentionally* let through — that is
+ *   the login code / one-shot exchange path — so this check must never be
+ *   mistaken for the guarantee above.
  */
 
 /**
@@ -26,36 +40,22 @@ export function canonicalOrigin(value: string): string | null {
 }
 
 /**
- * Token → origin for credentials this process has already loaded.
+ * A credential together with the origin that issued it.
  *
- * The file is not a stable source of truth for a token that is already in hand:
- * a refresh (or a re-login in another terminal) rewrites `credentials.json`, and
- * the check below would then read a file that no longer contains the captured
- * token and wave it through. Remembering the pair at load time makes the
- * transport check about the credential being sent, not about whatever the file
- * says later (SEC-023).
- *
- * Bounded: only the most recent pairs matter for an in-flight command.
+ * The pair is created where the token is obtained (`loadCredentials` /
+ * `ensureFreshBoundAccessToken`) and carried by the request, so no process-wide
+ * table has to remember it — and therefore nothing can evict it while a caller
+ * still holds the credential.
  */
-const MAX_REMEMBERED_ORIGINS = 16;
-const rememberedOrigins = new Map<string, string>();
+export type BoundCredential = {
+  readonly token: string;
+  /** `null` when the issuing server URL was not absolute; the check then abstains. */
+  readonly origin: string | null;
+};
 
-/** Record "this token was issued by this origin". Called wherever the CLI loads or saves credentials. */
-export function rememberCredentialOrigin(token: string, serverUrl: string): void {
-  const origin = canonicalOrigin(serverUrl);
-  if (!token || origin === null) return;
-  rememberedOrigins.delete(token);
-  rememberedOrigins.set(token, origin);
-  while (rememberedOrigins.size > MAX_REMEMBERED_ORIGINS) {
-    const oldest = rememberedOrigins.keys().next();
-    if (oldest.done) break;
-    rememberedOrigins.delete(oldest.value);
-  }
-}
-
-/** Drop the in-process memory (tests, and any code that deliberately switches identity). */
-export function forgetRememberedCredentialOrigins(): void {
-  rememberedOrigins.clear();
+/** Attach the issuing origin to a token at the moment it is loaded or minted. */
+export function bindCredential(token: string, serverUrl: string): BoundCredential {
+  return { token, origin: canonicalOrigin(serverUrl) };
 }
 
 /** Stored credential, read once per check: `accessToken`/`refreshToken` + origin. */
@@ -93,31 +93,36 @@ export class CredentialOriginMismatchError extends Error {
 }
 
 /**
- * Fail closed before a stored token leaves the process for another origin.
+ * Fail closed before a bound token leaves the process for another origin.
  *
- * Only a token that matches the credential store is checked, so a caller that is
- * deliberately sending something else (a one-shot login code, a freshly
- * exchanged token that is not persisted yet) is unaffected.
+ * Pure function of the pair: no file read and no process-wide memory, so a
+ * caller holding a credential keeps its origin for as long as it holds it. A
+ * later load, refresh or re-login cannot weaken it, and there is nothing to
+ * evict.
  */
-export function assertCredentialOriginForToken(requestUrl: string, token: string): void {
+export function assertBoundCredentialOrigin(requestUrl: string, credential: BoundCredential): void {
+  const requestOrigin = canonicalOrigin(requestUrl);
+  if (requestOrigin === null || credential.origin === null || requestOrigin === credential.origin) return;
+  throw new CredentialOriginMismatchError(credential.origin, requestOrigin);
+}
+
+/**
+ * Fail closed for a token that is only known by its string, using the store as
+ * the source of truth for its origin.
+ *
+ * Used by transports that inspect an `Authorization` header they did not build
+ * (see `cliFetch`). A token the store does not contain is let through on
+ * purpose: that is the login code / freshly exchanged token path, which is
+ * explicit here rather than a silent fallback. Because this check depends on the
+ * current file, it is best-effort — callers that can bind at load time use
+ * `assertBoundCredentialOrigin` instead.
+ */
+export function assertStoredCredentialOriginForToken(requestUrl: string, token: string): void {
   const requestOrigin = canonicalOrigin(requestUrl);
   if (requestOrigin === null) return;
 
-  // The captured pair wins: the file may have been rewritten since this token
-  // was loaded, which used to make the check silently pass.
-  const remembered = rememberedOrigins.get(token);
-  if (remembered !== undefined) {
-    if (requestOrigin !== remembered) throw new CredentialOriginMismatchError(remembered, requestOrigin);
-    return;
-  }
-
   const stored = readStoredCredential();
   if (!stored || stored.origin === null || !stored.tokens.includes(token)) return;
-  if (requestOrigin === stored.origin) {
-    // Remember it too, so a later rotation cannot disarm the check for a token
-    // this process is already holding.
-    rememberCredentialOrigin(token, stored.origin);
-    return;
-  }
+  if (requestOrigin === stored.origin) return;
   throw new CredentialOriginMismatchError(stored.origin, requestOrigin);
 }

@@ -5,15 +5,20 @@ import { join } from "node:path";
 import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  assertBoundCredentialOrigin,
   CredentialOriginMismatchError,
   canonicalOrigin,
-  forgetRememberedCredentialOrigins,
 } from "../core/credential-origin.js";
 
 /**
  * SEC-023: the target URL and the persisted credential are resolved
  * independently, so `--server` / `FIRST_TREE_SERVER_URL` used to send the token
  * saved for one origin to whatever URL the override named.
+ *
+ * The origin is attached where the token is obtained and carried by the value.
+ * These cases are written against that pair on purpose: the guarantee must not
+ * depend on the current contents of `credentials.json`, nor on any process-wide
+ * table that could forget it.
  */
 const PROD_TOKEN = [
   Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url"),
@@ -21,19 +26,28 @@ const PROD_TOKEN = [
   "prod-signature",
 ].join(".");
 
+const OTHER_TOKEN = [
+  Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url"),
+  Buffer.from(JSON.stringify({ sub: "prod-user", exp: Math.floor(Date.now() / 1000) + 7200 })).toString("base64url"),
+  "rotated-signature",
+].join(".");
+
 let home: string;
 const originalHome = process.env.FIRST_TREE_HOME;
 const originalUrl = process.env.FIRST_TREE_SERVER_URL;
 
-beforeEach(() => {
-  forgetRememberedCredentialOrigins();
-  home = mkdtempSync(join(tmpdir(), "ft-credential-origin-"));
-  mkdirSync(join(home, "config"), { recursive: true });
+function writeStored(serverUrl: string, accessToken: string): void {
   writeFileSync(
     join(home, "config", "credentials.json"),
-    JSON.stringify({ accessToken: PROD_TOKEN, refreshToken: "prod-refresh", serverUrl: "https://prod.example" }),
+    JSON.stringify({ accessToken, refreshToken: `${accessToken}-refresh`, serverUrl }),
     { mode: 0o600 },
   );
+}
+
+beforeEach(() => {
+  home = mkdtempSync(join(tmpdir(), "ft-credential-origin-"));
+  mkdirSync(join(home, "config"), { recursive: true });
+  writeStored("https://prod.example", PROD_TOKEN);
   process.env.FIRST_TREE_HOME = home;
 });
 
@@ -57,6 +71,47 @@ describe("canonicalOrigin", () => {
     expect(canonicalOrigin("http://127.0.0.1:80")).toBe("http://127.0.0.1");
     expect(canonicalOrigin("http://127.0.0.1:8000/p")).toBe("http://127.0.0.1:8000");
     expect(canonicalOrigin("not a url")).toBeNull();
+  });
+});
+
+describe("bound credential", () => {
+  it("keeps the issuing origin when the store is rewritten for another server", async () => {
+    const { ensureFreshBoundAccessToken } = await import("../core/bootstrap.js");
+    const credential = await ensureFreshBoundAccessToken();
+    expect(credential.token).toBe(PROD_TOKEN);
+
+    // A refresh, or a re-login in another terminal, rewrites the store. The
+    // credential in hand still belongs to production.
+    writeStored("https://staging.example", OTHER_TOKEN);
+
+    expect(() => assertBoundCredentialOrigin("https://staging.example", credential)).toThrow(
+      CredentialOriginMismatchError,
+    );
+    expect(() => assertBoundCredentialOrigin("https://prod.example", credential)).not.toThrow();
+  });
+
+  it("is not weakened by any amount of later load activity", async () => {
+    const { ensureFreshBoundAccessToken } = await import("../core/bootstrap.js");
+    const held = await ensureFreshBoundAccessToken();
+
+    // 32 more credentials from another origin, more than any in-process table
+    // would have retained. The held pair must be unaffected: there is nothing to
+    // evict, because the origin travels with the value.
+    for (let index = 0; index < 32; index += 1) {
+      writeStored(`https://staging-${index}.example`, OTHER_TOKEN);
+      await ensureFreshBoundAccessToken();
+    }
+    writeStored("https://staging.example", OTHER_TOKEN);
+
+    expect(() => assertBoundCredentialOrigin("https://staging.example", held)).toThrow(CredentialOriginMismatchError);
+  });
+
+  it("allows the rotated credential for its own origin", async () => {
+    const { ensureFreshBoundAccessToken } = await import("../core/bootstrap.js");
+    writeStored("https://staging.example", OTHER_TOKEN);
+    const credential = await ensureFreshBoundAccessToken();
+
+    expect(() => assertBoundCredentialOrigin("https://staging.example", credential)).not.toThrow();
   });
 });
 
@@ -100,7 +155,9 @@ describe("cliFetch credential origin binding", () => {
     );
     const { cliFetch } = await import("../core/cli-fetch.js");
     // A login code / admin token / one-shot exchange token is not the stored
-    // credential, so it may go anywhere.
+    // credential, so it may go anywhere. This is the explicit foreign-token
+    // path: a header-only transport cannot know its origin, and callers that do
+    // hold the credential bind it at load time instead.
     await cliFetch("http://127.0.0.1:9/api/v1/auth/login", {
       method: "POST",
       headers: { Authorization: "Bearer some-other-token" },
@@ -109,61 +166,21 @@ describe("cliFetch credential origin binding", () => {
   });
 });
 
-describe("rotation between load and transport", () => {
-  const OTHER_TOKEN = [
-    Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url"),
-    Buffer.from(JSON.stringify({ sub: "prod-user", exp: Math.floor(Date.now() / 1000) + 7200 })).toString("base64url"),
-    "rotated-signature",
-  ].join(".");
-
-  function rewriteCredentials(serverUrl: string, accessToken: string): void {
-    writeFileSync(
-      join(home, "config", "credentials.json"),
-      JSON.stringify({ accessToken, refreshToken: `${accessToken}-refresh`, serverUrl }),
-      { mode: 0o600 },
-    );
-  }
-
-  it("still refuses a captured token after the file was rewritten", async () => {
-    const { loadCredentials } = await import("../core/bootstrap.js");
-    const { cliFetch } = await import("../core/cli-fetch.js");
-
-    // The command loads the production token, then a refresh (or a re-login in
-    // another terminal) rewrites the store for a different server. The token in
-    // hand is no longer in the file, but it still belongs to production.
-    expect(loadCredentials()?.accessToken).toBe(PROD_TOKEN);
-    rewriteCredentials("https://staging.example", OTHER_TOKEN);
-
-    await expect(
-      cliFetch("https://staging.example/api/v1/me", { headers: { Authorization: `Bearer ${PROD_TOKEN}` } }),
-    ).rejects.toBeInstanceOf(CredentialOriginMismatchError);
-  });
-
-  it("allows the rotated token for its own origin", async () => {
-    const { loadCredentials } = await import("../core/bootstrap.js");
-    const { cliFetch } = await import("../core/cli-fetch.js");
-
-    rewriteCredentials("https://staging.example", OTHER_TOKEN);
-    expect(loadCredentials()?.serverUrl).toBe("https://staging.example");
-
-    const sent: string[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string | URL) => {
-        sent.push(String(input));
-        return new Response("{}", { status: 200 });
-      }),
-    );
-    await cliFetch("https://staging.example/api/v1/me", { headers: { Authorization: `Bearer ${OTHER_TOKEN}` } });
-    expect(sent).toEqual(["https://staging.example/api/v1/me"]);
-  });
-});
-
 describe("accessTokenForOrigin", () => {
   it("hands the stored token to its own origin only", async () => {
     const { accessTokenForOrigin } = await import("../core/access-token.js");
     await expect(accessTokenForOrigin("https://prod.example")).resolves.toBe(PROD_TOKEN);
     await expect(accessTokenForOrigin("http://127.0.0.1:9")).rejects.toBeInstanceOf(CredentialOriginMismatchError);
+  });
+
+  it("still refuses after the store was rewritten for another server", async () => {
+    const { accessTokenForOrigin } = await import("../core/access-token.js");
+    // Resolve the credential first, then rotate the store: the token the CLI is
+    // holding is still production's, and the request is bound to it rather than
+    // to whatever the file says now.
+    const resolved = accessTokenForOrigin("https://prod.example");
+    writeStored("https://staging.example", OTHER_TOKEN);
+    await expect(resolved).resolves.toBe(PROD_TOKEN);
   });
 });
 

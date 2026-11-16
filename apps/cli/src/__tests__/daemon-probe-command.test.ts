@@ -6,6 +6,7 @@ const CAPABILITIES = { codex: { state: "ok", available: true } };
 const clientMocks = vi.hoisted(() => ({ probeCapabilities: vi.fn() }));
 const coreMocks = vi.hoisted(() => ({
   ensureFreshAccessToken: vi.fn(),
+  ensureFreshBoundAccessToken: vi.fn(),
   loadCredentials: vi.fn(),
   printResults: vi.fn(),
   runtimeProviderChecks: vi.fn(() => [{ label: "codex", ok: true, detail: "ok" }]),
@@ -46,6 +47,7 @@ beforeEach(() => {
   clientMocks.probeCapabilities.mockResolvedValue(CAPABILITIES);
   coreMocks.loadCredentials.mockReturnValue(true);
   coreMocks.ensureFreshAccessToken.mockResolvedValue("token");
+  coreMocks.ensureFreshBoundAccessToken.mockResolvedValue({ token: "token", origin: "https://hub" });
   coreMocks.uploadClientCapabilities.mockResolvedValue(undefined);
   configMocks.initConfig.mockResolvedValue({ server: { url: "https://hub" }, client: { id: "client-1" } });
   outputMocks.isJsonMode.mockReturnValue(false);

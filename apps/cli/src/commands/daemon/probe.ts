@@ -4,7 +4,7 @@ import type { Command } from "commander";
 import { fail } from "../../cli/output.js";
 import { channelConfig } from "../../core/channel.js";
 import {
-  ensureFreshAccessToken,
+  ensureFreshBoundAccessToken,
   loadCredentials,
   printResults,
   runtimeProviderChecks,
@@ -67,10 +67,10 @@ export function registerDaemonProbeCommand(daemon: Command): void {
       }
       try {
         const config = await initConfig({ schema: clientConfigSchema, role: "client" });
-        const accessToken = await ensureFreshAccessToken();
+        const credential = await ensureFreshBoundAccessToken();
         await uploadClientCapabilities({
           serverUrl: config.server.url,
-          accessToken,
+          credential,
           clientId: config.client.id,
           capabilities,
         });

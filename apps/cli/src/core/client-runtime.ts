@@ -27,7 +27,8 @@ import {
 import type { AgentConfig } from "@first-tree/shared/config";
 import { agentConfigSchema, defaultConfigDir, loadAgents } from "@first-tree/shared/config";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { ensureFreshAccessToken, loadCredentials } from "./bootstrap.js";
+import { accessTokenForOrigin } from "./access-token.js";
+import { loadCredentials } from "./bootstrap.js";
 import { channelConfig } from "./channel.js";
 import { cliFetch } from "./cli-fetch.js";
 import { print } from "./output.js";
@@ -192,7 +193,9 @@ export class ClientRuntime {
       clientId,
       sdkVersion: options.currentVersion,
       userAgent: CLI_USER_AGENT,
-      getAccessToken: (opts) => ensureFreshAccessToken(opts),
+      // Bound to this connection's own server: the daemon holds the credential, so
+      // the origin it was issued for travels with it (SEC-023).
+      getAccessToken: (opts) => accessTokenForOrigin(serverUrl, opts),
       // Lets the connection anchor a failed token-provider attempt to the
       // exact credentials it used (see getAuthAttemptCredential).
       getCredentialsSnapshot: () => this.readCredentialsSnapshot(),
@@ -516,7 +519,7 @@ export class ClientRuntime {
    * file event schedules a debounced reconciliation against the paused
    * attempt's credential identity; on a real change the connection is told
    * to clear paused state and its connect loop picks up the new JWT via
-   * `ensureFreshAccessToken`.
+   * `accessTokenForOrigin`.
    */
   private ensureCredentialsWatcher(): void {
     if (this.credentialsWatcher) return;
@@ -758,7 +761,7 @@ export class ClientRuntime {
     }
     this.runtimeProviderRepairAttempts.set(agentId, attempts + 1);
     try {
-      const token = await ensureFreshAccessToken();
+      const token = await accessTokenForOrigin(this.serverUrl);
       const res = await cliFetch(`${this.serverUrl}/api/v1/agents/${encodeURIComponent(agentId)}`, {
         headers: { Authorization: `Bearer ${token}` },
         signal: AbortSignal.timeout(10_000),

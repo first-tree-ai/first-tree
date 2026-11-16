@@ -41,6 +41,7 @@ import {
   declineUpdate,
   ensureActiveRootClientIdPersisted,
   ensureFreshAccessToken,
+  ensureFreshBoundAccessToken,
   getClientServiceStatus,
   getClientSwitchStartupBlock,
   handleClientOrgMismatch,
@@ -394,10 +395,10 @@ export function registerDaemonStartCommand(daemon: Command): void {
         // `Connecting...`, WS registration, or agent bind.
         const capabilityRefresher = new CapabilityRefresher({
           upload: async (capabilities) => {
-            const accessToken = await ensureFreshAccessToken();
+            const credential = await ensureFreshBoundAccessToken();
             await uploadClientCapabilities({
               serverUrl: config.server.url,
-              accessToken,
+              credential,
               clientId: config.client.id,
               capabilities,
             });
@@ -558,10 +559,10 @@ export function registerDaemonStartCommand(daemon: Command): void {
             const skills = await discoverClaudeCodeSkills({
               warn: (msg) => writeStatus("⚠️", `skill scan: ${msg}`),
             });
-            const accessToken = await ensureFreshAccessToken();
+            const credential = await ensureFreshBoundAccessToken();
             let pinnedByAgentId: Map<string, { agentId: string; clientId: string }> | null = null;
             try {
-              const pinned = await listPinnedAgents({ serverUrl: config.server.url, accessToken });
+              const pinned = await listPinnedAgents({ serverUrl: config.server.url, accessToken: credential.token });
               pinnedByAgentId = new Map(pinned.map((agent) => [agent.agentId, agent]));
             } catch (err) {
               const msg = err instanceof Error ? err.message : String(err);
@@ -587,7 +588,7 @@ export function registerDaemonStartCommand(daemon: Command): void {
                   }
                   await uploadAgentSkills({
                     serverUrl: config.server.url,
-                    accessToken,
+                    credential,
                     agentId: c.agentId,
                     skills,
                   });

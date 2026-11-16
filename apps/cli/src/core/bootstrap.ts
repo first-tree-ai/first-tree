@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { clientConfigSchema, defaultConfigDir, resolveConfigReadonly } from "@first-tree/shared/config";
 import { channelConfig } from "./channel.js";
 import { cliFetch } from "./cli-fetch.js";
-import { rememberCredentialOrigin } from "./credential-origin.js";
+import { type BoundCredential, bindCredential } from "./credential-origin.js";
 
 // Function rather than top-level const: a `const = join(defaultConfigDir(), …)`
 // would lock at module load — same bundle eval-order foot-gun that
@@ -261,7 +261,10 @@ const DEFAULT_MIN_VALIDITY_MS = 30_000;
  * losing the sliding behaviour against that backend, not a correctness
  * regression.
  */
-export async function ensureFreshAccessToken(opts?: { minValidityMs?: number; signal?: AbortSignal }): Promise<string> {
+export async function ensureFreshBoundAccessToken(opts?: {
+  minValidityMs?: number;
+  signal?: AbortSignal;
+}): Promise<BoundCredential> {
   opts?.signal?.throwIfAborted();
   const minValidityMs = opts?.minValidityMs ?? DEFAULT_MIN_VALIDITY_MS;
   const creds = loadCredentials();
@@ -269,9 +272,12 @@ export async function ensureFreshAccessToken(opts?: { minValidityMs?: number; si
     throw new Error(`No credentials found. Run \`${channelConfig.binName} login <code>\` to sign in.`);
   }
 
+  // The origin is taken from this snapshot, which is also the server the
+  // refresh below talks to — so the pair describes the token's issuer even if
+  // the file is rewritten by a re-login before the request goes out (SEC-023).
   if (!isTokenStale(creds.accessToken, minValidityMs)) {
     opts?.signal?.throwIfAborted();
-    return creds.accessToken;
+    return bindCredential(creds.accessToken, creds.serverUrl);
   }
 
   // A previous refresh with this exact credential authority already got a
@@ -293,7 +299,19 @@ export async function ensureFreshAccessToken(opts?: { minValidityMs?: number; si
   ) {
     inflightRefresh = startRefresh(creds, authority);
   }
-  return waitForRefresh(inflightRefresh, opts?.signal);
+  const token = await waitForRefresh(inflightRefresh, opts?.signal);
+  return bindCredential(token, creds.serverUrl);
+}
+
+/**
+ * Token-only view of {@link ensureFreshBoundAccessToken}.
+ *
+ * Callers that know which server they are talking to should prefer the bound
+ * form and assert with `assertBoundCredentialOrigin`; this one exists for the
+ * places that only need the header value.
+ */
+export async function ensureFreshAccessToken(opts?: { minValidityMs?: number; signal?: AbortSignal }): Promise<string> {
+  return (await ensureFreshBoundAccessToken(opts)).token;
 }
 
 function startRefresh(creds: StoredCredentials, authority: CredentialAuthority): InflightRefresh {
@@ -451,8 +469,6 @@ function isTokenStale(token: string, minValidityMs: number): boolean {
  * (see auth service comment), so atomicity at the file level is enough.
  */
 export function saveCredentials(creds: StoredCredentials): void {
-  rememberCredentialOrigin(creds.accessToken, creds.serverUrl);
-  rememberCredentialOrigin(creds.refreshToken, creds.serverUrl);
   const dir = dirname(credentialsPath());
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const tmp = `${credentialsPath()}.tmp.${process.pid}`;
@@ -480,11 +496,6 @@ export function loadCredentials(): StoredCredentials | null {
     const raw = JSON.parse(readFileSync(credentialsPath(), "utf-8")) as unknown;
     const data = raw as StoredCredentials;
     if (data.accessToken && data.refreshToken && data.serverUrl) {
-      // Pin each token to the origin that issued it while we still know it
-      // (SEC-023): the file can be rewritten by a refresh between this read and
-      // the request that carries the token.
-      rememberCredentialOrigin(data.accessToken, data.serverUrl);
-      rememberCredentialOrigin(data.refreshToken, data.serverUrl);
       return data;
     }
     return null;
