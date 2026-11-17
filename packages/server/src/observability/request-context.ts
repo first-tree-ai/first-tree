@@ -252,17 +252,38 @@ export function scrubCredentialStrings(value: unknown, depth = 0, budget: ScrubB
   // entry list for a body that is about to be cut short anyway.
   for (const key in record) {
     if (!Object.hasOwn(record, key)) continue;
-    if (budget.steps <= 0 || budget.chars <= 0) {
+    // Every emitted field is charged, including a masked one: the key text is
+    // retained in the output, so a wide request with long property names would
+    // otherwise still produce output proportional to its input.
+    if (!chargeField(budget, key.length)) {
       out[SCRUB_OMITTED_KEY] = SCRUB_OMITTED;
       break;
     }
     if (isCredentialKeyName(key) || (markedSensitive && key === "value")) {
       out[key] = "***";
+      budget.chars -= MASKED_VALUE_CHARS;
       continue;
     }
     out[key] = scrubCredentialStrings(record[key], depth + 1, budget);
   }
   return out;
+}
+
+/** Characters contributed by a masked value (`***`). */
+const MASKED_VALUE_CHARS = 3;
+
+/**
+ * Charge one emitted object field to the shared budget.
+ *
+ * Returns false when the field would exceed either budget, which stops the
+ * container: the caller appends one omission marker and stops reading keys.
+ * `keyLength` is charged because the key string is what the output keeps.
+ */
+function chargeField(budget: ScrubBudget, keyLength: number): boolean {
+  if (budget.steps <= 0 || budget.chars <= keyLength) return false;
+  budget.steps -= 1;
+  budget.chars -= keyLength;
+  return true;
 }
 
 /**

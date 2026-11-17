@@ -420,6 +420,29 @@ describe("bodyCaptureOnSendHook", () => {
     expect(scrubbed.filter((item) => item === "…[omitted]")).toHaveLength(1);
   });
 
+  it("charges masked fields and long property names to the same budget", () => {
+    // A wide object of `{ sensitive: true, value }` entries: the sensitive-key
+    // branch emits `***`, so the value is tiny — but the key text is retained,
+    // and without charging it the output would still scale with the input.
+    const wide: Record<string, unknown> = {};
+    for (let index = 0; index < 2_000; index += 1) {
+      wide[`field-${index}-${"k".repeat(190)}`] = { sensitive: true, value: "x" };
+    }
+
+    const budget = createScrubBudget();
+    const scrubbed = scrubCredentialStrings(wide, 0, budget) as Record<string, unknown>;
+    const serialized = JSON.stringify(scrubbed);
+
+    // The character budget is what stops this one: with ~200-character names it
+    // ends with less than one key's worth of characters left.
+    expect(budget.chars).toBeLessThan(200);
+    expect(Object.keys(scrubbed).length).toBeLessThan(400);
+    // Masked, because a `sensitive: true` sibling marks the value.
+    expect((Object.values(scrubbed)[0] as Record<string, unknown>).value).toBe("***");
+    expect(serialized.length).toBeLessThan(80 * 1024);
+    expect(scrubbed["…"]).toBe("…[omitted]");
+  });
+
   it("bounds the characters handed to serialization", () => {
     // Without a character budget 50 × 8 KiB leaves would be stringified whole
     // (400 KiB) even though the attribute keeps 4 KiB.
