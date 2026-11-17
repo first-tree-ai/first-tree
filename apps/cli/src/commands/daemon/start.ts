@@ -30,6 +30,7 @@ import { CLIENT_SENTRY_DSN, GIT_SHA } from "../../build-info.js";
 import { fail } from "../../cli/output.js";
 import { channelConfig } from "../../core/channel.js";
 import {
+  accessTokenForOrigin,
   acquireDaemonRuntimeOwnership,
   CapabilityRefresher,
   ClientRuntime,
@@ -323,7 +324,7 @@ export function registerDaemonStartCommand(daemon: Command): void {
             agentsDir,
             workspacesDir: join(defaultDataDir(), "workspaces"),
             sessionsDir: join(defaultDataDir(), "sessions"),
-            resolver: createApiNameResolver(config.server.url, () => ensureFreshAccessToken()),
+            resolver: createApiNameResolver(config.server.url, () => accessTokenForOrigin(config.server.url)),
             log: writeStatus,
           });
         } catch (err) {
@@ -337,10 +338,10 @@ export function registerDaemonStartCommand(daemon: Command): void {
         // Do NOT run full capability probes here: provider smokes can take
         // seconds and should not delay the daemon from connecting/registering.
         try {
-          const accessToken = await ensureFreshAccessToken();
+          const credential = await ensureFreshBoundAccessToken();
           await reconcileLocalRuntimeProviders({
             serverUrl: config.server.url,
-            accessToken,
+            credential,
             agentsDir,
             log: (level, msg) => writeStatus(level === "warn" ? "⚠️" : "•", msg),
           });
@@ -562,7 +563,7 @@ export function registerDaemonStartCommand(daemon: Command): void {
             const credential = await ensureFreshBoundAccessToken();
             let pinnedByAgentId: Map<string, { agentId: string; clientId: string }> | null = null;
             try {
-              const pinned = await listPinnedAgents({ serverUrl: config.server.url, accessToken: credential.token });
+              const pinned = await listPinnedAgents({ serverUrl: config.server.url, credential });
               pinnedByAgentId = new Map(pinned.map((agent) => [agent.agentId, agent]));
             } catch (err) {
               const msg = err instanceof Error ? err.message : String(err);

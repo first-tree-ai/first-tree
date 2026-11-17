@@ -1,7 +1,8 @@
 import { contextTreeBranchSchema } from "@first-tree/shared";
 import type { Command } from "commander";
 import { fail, success } from "../../cli/output.js";
-import { ensureFreshAccessToken, resolveServerUrl } from "../../core/bootstrap.js";
+import { accessTokenForOrigin } from "../../core/access-token.js";
+import { resolveServerUrl } from "../../core/bootstrap.js";
 import { cliFetch } from "../../core/cli-fetch.js";
 import { print } from "../../core/output.js";
 
@@ -37,7 +38,7 @@ export function registerOrgBindTreeCommand(org: Command): void {
         }
 
         const serverUrl = resolveServerUrl();
-        const accessToken = await ensureFreshAccessToken();
+        const accessToken = await accessTokenForOrigin(serverUrl);
 
         // Explicit `--org` wins. Otherwise resolve from `/me`'s default the
         // same way the web does — fall back to the only membership; refuse

@@ -615,7 +615,7 @@ describe("daemon start command", () => {
     expect(refresherInstance.onRegistered).toHaveBeenCalledExactlyOnceWith(false);
     expect(coreMocks.listPinnedAgents).toHaveBeenCalledWith({
       serverUrl: "https://first-tree.example",
-      accessToken: "access-token",
+      credential: { token: "access-token", origin: "https://first-tree.example" },
     });
     expect(coreMocks.uploadAgentSkills).toHaveBeenCalledWith(
       expect.objectContaining({ agentId: "agent-1", skills: [{ name: "review", description: "Review code." }] }),

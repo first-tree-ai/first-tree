@@ -5,8 +5,8 @@ import type { Command } from "commander";
 import { fail } from "../cli/output.js";
 import { channelConfig } from "../core/channel.js";
 import {
+  accessTokenForOrigin,
   cliFetch,
-  ensureFreshAccessToken,
   getClientServiceStatus,
   isServiceSupported,
   listLiveClientRuntimeMarkers,
@@ -93,7 +93,7 @@ async function retireServerClientBeforePurge(opts: {
 
   let accessToken: string;
   try {
-    accessToken = await ensureFreshAccessToken();
+    accessToken = await accessTokenForOrigin(opts.credentials.serverUrl);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     print.line(`  Refusing to purge because credentials could not be refreshed: ${msg}\n\n`);

@@ -1,6 +1,7 @@
 import type { Command } from "commander";
 import { fail } from "../../cli/output.js";
-import { ensureFreshAccessToken, resolveServerUrl } from "../../core/bootstrap.js";
+import { accessTokenForOrigin } from "../../core/access-token.js";
+import { resolveServerUrl } from "../../core/bootstrap.js";
 import { cliFetch } from "../../core/cli-fetch.js";
 import { print } from "../../core/output.js";
 
@@ -12,7 +13,7 @@ export function registerAgentStatusCommand(agent: Command): void {
     .action(async (name?: string, options?: { server?: string }) => {
       try {
         const serverUrl = resolveServerUrl(options?.server);
-        const accessToken = await ensureFreshAccessToken();
+        const accessToken = await accessTokenForOrigin(serverUrl);
         // Activity is org-scoped — gather across every org the caller belongs
         // to so a multi-org user's `status` aggregates all runtimes.
         const meRes = await cliFetch(`${serverUrl}/api/v1/me`, {

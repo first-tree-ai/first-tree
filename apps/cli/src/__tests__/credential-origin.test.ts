@@ -11,6 +11,27 @@ import {
 } from "../core/credential-origin.js";
 
 /**
+ * SEC-023: record which accessor a command uses. Both delegates keep their real
+ * behaviour, so the assertions below are about routing, not about a stub.
+ */
+const accessorCalls = vi.hoisted(() => ({ bound: 0, string: 0 }));
+
+vi.mock("../core/bootstrap.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../core/bootstrap.js")>();
+  return {
+    ...actual,
+    ensureFreshAccessToken: async (...args: Parameters<typeof actual.ensureFreshAccessToken>) => {
+      accessorCalls.string += 1;
+      return actual.ensureFreshAccessToken(...args);
+    },
+    ensureFreshBoundAccessToken: async (...args: Parameters<typeof actual.ensureFreshBoundAccessToken>) => {
+      accessorCalls.bound += 1;
+      return actual.ensureFreshBoundAccessToken(...args);
+    },
+  };
+});
+
+/**
  * SEC-023: the target URL and the persisted credential are resolved
  * independently, so `--server` / `FIRST_TREE_SERVER_URL` used to send the token
  * saved for one origin to whatever URL the override named.
@@ -45,6 +66,8 @@ function writeStored(serverUrl: string, accessToken: string): void {
 }
 
 beforeEach(() => {
+  accessorCalls.bound = 0;
+  accessorCalls.string = 0;
   home = mkdtempSync(join(tmpdir(), "ft-credential-origin-"));
   mkdirSync(join(home, "config"), { recursive: true });
   writeStored("https://prod.example", PROD_TOKEN);
@@ -181,6 +204,97 @@ describe("accessTokenForOrigin", () => {
     const resolved = accessTokenForOrigin("https://prod.example");
     writeStored("https://staging.example", OTHER_TOKEN);
     await expect(resolved).resolves.toBe(PROD_TOKEN);
+  });
+});
+
+describe("command path credential routing", () => {
+  it("agent list --remote resolves the bound credential and refuses an override origin", async () => {
+    const received: string[] = [];
+    const server = createServer((request, response) => {
+      received.push(`${request.headers.host} ${request.url}`);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("[]");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+    process.env.FIRST_TREE_SERVER_URL = `http://127.0.0.1:${port}`;
+
+    try {
+      const { registerAgentCommands } = await import("../commands/agent/index.js");
+      const program = new Command();
+      program.exitOverride();
+      program.configureOutput({ writeErr: () => undefined, writeOut: () => undefined });
+      registerAgentCommands(program);
+      const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+        throw new Error(`exit ${code}`);
+      }) as never);
+      const stderr = vi.spyOn(process.stderr, "write").mockImplementation((() => true) as never);
+
+      try {
+        // Stored credential belongs to production; the command targets another
+        // origin, so nothing may leave the process.
+        await expect(program.parseAsync(["node", "test", "agent", "list", "--remote"])).rejects.toThrow("exit 1");
+        expect(received).toEqual([]);
+        // The destination is known here, so the command must take the pair —
+        // not the token-only accessor whose check depends on the current file.
+        expect(accessorCalls.bound).toBeGreaterThan(0);
+        expect(accessorCalls.string).toBe(0);
+
+        // Rotation: the store now holds a credential issued by the destination.
+        // The same command is allowed, and still goes through the pair.
+        writeStored(`http://127.0.0.1:${port}`, OTHER_TOKEN);
+        await program.parseAsync(["node", "test", "agent", "list", "--remote"]);
+        expect(received).toEqual([`127.0.0.1:${port} /api/v1/me/managed-agents`]);
+        expect(accessorCalls.string).toBe(0);
+      } finally {
+        stderr.mockRestore();
+        exit.mockRestore();
+      }
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("organization binding refuses an override origin before the mutation", async () => {
+    const received: string[] = [];
+    const server = createServer((request, response) => {
+      received.push(`${request.method} ${request.url}`);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{}");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+    process.env.FIRST_TREE_SERVER_URL = `http://127.0.0.1:${port}`;
+
+    try {
+      const { registerOrgBindTreeCommand } = await import("../commands/org/bind-tree.js");
+      const program = new Command();
+      program.exitOverride();
+      program.configureOutput({ writeErr: () => undefined, writeOut: () => undefined });
+      const org = program.command("org");
+      registerOrgBindTreeCommand(org);
+      const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+        throw new Error(`exit ${code}`);
+      }) as never);
+      const stderr = vi.spyOn(process.stderr, "write").mockImplementation((() => true) as never);
+
+      try {
+        // The stored credential belongs to production; the destination is the
+        // override. Nothing may be sent, and no request may be attempted.
+        await expect(
+          program.parseAsync(["node", "test", "org", "bind-tree", "https://github.com/acme/tree"]),
+        ).rejects.toThrow("exit 1");
+        expect(received).toEqual([]);
+        expect(accessorCalls.string).toBe(0);
+      } finally {
+        stderr.mockRestore();
+        exit.mockRestore();
+      }
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
 

@@ -1,6 +1,7 @@
 import type { Command } from "commander";
 import { fail } from "../../../cli/output.js";
-import { ensureFreshAccessToken, resolveServerUrl } from "../../../core/bootstrap.js";
+import { accessTokenForOrigin } from "../../../core/access-token.js";
+import { resolveServerUrl } from "../../../core/bootstrap.js";
 import { cliFetch } from "../../../core/cli-fetch.js";
 import { print } from "../../../core/output.js";
 import { resolveAgent } from "../../_shared/resolve-agent.js";
@@ -23,7 +24,7 @@ export function registerAgentSessionControlCommands(sessionCmd: Command): void {
       .action(async (agentName: string, chatId: string, options: { server?: string }) => {
         try {
           const serverUrl = resolveServerUrl(options.server);
-          const adminToken = await ensureFreshAccessToken();
+          const adminToken = await accessTokenForOrigin(serverUrl);
           const agentId = (await resolveAgent(serverUrl, adminToken, agentName)).uuid;
           const response = await cliFetch(`${serverUrl}/api/v1/agents/${agentId}/sessions/${chatId}/${cmd}`, {
             method: "POST",

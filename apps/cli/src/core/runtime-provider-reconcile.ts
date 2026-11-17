@@ -20,10 +20,13 @@ export type PinnedAgentRuntimeRecord = AuthoritativePinnedAgent;
 
 export async function listPinnedAgents(opts: {
   serverUrl: string;
-  accessToken: string;
+  credential: BoundCredential;
 }): Promise<PinnedAgentRuntimeRecord[]> {
+  // The destination is known here, so the pair is checked before the request:
+  // a credential minted for another origin never leaves the process (SEC-023).
+  assertBoundCredentialOrigin(opts.serverUrl, opts.credential);
   const res = await cliFetch(`${opts.serverUrl}/api/v1/me/pinned-agents`, {
-    headers: { Authorization: `Bearer ${opts.accessToken}` },
+    headers: { Authorization: `Bearer ${opts.credential.token}` },
   });
   if (!res.ok) {
     throw new Error(`server returned ${res.status} on /me/pinned-agents`);
@@ -42,7 +45,7 @@ export async function listPinnedAgents(opts: {
  */
 export async function reconcileLocalRuntimeProviders(opts: {
   serverUrl: string;
-  accessToken: string;
+  credential: BoundCredential;
   agentsDir: string;
   log?: LogFn;
 }): Promise<void> {

@@ -1,7 +1,8 @@
 import { asRuntimeProvider, isRuntimeProviderEnabled, RUNTIME_PROVIDER_IDS } from "@first-tree/shared";
 import type { Command } from "commander";
 import { fail } from "../../cli/output.js";
-import { ensureFreshAccessToken, resolveServerUrl, saveAgentConfig } from "../../core/bootstrap.js";
+import { accessTokenForOrigin } from "../../core/access-token.js";
+import { resolveServerUrl, saveAgentConfig } from "../../core/bootstrap.js";
 import { channelConfig } from "../../core/channel.js";
 import { cliFetch } from "../../core/cli-fetch.js";
 import { print } from "../../core/output.js";
@@ -35,7 +36,7 @@ export function registerAgentCreateCommand(agent: Command): void {
       ) => {
         try {
           const serverUrl = resolveServerUrl(options.server);
-          const adminToken = await ensureFreshAccessToken();
+          const adminToken = await accessTokenForOrigin(serverUrl);
           const runtimeProvider = asRuntimeProvider(options.runtime);
           if (!runtimeProvider || !isRuntimeProviderEnabled(runtimeProvider)) {
             fail(

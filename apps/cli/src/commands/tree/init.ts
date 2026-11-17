@@ -12,7 +12,8 @@ import {
   sameContextTreeRepository,
 } from "@first-tree/shared";
 import type { Command } from "commander";
-import { ensureFreshAccessToken, resolveServerUrl } from "../../core/bootstrap.js";
+import { accessTokenForOrigin } from "../../core/access-token.js";
+import { resolveServerUrl } from "../../core/bootstrap.js";
 import { channelConfig } from "../../core/channel.js";
 import { cliFetch } from "../../core/cli-fetch.js";
 import {
@@ -741,7 +742,7 @@ async function runProviderInitCommand(context: CommandContext, options: TreeInit
   // Resolve all Server authority and local credential prerequisites before a
   // remote create. The Cloud never receives or uses the forge credentials.
   const serverUrl = resolveServerUrl();
-  const accessToken = await ensureFreshAccessToken();
+  const accessToken = await accessTokenForOrigin(serverUrl);
   ensureToolAvailable("git");
   ensureToolAvailable(input.provider === "github" ? "gh" : "glab");
   verifyContextTreeForgeAuth(coordinate, process.cwd(), runCommand);
@@ -983,7 +984,7 @@ async function runInitCommand(context: CommandContext): Promise<void> {
     let treeBranch = DEFAULT_BRANCH;
     if (options.bind) {
       const serverUrl = resolveServerUrl();
-      const accessToken = await ensureFreshAccessToken();
+      const accessToken = await accessTokenForOrigin(serverUrl);
       let orgId: string;
       if (seedTeamId && initialSeedBranch) {
         orgId = seedTeamId;

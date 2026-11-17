@@ -1,4 +1,6 @@
 // Local agent alias hygiene (stale alias detection + deletion)
+
+export { accessTokenForOrigin } from "./access-token.js";
 export type { PinnedAgent, StaleAlias, StaleAliasReason } from "./agent-prune.js";
 export { findStaleAliases, formatStaleReason, removeLocalAgent } from "./agent-prune.js";
 // Bootstrap / credentials
