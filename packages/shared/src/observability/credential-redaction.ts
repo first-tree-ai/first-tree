@@ -51,7 +51,7 @@ export function redactCredentialText(value: string): string {
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, "Bearer [REDACTED]")
     .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]*@/gi, "$1[REDACTED]@")
     .replace(
-      /([?&](?:token|access_token|accessToken|refresh_token|refreshToken|jwt|password|secret|api_key|apiKey|credentials|authorization)=)[^&#\s]+/g,
+      /([?&](?:token|access_token|accessToken|refresh_token|refreshToken|jwt|password|secret|api_key|apiKey|credentials|authorization|code|state)=)[^&#\s]+/g,
       "$1[REDACTED]",
     )
     .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "[REDACTED_GITHUB_TOKEN]")
