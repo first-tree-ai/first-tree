@@ -17,6 +17,8 @@ describe("resolveWebSocketProxyAgent", () => {
     delete process.env.NODE_USE_ENV_PROXY;
     delete process.env.HTTPS_PROXY;
     delete process.env.https_proxy;
+    delete process.env.NO_PROXY;
+    delete process.env.no_proxy;
   });
 
   afterEach(() => {
@@ -54,5 +56,86 @@ describe("resolveWebSocketProxyAgent", () => {
     process.env.HTTPS_PROXY = "http://127.0.0.1:7897";
 
     expect(resolveWebSocketProxyAgent("ws://127.0.0.1:8080/api/v1/agent/ws/client")).toBeUndefined();
+  });
+});
+
+/**
+ * `https-proxy-agent` tunnels whatever it is handed and never reads `NO_PROXY`,
+ * so an excluded destination would still be proxied. The exclusion has to be
+ * applied before the agent is constructed.
+ */
+describe("resolveWebSocketProxyAgent NO_PROXY", () => {
+  const originalEnv = { ...process.env };
+  const WSS = "wss://cloud.first-tree.ai/api/v1/agent/ws/client";
+
+  beforeEach(() => {
+    delete process.env.NO_PROXY;
+    delete process.env.no_proxy;
+    process.env.NODE_USE_ENV_PROXY = "1";
+    process.env.HTTPS_PROXY = "http://127.0.0.1:7897";
+  });
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  it("takes the direct route for an excluded host", () => {
+    process.env.NO_PROXY = "cloud.first-tree.ai";
+
+    expect(resolveWebSocketProxyAgent(WSS)).toBeUndefined();
+  });
+
+  it("still proxies an ordinary secure destination while NO_PROXY is set", () => {
+    process.env.NO_PROXY = "internal.example.com";
+
+    expect(resolveWebSocketProxyAgent(WSS)).toBeDefined();
+  });
+
+  it("matches subdomains for a dotted or wildcard suffix", () => {
+    process.env.NO_PROXY = ".first-tree.ai";
+    expect(resolveWebSocketProxyAgent(WSS)).toBeUndefined();
+
+    process.env.NO_PROXY = "*.first-tree.ai";
+    expect(resolveWebSocketProxyAgent(WSS)).toBeUndefined();
+  });
+
+  it("does not match a host that merely ends with the excluded name", () => {
+    process.env.NO_PROXY = "first-tree.ai";
+
+    // `cloud.first-tree.ai` is a subdomain (excluded); `evil-first-tree.ai` is a
+    // different registrable name and must still be proxied (see next case).
+    expect(resolveWebSocketProxyAgent("wss://evil-first-tree.ai/api/v1/agent/ws/client")).toBeDefined();
+  });
+
+  it("honours `*` as 'proxy nothing'", () => {
+    process.env.NO_PROXY = "*";
+
+    expect(resolveWebSocketProxyAgent(WSS)).toBeUndefined();
+  });
+
+  it("applies an entry's port only to that port", () => {
+    process.env.NO_PROXY = "cloud.first-tree.ai:8443";
+    expect(resolveWebSocketProxyAgent(WSS)).toBeDefined();
+
+    process.env.NO_PROXY = "cloud.first-tree.ai:443";
+    expect(resolveWebSocketProxyAgent(WSS)).toBeUndefined();
+  });
+
+  it("matches bracketed IPv6 literals exactly", () => {
+    process.env.NO_PROXY = "[::1]";
+    expect(resolveWebSocketProxyAgent("wss://[::1]/api/v1/agent/ws/client")).toBeUndefined();
+    expect(resolveWebSocketProxyAgent(WSS)).toBeDefined();
+  });
+
+  it("accepts the lowercase no_proxy spelling", () => {
+    process.env.no_proxy = "cloud.first-tree.ai";
+
+    expect(resolveWebSocketProxyAgent(WSS)).toBeUndefined();
+  });
+
+  it("ignores blank entries", () => {
+    process.env.NO_PROXY = " , ,";
+
+    expect(resolveWebSocketProxyAgent(WSS)).toBeDefined();
   });
 });

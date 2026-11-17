@@ -59,6 +59,13 @@ WebSocket honour `HTTP(S)_PROXY`. Without it Node ignores those variables and
 both paths go direct — on a blocked network the daemon then alternates between
 working HTTP calls and a socket that reconnect-loops.
 
+`NO_PROXY` applies to both paths too, including the WebSocket upgrade: that
+upgrade builds its own agent, which does not read the variable, so the daemon
+checks the destination before constructing it. Entries take the forms `curl`
+accepts — `*` (proxy nothing), a host and its subdomains (`example.com` also
+excludes `api.example.com`), a leading-dot or `*.` suffix, an optional port
+(`example.com:8443`), and bracketed IPv6 literals (`[::1]`).
+
 `KEY=VALUE` only — one per line. A `# comment` is allowed on its own line or as
 a trailing ` # ...` on an unquoted value; quote the value (`KEY="..."`) to keep
 a literal `#`. An empty `KEY=` is ignored.
