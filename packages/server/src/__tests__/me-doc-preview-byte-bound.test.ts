@@ -1,6 +1,6 @@
-import { mkdir, mkdtemp, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { AppError } from "../errors.js";
 import { MAX_DOC_BYTES } from "../services/chat/workspace/bounded-read.js";
@@ -26,6 +26,19 @@ async function fixture(): Promise<{ workspacesRoot: string; file: string }> {
   return { workspacesRoot, file };
 }
 
+/**
+ * Descriptor-path answers: production reads `/proc/self/fd`, which does not
+ * exist on every host, so the stub answers for the directory and then the file —
+ * both truthful, so only the read bound is under test here.
+ */
+function truthfulAnswers(file: string): () => Promise<string | null> {
+  let index = 0;
+  return async () => {
+    index += 1;
+    return index === 1 ? dirname(file) : file;
+  };
+}
+
 describe("getMeDocPreview byte bound", () => {
   it("returns 413 when the descriptor yields more than the preview limit", async () => {
     const { workspacesRoot, file } = await fixture();
@@ -37,6 +50,7 @@ describe("getMeDocPreview byte bound", () => {
       ...input,
       path: "guide.md",
       workspacesRoot,
+      readDescriptorPath: truthfulAnswers(await realpath(file)),
       openFile: async () =>
         ({
           stat: async () => real,
@@ -65,6 +79,7 @@ describe("getMeDocPreview byte bound", () => {
       ...input,
       path: "guide.md",
       workspacesRoot,
+      readDescriptorPath: truthfulAnswers(await realpath(file)),
       openFile: async () => {
         const bytes = Buffer.from("# Guide", "utf8");
         return {

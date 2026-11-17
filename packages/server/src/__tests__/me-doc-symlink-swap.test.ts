@@ -1,10 +1,10 @@
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, realpath, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { ForbiddenError, NotFoundError } from "../errors.js";
-import { getMeDocPreview } from "../services/chat/workspace/document-preview.js";
+import { getMeDocPreview, type WorkspaceDocPreviewInput } from "../services/chat/workspace/document-preview.js";
 
 /**
  * SEC-020: the preview used to `stat` the name, `realpath` it, confirm the
@@ -38,6 +38,27 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   };
 });
 
+/**
+ * Descriptor-path seam.
+ *
+ * Production reads `/proc/self/fd/<fd>`, which only exists on Linux; these cases
+ * wrap the real `open` so the stub answers with the path the module actually
+ * opened, which is exactly what the kernel reports there.
+ */
+function descriptorSeam(): Pick<WorkspaceDocPreviewInput, "openDir" | "openFile" | "readDescriptorPath"> {
+  const opened = new Map<number, string>();
+  const track = async (path: string, flags: number) => {
+    const handle = await open(path, flags);
+    opened.set(handle.fd, path);
+    return handle;
+  };
+  return {
+    openDir: track,
+    openFile: track,
+    readDescriptorPath: async (handle) => opened.get(handle.fd) ?? null,
+  };
+}
+
 const baseInput = { chatId: "chat-1", agentId: "agent-1", agentName: "coder" };
 
 async function makeFixture(): Promise<{ workspacesRoot: string; workspaceRoot: string; outsideFile: string }> {
@@ -61,9 +82,9 @@ describe("getMeDocPreview symlink swap", () => {
     swap.target = outsideFile;
     swap.fired = false;
 
-    await expect(getMeDocPreview({ ...baseInput, path: "guide.md", workspacesRoot })).rejects.toBeInstanceOf(
-      ForbiddenError,
-    );
+    await expect(
+      getMeDocPreview({ ...baseInput, ...descriptorSeam(), path: "guide.md", workspacesRoot }),
+    ).rejects.toBeInstanceOf(ForbiddenError);
     // The swap really happened; without it this test would pass for the wrong reason.
     expect(swap.fired).toBe(true);
   });
@@ -72,9 +93,9 @@ describe("getMeDocPreview symlink swap", () => {
     const { workspacesRoot, workspaceRoot, outsideFile } = await makeFixture();
     await symlink(outsideFile, join(workspaceRoot, "linked.md"));
 
-    await expect(getMeDocPreview({ ...baseInput, path: "linked.md", workspacesRoot })).rejects.toBeInstanceOf(
-      ForbiddenError,
-    );
+    await expect(
+      getMeDocPreview({ ...baseInput, ...descriptorSeam(), path: "linked.md", workspacesRoot }),
+    ).rejects.toBeInstanceOf(ForbiddenError);
   });
 
   it("still reads a regular file, and a symlink that stays inside", async () => {
@@ -83,10 +104,14 @@ describe("getMeDocPreview symlink swap", () => {
     await writeFile(join(workspaceRoot, "real.md"), "# Real", "utf8");
     await symlink(join(workspaceRoot, "real.md"), join(workspaceRoot, "inside-link.md"));
 
-    await expect(getMeDocPreview({ ...baseInput, path: "guide.md", workspacesRoot })).resolves.toMatchObject({
+    await expect(
+      getMeDocPreview({ ...baseInput, ...descriptorSeam(), path: "guide.md", workspacesRoot }),
+    ).resolves.toMatchObject({
       content: "# Guide",
     });
-    await expect(getMeDocPreview({ ...baseInput, path: "inside-link.md", workspacesRoot })).resolves.toMatchObject({
+    await expect(
+      getMeDocPreview({ ...baseInput, ...descriptorSeam(), path: "inside-link.md", workspacesRoot }),
+    ).resolves.toMatchObject({
       content: "# Real",
     });
   });
@@ -102,8 +127,8 @@ describe("getMeDocPreview non-file entries", () => {
 
     // Opening a FIFO for reading without O_NONBLOCK waits for a writer; the
     // request would hang rather than 404.
-    await expect(getMeDocPreview({ ...baseInput, path: "pipe.md", workspacesRoot })).rejects.toBeInstanceOf(
-      NotFoundError,
-    );
+    await expect(
+      getMeDocPreview({ ...baseInput, ...descriptorSeam(), path: "pipe.md", workspacesRoot }),
+    ).rejects.toBeInstanceOf(NotFoundError);
   });
 });
