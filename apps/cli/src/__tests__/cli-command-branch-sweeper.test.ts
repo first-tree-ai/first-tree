@@ -11,12 +11,12 @@ const bootstrapMocks = vi.hoisted(() => {
       token: await ensureFreshAccessToken(...args),
       origin: null,
     }),
-  resolveServerUrl: vi.fn(),
-  saveAgentConfig: vi.fn(),
-  loadConfig: vi.fn(),
-  loadAgentConfig: vi.fn(),
-  readActiveRootClientId: vi.fn(),
-};
+    resolveServerUrl: vi.fn(),
+    saveAgentConfig: vi.fn(),
+    loadConfig: vi.fn(),
+    loadAgentConfig: vi.fn(),
+    readActiveRootClientId: vi.fn(),
+  };
 });
 
 const ioMocks = vi.hoisted(() => ({

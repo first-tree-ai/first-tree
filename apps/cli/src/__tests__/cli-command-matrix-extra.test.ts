@@ -32,8 +32,8 @@ const bootstrapMocks = vi.hoisted(() => {
       token: await ensureFreshAccessToken(...args),
       origin: null,
     }),
-  resolveServerUrl: vi.fn(),
-};
+    resolveServerUrl: vi.fn(),
+  };
 });
 
 const cliFetchMock = vi.hoisted(() => vi.fn());

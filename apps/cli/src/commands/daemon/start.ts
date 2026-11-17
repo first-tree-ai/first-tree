@@ -41,7 +41,6 @@ import {
   daemonRuntimeHomesEqual,
   declineUpdate,
   ensureActiveRootClientIdPersisted,
-  ensureFreshAccessToken,
   ensureFreshBoundAccessToken,
   getClientServiceStatus,
   getClientSwitchStartupBlock,
