@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
   type AgentRuntimeConfigPayload,
@@ -29,6 +29,7 @@ import { PROVIDER_SKILL_ROOTS } from "../../skill-roots.js";
 import { resolveClaudeCodeExecutable } from "../executable.js";
 import { mapMcpServers } from "../mcp-config.js";
 import { createToolCallProcessor } from "../tool-call-processor.js";
+import { ensureConfigTempDir, writeConfigTempFile } from "./config-temp.js";
 import {
   capturePane,
   deriveSessionName,
@@ -191,12 +192,6 @@ export const createClaudeCodeTuiHandler: HandlerFactory = (config) => {
     return out;
   }
 
-  function ensureConfigTempDir(workspaceCwd: string, sessionId: string): string {
-    const dir = join(workspaceCwd, ".claude-code-tui", sessionId);
-    mkdirSync(dir, { recursive: true });
-    return dir;
-  }
-
   /**
    * Build claude CLI args. Returns the joined command string ready for tmux
    * (tmux runs through the user's $SHELL, which handles quoting reasonably).
@@ -206,10 +201,9 @@ export const createClaudeCodeTuiHandler: HandlerFactory = (config) => {
     sessionId: string;
     resumeSessionId: string | null;
     payload: AgentRuntimeConfigPayload;
-    workspaceCwd: string;
     claudeBin: string;
   }): string {
-    const { sessionId, resumeSessionId, payload, workspaceCwd, claudeBin } = input;
+    const { sessionId, resumeSessionId, payload, claudeBin } = input;
     const args: string[] = [
       shellQuote(claudeBin),
       "--dangerously-skip-permissions",
@@ -224,12 +218,13 @@ export const createClaudeCodeTuiHandler: HandlerFactory = (config) => {
       args.push("--model", shellQuote(payload.model));
     }
 
-    const tempDir = ensureConfigTempDir(workspaceCwd, sessionId);
+    // Runtime-owned, freshly created scratch dir per launch (SEC-032).
+    const tempDir = ensureConfigTempDir();
     configTempDir = tempDir;
 
     if (payload.mcpServers.length > 0) {
       const mcpConfigPath = join(tempDir, "mcp-config.json");
-      writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: mapMcpServers(payload) }, null, 2), "utf-8");
+      writeConfigTempFile(mcpConfigPath, JSON.stringify({ mcpServers: mapMcpServers(payload) }, null, 2));
       args.push("--mcp-config", shellQuote(mcpConfigPath));
       args.push("--strict-mcp-config");
     }
@@ -238,7 +233,7 @@ export const createClaudeCodeTuiHandler: HandlerFactory = (config) => {
       .filter((part): part is string => Boolean(part))
       .join("\n\n");
     const systemPromptPath = join(tempDir, "runtime-context.md");
-    writeFileSync(systemPromptPath, appendedSystemPrompt, "utf-8");
+    writeConfigTempFile(systemPromptPath, appendedSystemPrompt);
     args.push("--append-system-prompt-file", shellQuote(systemPromptPath));
 
     // The shared briefing is delivered via `<cwd>/CLAUDE.md` (symlink to
@@ -277,7 +272,6 @@ export const createClaudeCodeTuiHandler: HandlerFactory = (config) => {
       sessionId,
       resumeSessionId,
       payload,
-      workspaceCwd: cwd,
       claudeBin: claudeCodeExecutable,
     });
 

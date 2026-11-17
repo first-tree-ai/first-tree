@@ -163,6 +163,76 @@ describe("tmux command helpers", () => {
     );
   });
 
+  it("masks -e values in a failed new-session diagnostic", async () => {
+    // SEC-032: `-e KEY=value` carries the agent's decrypted provider env, and
+    // this message reaches the client log.
+    installSpawnMock((record) => closeSoon(record, { code: 1, stderr: "server exited" }));
+    const { newSession } = await import("../../tui/tmux-session.js");
+
+    await expect(
+      newSession({
+        name: "ftth-secret",
+        cwd: "/repo",
+        command: "claude",
+        env: { OPENAI_API_KEY: "sk-live-do-not-log", PATH: "/usr/bin" },
+      }),
+    ).rejects.toThrow(
+      "tmux new-session -d -s ftth-secret -x 220 -y 60 -c /repo -e OPENAI_API_KEY=*** -e PATH=*** claude failed (code=1): stderr withheld: this launch carries -e environment values",
+    );
+
+    await expect(
+      newSession({
+        name: "ftth-secret-2",
+        cwd: "/repo",
+        command: "claude",
+        env: { OPENAI_API_KEY: "sk-live-do-not-log" },
+      }),
+    ).rejects.not.toThrow("sk-live-do-not-log");
+  });
+
+  it("withholds free-form stderr when tmux quotes a credential value back", async () => {
+    // SEC-032: tmux quotes the offending assignment back, e.g.
+    // "invalid environment variable: OPENAI_API_KEY=sk-live-…". Substituting the
+    // values we know cannot cover re-quoted/truncated forms, so the whole stream
+    // is withheld and only the exit code is forwarded.
+    installSpawnMock((record) =>
+      closeSoon(record, { code: 1, stderr: "server exited: OPENAI_API_KEY=sk-live-do-not-log (invalid)" }),
+    );
+    const { newSession } = await import("../../tui/tmux-session.js");
+
+    const error = await newSession({
+      name: "ftth-echo",
+      cwd: "/repo",
+      command: "claude",
+      env: { OPENAI_API_KEY: "sk-live-do-not-log" },
+    }).catch((thrown: unknown) => thrown);
+
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).not.toContain("sk-live-do-not-log");
+    expect(message).toContain("OPENAI_API_KEY=***");
+    expect(message).toContain("stderr withheld: this launch carries -e environment values");
+    expect(message).not.toContain("invalid");
+  });
+
+  it("keeps stderr verbatim when the launch carries no environment", async () => {
+    installSpawnMock((record) => closeSoon(record, { code: 2, stderr: "no server running" }));
+    const { newSession } = await import("../../tui/tmux-session.js");
+
+    await expect(newSession({ name: "ftth-noenv", cwd: "/repo", command: "claude" })).rejects.toThrow(
+      "failed (code=2): no server running",
+    );
+  });
+
+  it("keeps non-env arguments verbatim in diagnostics", async () => {
+    installSpawnMock((record) => closeSoon(record, { code: 2, stderr: "bad" }));
+    const { newSession } = await import("../../tui/tmux-session.js");
+
+    await expect(newSession({ name: "ftth-plain", cwd: "/repo", command: "claude --flag" })).rejects.toThrow(
+      "tmux new-session -d -s ftth-plain -x 220 -y 60 -c /repo claude --flag failed (code=2): bad",
+    );
+  });
+
   it("captures normal and full-scrollback panes", async () => {
     const { records } = installSpawnMock((record) => closeSoon(record, { stdout: "pane text" }));
     const { capturePane } = await import("../../tui/tmux-session.js");
