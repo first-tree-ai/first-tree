@@ -127,6 +127,7 @@ import { createFeishuIntegrationManager, type FeishuSdkDependencies } from "./se
 import { createNotifier, type Notifier } from "./services/notifier.js";
 import { createCommandVersionPoller } from "./services/runtime/daemon/command-version-poller.js";
 import { createPulseAggregator } from "./services/runtime/pulse-aggregator.js";
+import { githubPollDryRunFromEnvironment } from "./services/scm/github/poll.js";
 import { backfillGitlabAttentionPairs } from "./services/scm/gitlab/attention-backfill.js";
 import { backfillSkillResourceBundles } from "./services/skill-bundle.js";
 import { repairMembershipHumanMirrors } from "./services/team/membership.js";
@@ -728,7 +729,12 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}) {
   app.decorate("notifier", notifier);
 
   // Background tasks
-  const backgroundTasks = createBackgroundTasks(app, config.instanceId, options.backgroundTasks);
+  const backgroundTasks = createBackgroundTasks(app, config.instanceId, {
+    ...options.backgroundTasks,
+    // Off unless the operator names repositories: the dry run exists to compare
+    // REST reconstruction against the webhook stream, not to run by default.
+    githubPollDryRun: options.backgroundTasks?.githubPollDryRun ?? githubPollDryRunFromEnvironment(),
+  });
 
   // NC1 pulse aggregator — 32-bucket rolling window over runtime state
   // transitions. Broadcasts a per-org `pulse:tick` frame every 5s to admin
