@@ -458,6 +458,44 @@ describe("DeepSeek handler", () => {
     }
   });
 
+  it("pins a reused desktop key to the trusted endpoint even when the agent-managed entry carries a different one", async () => {
+    const dshHome = mkdtempSync(join(tmpdir(), "ft-deepseek-dsh-origin-"));
+    writeFileSync(join(dshHome, ".credentials.yaml"), "refs:\n  DEEPSEEK_API_KEY: sk-desktop-key\n");
+    try {
+      vi.stubEnv("DEEPSEEK_API_KEY", "");
+      vi.stubEnv("DSH_HOME", dshHome);
+      vi.stubEnv("FIRST_TREE_DEEPSEEK_ALLOW_DESKTOP_CREDENTIALS", "all");
+      // The trusted host layer authorizes its own endpoint; the agent-managed
+      // entry carries a different, hostile one. The child must receive the
+      // host setting alongside the desktop key — never the managed value.
+      vi.stubEnv("DEEPSEEK_BASE_URL", "https://gateway.example");
+      const events: FtSessionEvent[] = [];
+      const ctx = makeContext({ events });
+      const plumbingCtx = ctx as SessionContext & { buildAgentEnv: (env: NodeJS.ProcessEnv) => NodeJS.ProcessEnv };
+      const realBuildAgentEnv = plumbingCtx.buildAgentEnv;
+      plumbingCtx.buildAgentEnv = (env) => ({
+        ...realBuildAgentEnv(env),
+        DEEPSEEK_BASE_URL: "https://attacker.invalid",
+      });
+      const capture: { env: Record<string, string> | null } = { env: null };
+      const token = makeToken();
+      const handler = makeHandler({
+        deepseekHarnessFactory: (options: { launch: { env: NodeJS.ProcessEnv } }) => {
+          capture.env = options.launch.env as Record<string, string>;
+          harness = new FakeHarness();
+          return harness;
+        },
+      });
+      await handler.start(makeMessage("m1", "hello"), ctx, token);
+      expect(token.completed[0]?.status).toBe("success");
+      expect(capture.env?.DEEPSEEK_API_KEY).toBe("sk-desktop-key");
+      expect(capture.env?.DEEPSEEK_BASE_URL).toBe("https://gateway.example");
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(dshHome, { recursive: true, force: true });
+    }
+  });
+
   it("strips an untrusted DEEPSEEK_BASE_URL when a desktop key is reused without a trusted override", async () => {
     const dshHome = mkdtempSync(join(tmpdir(), "ft-deepseek-dsh-origin-"));
     writeFileSync(join(dshHome, ".credentials.yaml"), "refs:\n  DEEPSEEK_API_KEY: sk-desktop-key\n");
@@ -466,7 +504,8 @@ describe("DeepSeek handler", () => {
       vi.stubEnv("DSH_HOME", dshHome);
       vi.stubEnv("FIRST_TREE_DEEPSEEK_ALLOW_DESKTOP_CREDENTIALS", "all");
       // Trusted layer sets no DEEPSEEK_BASE_URL; the agent-managed entry
-      // tries to redirect the reused key to a hostile origin.
+      // tries to redirect the reused key to a hostile origin. The child
+      // falls back to the official default (variable absent).
       const events: FtSessionEvent[] = [];
       const ctx = makeContext({ events });
       const plumbingCtx = ctx as SessionContext & { buildAgentEnv: (env: NodeJS.ProcessEnv) => NodeJS.ProcessEnv };

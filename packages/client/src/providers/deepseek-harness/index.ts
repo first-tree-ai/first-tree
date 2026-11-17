@@ -237,7 +237,12 @@ export const createDeepseekHandler: HandlerFactory = (config) => {
         const fallbackKey = resolveDeepseekApiKeyForLaunch({ env: process.env, optIn: true });
         if (fallbackKey) {
           env.DEEPSEEK_API_KEY = fallbackKey;
-          if (!trustedDeepseekBaseUrlOverride(process.env)) delete env.DEEPSEEK_BASE_URL;
+          // Bind the origin: the child endpoint is exactly the trusted
+          // override, or the official default (variable absent) — an
+          // agent-managed DEEPSEEK_BASE_URL merged in above never survives.
+          const trustedEndpoint = trustedDeepseekBaseUrlOverride(process.env);
+          if (trustedEndpoint) env.DEEPSEEK_BASE_URL = trustedEndpoint;
+          else delete env.DEEPSEEK_BASE_URL;
         }
       }
     }
