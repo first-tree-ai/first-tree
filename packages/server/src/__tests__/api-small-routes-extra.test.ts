@@ -334,7 +334,9 @@ describe("small API route handlers", () => {
     const { app, routes } = makeApp({ db: { execute } });
 
     await healthRoutes(app as never);
-    await healthzRoutes(app as never);
+    // Disable the healthz probe cache so this test can exercise both the
+    // healthy and degraded branches through a single registration.
+    await healthzRoutes(app as never, { probeCacheTtlMs: 0 });
     await expect(route(routes, "GET", "/health").handler()).resolves.toEqual({ db: "connected", status: "ok" });
 
     const okReply = makeReply();
