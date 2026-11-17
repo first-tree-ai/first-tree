@@ -14,7 +14,14 @@ export function parseCookieHeader(header: string | string[] | undefined, name: s
     if (eq < 0) continue;
     const key = entry.slice(0, eq).trim();
     if (key === name) {
-      return decodeURIComponent(entry.slice(eq + 1));
+      // A malformed escape (`%E0%A4%A`) makes `decodeURIComponent` throw, and
+      // the cookie is attacker-controlled: treat it as a missing cookie so a
+      // hostile header cannot turn the unauthenticated callback into a 500.
+      try {
+        return decodeURIComponent(entry.slice(eq + 1));
+      } catch {
+        return null;
+      }
     }
   }
   return null;

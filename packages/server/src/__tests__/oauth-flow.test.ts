@@ -94,6 +94,20 @@ describe("GitHub OAuth onboarding flow", () => {
     expect(authorizeUrl.searchParams.get("state")).toBeTruthy();
   });
 
+  it("does not fail the callback when the state cookie has a malformed escape", async () => {
+    // The cookie is attacker-controlled and decoded before the state is
+    // verified. A `URIError` here would turn a public endpoint into a 500.
+    const app = getApp();
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/auth/github/callback?code=abc&state=def",
+      headers: { cookie: "oauth_state_nonce=%E0%A4%A" },
+    });
+
+    expect(res.statusCode).not.toBe(500);
+    expect([400, 302]).toContain(res.statusCode);
+  });
+
   it("dev-callback creates user + auth_identity + personal team for first sign-in", async () => {
     const app = getApp();
     const res = await app.inject({
