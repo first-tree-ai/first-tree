@@ -40,10 +40,30 @@ import {
   sessionEventRejectedFrameSchema,
   type UpdateAttempt,
 } from "@first-tree/shared";
+import { HttpsProxyAgent } from "https-proxy-agent";
 import WebSocket from "ws";
 import { createLogger, type pino } from "../cloud/observability/logger.js";
 import { type AccessTokenProvider, FirstTreeHubSDK, type RuntimeSessionTokenProvider } from "../cloud/sdk.js";
 import { classify, ERROR_KINDS, nextRetryDelayMs } from "./error-taxonomy.js";
+
+/**
+ * `ws` opens its own TCP/TLS socket with Node's `http(s).request` and never
+ * looks at `HTTP(S)_PROXY`, so the daemon's WebSocket stayed direct even when
+ * `fetch` went through the proxy via `NODE_USE_ENV_PROXY`. On a network where
+ * direct egress to the server is blocked or flaky, HTTP succeeded while the
+ * socket reconnect-looped forever.
+ *
+ * Honour the same opt-in switch the built-in fetch honours (`NODE_USE_ENV_PROXY`)
+ * so one setting covers both egress paths, then hand the upgrade request an
+ * explicit proxy agent. `NO_PROXY` is delegated to `https-proxy-agent`.
+ */
+export function resolveWebSocketProxyAgent(wsUrl: string): HttpsProxyAgent<string> | undefined {
+  if (process.env.NODE_USE_ENV_PROXY !== "1") return undefined;
+  if (!/^wss:/i.test(wsUrl)) return undefined;
+  const proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy;
+  if (!proxyUrl) return undefined;
+  return new HttpsProxyAgent(proxyUrl);
+}
 
 /**
  * Per-agent bind retry bookkeeping (Bug 5). A failed `agent:bind` no longer
@@ -1712,7 +1732,12 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
       // the upgrade (4401 close, expired token, handshake aborts) happen
       // before `client:register` lands, so without UA the trace has no install
       // identifier at all. Issue #246.
-      const ws = new WebSocket(wsUrl, this.userAgent ? { headers: { "User-Agent": this.userAgent } } : undefined);
+      const agent = resolveWebSocketProxyAgent(wsUrl);
+      const wsOptions = {
+        ...(this.userAgent ? { headers: { "User-Agent": this.userAgent } } : {}),
+        ...(agent ? { agent } : {}),
+      };
+      const ws = new WebSocket(wsUrl, Object.keys(wsOptions).length > 0 ? wsOptions : undefined);
       let settled = false;
       let connectTimer: ReturnType<typeof setTimeout> | null = null;
 
