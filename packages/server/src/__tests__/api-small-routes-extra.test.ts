@@ -351,6 +351,20 @@ describe("small API route handlers", () => {
     expect(degradedReply).toMatchObject({ body: { message: "database unreachable", status: "error" }, code: 503 });
   });
 
+  it("keeps request-body capture off on the agent runtime-config write routes", async () => {
+    // SEC-018: these bodies carry `env[].value` and MCP authorization headers,
+    // and the capture hook redacts top-level keys only. The routes must not opt
+    // in at all.
+    const { agentConfigRoutes } = await import("../api/agents-config.js");
+    const { app, routes } = makeApp();
+    await agentConfigRoutes(app as never);
+
+    expect(route(routes, "PATCH", "/:uuid/config").options).toMatchObject({ config: { otelRecordBody: false } });
+    expect(route(routes, "POST", "/:uuid/config/dry-run").options).toMatchObject({
+      config: { otelRecordBody: false },
+    });
+  });
+
   it("serves agent runtime config and context tree info", async () => {
     const { agentConfigRoutes } = await import("../api/agent/config.js");
     const { agentContextTreeInfoRoutes } = await import("../api/agent/context-tree-info.js");

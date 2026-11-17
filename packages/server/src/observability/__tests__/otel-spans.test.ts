@@ -41,6 +41,8 @@ import {
 import {
   attachRequestContext,
   bodyCaptureOnSendHook,
+  createScrubBudget,
+  scrubCredentialStrings,
   stampAgentResource,
   stampClientResource,
 } from "../request-context.js";
@@ -322,6 +324,178 @@ describe("bodyCaptureOnSendHook", () => {
     expect(decoded.remember).toBe(true);
     expect(decoded.password).toBe("***");
     expect(decoded.refreshToken).toBe("***");
+  });
+
+  it("scrubs credentials nested inside arrays and objects", async () => {
+    // SEC-018: a top-level-only key match cannot see `env[].value` or an MCP
+    // header buried in an array element, so the serialized body is passed
+    // through the shared credential scrubber as well.
+    const tracer = trace.getTracer("test");
+    const span = tracer.startSpan("t");
+    const traceId = span.spanContext().traceId;
+
+    const req = makeRequestWith(
+      span,
+      { otelRecordBody: true },
+      {
+        env: [
+          { key: "OPENAI_API_KEY", value: `sk-proj-${"z".repeat(30)}`, sensitive: true },
+          { key: "PLAIN", value: "visible" },
+          // Shapeless secret: only the `sensitive: true` sibling identifies it.
+          { key: "DB_PASSWORD", value: "hunter2", sensitive: true },
+        ],
+        mcpServers: [
+          { name: "tools", headers: { authorization: "Bearer abcdefgh12345678" } },
+          { name: "other", headers: { "x-api-key": "plain-looking-secret" } },
+        ],
+      },
+    );
+    await bodyCaptureOnSendHook(req, makeReply(400), null);
+    span.end();
+
+    const raw = findFinished(traceId).attributes[FIRST_TREE_ATTR.HTTP_REQUEST_BODY] as string;
+    expect(raw).not.toContain("sk-proj-");
+    expect(raw).not.toContain("abcdefgh12345678");
+    expect(raw).not.toContain("hunter2");
+    expect(raw).not.toContain("plain-looking-secret");
+    // Structure survives: the operator can still see which variable failed.
+    const decoded = JSON.parse(raw) as { env: string; mcpServers: string };
+    const env = JSON.parse(decoded.env) as Array<{ key: string; value: string }>;
+    expect(env[0]?.key).toBe("OPENAI_API_KEY");
+    expect(env[2]?.key).toBe("DB_PASSWORD");
+    expect(env[2]?.value).toBe("***");
+    // A non-sensitive value stays readable.
+    expect(env[1]?.value).toBe("visible");
+  });
+
+  it("bounds the recursive walk by depth and node count", async () => {
+    const tracer = trace.getTracer("test");
+    const span = tracer.startSpan("t");
+    const traceId = span.spanContext().traceId;
+
+    // Depth: the credential sits below the walk limit, so it is omitted rather
+    // than visited (which is what makes the bound safe, not just fast).
+    let deep: Record<string, unknown> = { password: `sk-proj-${"deep".repeat(10)}` };
+    for (let level = 0; level < 20; level += 1) deep = { nested: deep };
+
+    const req = makeRequestWith(span, { otelRecordBody: true }, deep);
+    await bodyCaptureOnSendHook(req, makeReply(400), null);
+    span.end();
+
+    const raw = findFinished(traceId).attributes[FIRST_TREE_ATTR.HTTP_REQUEST_BODY] as string;
+    expect(raw).toContain("…[omitted]");
+    expect(raw).not.toContain("sk-proj-");
+  });
+
+  it("stops adding object entries once the budget is spent", () => {
+    // 20 000 entries with the credential last: the proof is structural, not a
+    // wall-clock threshold — the budget reaches zero, the container stops
+    // growing, one marker is appended, and the tail is never read.
+    const wide: Record<string, unknown> = {};
+    for (let index = 0; index < 20_000; index += 1) wide[`field${index}`] = "value";
+    wide.secretAtTheEnd = "hunter2";
+
+    const budget = createScrubBudget();
+    const scrubbed = scrubCredentialStrings(wide, 0, budget) as Record<string, unknown>;
+    const keys = Object.keys(scrubbed);
+
+    expect(budget.steps).toBe(0);
+    expect(keys.at(-1)).toBe("…");
+    expect(scrubbed["…"]).toBe("…[omitted]");
+    expect(keys.filter((key) => key === "…")).toHaveLength(1);
+    expect(keys.length).toBeLessThan(2_100);
+    expect(scrubbed.secretAtTheEnd).toBeUndefined();
+    expect(Object.values(scrubbed)).not.toContain("hunter2");
+  });
+
+  it("stops an array at the budget instead of mapping every element", () => {
+    const items = Array.from({ length: 20_000 }, () => "value");
+
+    const budget = createScrubBudget();
+    const scrubbed = scrubCredentialStrings(items, 0, budget) as unknown[];
+
+    expect(budget.steps).toBe(0);
+    expect(scrubbed.length).toBeLessThan(2_100);
+    expect(scrubbed.at(-1)).toBe("…[omitted]");
+    expect(scrubbed.filter((item) => item === "…[omitted]")).toHaveLength(1);
+  });
+
+  it("charges masked fields and long property names to the same budget", () => {
+    // A wide object of `{ sensitive: true, value }` entries: the sensitive-key
+    // branch emits `***`, so the value is tiny — but the key text is retained,
+    // and without charging it the output would still scale with the input.
+    const wide: Record<string, unknown> = {};
+    for (let index = 0; index < 2_000; index += 1) {
+      wide[`field-${index}-${"k".repeat(190)}`] = { sensitive: true, value: "x" };
+    }
+
+    const budget = createScrubBudget();
+    const scrubbed = scrubCredentialStrings(wide, 0, budget) as Record<string, unknown>;
+    const serialized = JSON.stringify(scrubbed);
+
+    // The character budget is what stops this one: with ~200-character names it
+    // ends with less than one key's worth of characters left.
+    expect(budget.chars).toBeLessThan(200);
+    expect(Object.keys(scrubbed).length).toBeLessThan(400);
+    // Masked, because a `sensitive: true` sibling marks the value.
+    expect((Object.values(scrubbed)[0] as Record<string, unknown>).value).toBe("***");
+    expect(serialized.length).toBeLessThan(80 * 1024);
+    expect(scrubbed["…"]).toBe("…[omitted]");
+  });
+
+  it("bounds the characters handed to serialization", () => {
+    // Without a character budget 50 × 8 KiB leaves would be stringified whole
+    // (400 KiB) even though the attribute keeps 4 KiB.
+    const leaves = Array.from({ length: 50 }, () => "x".repeat(8 * 1024));
+
+    const budget = createScrubBudget();
+    const scrubbed = scrubCredentialStrings({ leaves }, 0, budget);
+
+    expect(budget.chars).toBe(0);
+    expect(JSON.stringify(scrubbed).length).toBeLessThan(80 * 1024);
+  });
+
+  it("does not leak a credential parked past the budget", async () => {
+    const tracer = trace.getTracer("test");
+    const span = tracer.startSpan("t");
+    const traceId = span.spanContext().traceId;
+
+    const wide: Record<string, unknown> = {};
+    for (let index = 0; index < 20_000; index += 1) wide[`field${index}`] = "value";
+    wide.secretAtTheEnd = "hunter2";
+
+    const req = makeRequestWith(span, { otelRecordBody: true }, wide);
+    await bodyCaptureOnSendHook(req, makeReply(400), null);
+    span.end();
+
+    const raw = findFinished(traceId).attributes[FIRST_TREE_ATTR.HTTP_REQUEST_BODY] as string;
+    expect(raw).toContain("…[truncated");
+    expect(raw).not.toContain("hunter2");
+  });
+
+  it("never changes the response when capture itself throws", async () => {
+    const tracer = trace.getTracer("test");
+    const span = tracer.startSpan("t");
+    const traceId = span.spanContext().traceId;
+
+    // A body whose own-key enumeration throws stands in for any unexpected
+    // runtime failure inside the scrubber.
+    const hostile = new Proxy(
+      {},
+      {
+        ownKeys: () => {
+          throw new Error("enumeration failed");
+        },
+        getOwnPropertyDescriptor: () => ({ enumerable: true, configurable: true }),
+      },
+    );
+
+    const payload = JSON.stringify({ error: "validation failed" });
+    const req = makeRequestWith(span, { otelRecordBody: true }, hostile);
+    await expect(bodyCaptureOnSendHook(req, makeReply(400), payload)).resolves.toBe(payload);
+    span.end();
+
+    expect(findFinished(traceId).attributes[FIRST_TREE_ATTR.HTTP_REQUEST_BODY]).toBeUndefined();
   });
 
   it("does not stamp the body when statusCode < 400 (success path)", async () => {

@@ -50,7 +50,7 @@ function tracer() {
 
 // ─── Attribute normalisation + redaction ──────────────────────────────
 
-function isSensitiveKey(key: string): boolean {
+export function isSensitiveKey(key: string): boolean {
   const lower = key.toLowerCase();
   return TRACING_SENSITIVE_KEY_PATTERNS.some((p) => lower.includes(p));
 }
