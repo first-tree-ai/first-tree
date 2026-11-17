@@ -17,6 +17,9 @@ vi.mock("../cli/output.js", () => ({
   fail: failMock,
 }));
 
+/** Every helper call in this file targets first-tree.example. */
+const CREDENTIAL = { token: "admin-token", origin: "https://first-tree.example" };
+
 function jsonResponse(body: unknown, ok = true, status = ok ? 200 : 500): Response {
   return {
     ok,
@@ -70,7 +73,7 @@ describe("agent config fetch helpers", () => {
     await expect(
       adminFetch<{ ok: boolean }>("https://first-tree.example/api/v1/agents/agent-1/config", {
         method: "PATCH",
-        adminToken: "admin-token",
+        credential: CREDENTIAL,
         headers: { "X-Test": "1" },
         body: JSON.stringify({ expectedVersion: 1, payload: {} }),
       }),
@@ -90,18 +93,47 @@ describe("agent config fetch helpers", () => {
     );
   });
 
+  it("keeps spending the bound credential after the store rotates", async () => {
+    const { adminFetch } = await import("../commands/agent/config/_shared/fetchers.js");
+    fetchMock.mockResolvedValue(jsonResponse({ ok: true }));
+
+    // The pair was bound when the command started. A re-login in another
+    // terminal replaces the stored token between two of its requests; the
+    // credential in hand still belongs to the origin it was issued for, and
+    // the request is not re-checked against the file.
+    const rotated = { token: "rotated-token", origin: "https://first-tree.example" };
+    await adminFetch("https://first-tree.example/api/v1/agents/agent-1/config", {
+      method: "GET",
+      credential: rotated,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://first-tree.example/api/v1/agents/agent-1/config",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer rotated-token" }),
+      }),
+    );
+  });
+
+  it("refuses a bound credential on another origin before sending anything", async () => {
+    const { getCurrent } = await import("../commands/agent/config/_shared/fetchers.js");
+
+    await expect(getCurrent("https://elsewhere.example", CREDENTIAL, "agent-1")).rejects.toThrow(/credential/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("maps HTTP errors and wraps get/patch URLs", async () => {
     const { getCurrent, patchConfig } = await import("../commands/agent/config/_shared/fetchers.js");
     fetchMock.mockResolvedValueOnce(jsonResponse("unauthorized", false, 401));
 
-    await expect(getCurrent("https://first-tree.example", "admin-token", "agent-1")).rejects.toMatchObject({
+    await expect(getCurrent("https://first-tree.example", CREDENTIAL, "agent-1")).rejects.toMatchObject({
       code: "HTTP_401",
       exitCode: 3,
     });
 
     fetchMock.mockResolvedValueOnce(jsonResponse(config({ version: 8 })));
     await expect(
-      patchConfig("https://first-tree.example", "admin-token", "agent-1", 7, { model: "opus" }),
+      patchConfig("https://first-tree.example", CREDENTIAL, "agent-1", 7, { model: "opus" }),
     ).resolves.toMatchObject({ version: 8 });
     expect(fetchMock).toHaveBeenLastCalledWith(
       "https://first-tree.example/api/v1/agents/agent-1/config",
@@ -121,7 +153,7 @@ describe("agent config fetch helpers", () => {
     await expect(
       adminFetch<{ pong: boolean }>("https://first-tree.example/api/v1/ping", {
         method: "GET",
-        adminToken: "admin-token",
+        credential: CREDENTIAL,
       }),
     ).resolves.toEqual({ pong: true });
     expect(fetchMock).toHaveBeenLastCalledWith(
@@ -133,7 +165,7 @@ describe("agent config fetch helpers", () => {
     );
 
     fetchMock.mockResolvedValueOnce(jsonResponse({ prompt: [], skills: [], resources: [] }));
-    await expect(getAgentResources("https://first-tree.example", "admin-token", "agent-1")).resolves.toEqual({
+    await expect(getAgentResources("https://first-tree.example", CREDENTIAL, "agent-1")).resolves.toEqual({
       prompt: [],
       skills: [],
       resources: [],
@@ -157,7 +189,7 @@ describe("agent config fetch helpers", () => {
       ],
     };
     await expect(
-      patchAgentResources("https://first-tree.example", "admin-token", "agent-1", patchBody),
+      patchAgentResources("https://first-tree.example", CREDENTIAL, "agent-1", patchBody),
     ).resolves.toMatchObject({ prompt: [{ id: "p1" }] });
     expect(fetchMock).toHaveBeenLastCalledWith(
       "https://first-tree.example/api/v1/agents/agent-1/resources",
@@ -168,7 +200,7 @@ describe("agent config fetch helpers", () => {
     );
 
     fetchMock.mockResolvedValueOnce(jsonResponse([{ uuid: "agent-1", name: "nova", displayName: "Nova" }]));
-    await expect(resolveAgentRecord("https://first-tree.example", "admin-token", "nova")).resolves.toEqual({
+    await expect(resolveAgentRecord("https://first-tree.example", CREDENTIAL, "nova")).resolves.toEqual({
       uuid: "agent-1",
       name: "nova",
       displayName: "Nova",
@@ -188,7 +220,7 @@ describe("agent config fetch helpers", () => {
     await expect(
       adminFetch("https://first-tree.example/api/v1/broken", {
         method: "GET",
-        adminToken: "admin-token",
+        credential: CREDENTIAL,
       }),
     ).rejects.toMatchObject({ code: "HTTP_500", message: "Server Error", exitCode: 1 });
 

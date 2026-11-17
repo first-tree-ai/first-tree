@@ -1,7 +1,8 @@
 import { canonicalizeResourceRepoUrl } from "@first-tree/shared";
 import type { Command } from "commander";
 import { success } from "../../../cli/output.js";
-import { ensureFreshAdminToken, resolveServerUrl } from "../../../core/bootstrap.js";
+import { credentialForOrigin } from "../../../core/access-token.js";
+import { resolveServerUrl } from "../../../core/bootstrap.js";
 import { getAgentResources, patchAgentResources, resolveAgentRecord } from "./_shared/fetchers.js";
 
 export function registerAgentConfigAddRepoCommand(config: Command): void {
@@ -12,9 +13,9 @@ export function registerAgentConfigAddRepoCommand(config: Command): void {
     .option("--path <path>", "local path relative to session cwd")
     .action(async (agentName: string, url: string, opts: { ref?: string; path?: string }) => {
       const serverUrl = resolveServerUrl(process.env.FIRST_TREE_SERVER_URL);
-      const adminToken = await ensureFreshAdminToken();
-      const { uuid } = await resolveAgentRecord(serverUrl, adminToken, agentName);
-      const current = await getAgentResources(serverUrl, adminToken, uuid);
+      const credential = await credentialForOrigin(serverUrl);
+      const { uuid } = await resolveAgentRecord(serverUrl, credential, agentName);
+      const current = await getAgentResources(serverUrl, credential, uuid);
       const targetCanonical = safeCanonicalRepoUrl(url);
       const matchingResourceIds = new Set<string>();
       let matchingTeamResourceId: string | null = null;
@@ -44,7 +45,7 @@ export function registerAgentConfigAddRepoCommand(config: Command): void {
         if ((matchesAgentRepo || matchesResource) && binding.order !== undefined) removedOrders.push(binding.order);
         return !matchesAgentRepo && !matchesResource;
       });
-      const updated = await patchAgentResources(serverUrl, adminToken, uuid, {
+      const updated = await patchAgentResources(serverUrl, credential, uuid, {
         expectedVersion: current.version,
         bindings: [
           ...remaining,

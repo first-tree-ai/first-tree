@@ -1,6 +1,7 @@
 import type { Command } from "commander";
 import { success } from "../../../cli/output.js";
-import { ensureFreshAdminToken, resolveServerUrl } from "../../../core/bootstrap.js";
+import { credentialForOrigin } from "../../../core/access-token.js";
+import { resolveServerUrl } from "../../../core/bootstrap.js";
 import { getCurrent, patchConfig, resolveAgentRecord } from "./_shared/fetchers.js";
 
 export function registerAgentConfigSetServiceTierCommand(config: Command): void {
@@ -11,10 +12,10 @@ export function registerAgentConfigSetServiceTierCommand(config: Command): void 
     )
     .action(async (agentName: string, serviceTier: string) => {
       const serverUrl = resolveServerUrl(process.env.FIRST_TREE_SERVER_URL);
-      const adminToken = await ensureFreshAdminToken();
-      const { uuid } = await resolveAgentRecord(serverUrl, adminToken, agentName);
-      const current = await getCurrent(serverUrl, adminToken, uuid);
-      const updated = await patchConfig(serverUrl, adminToken, uuid, current.version, { serviceTier });
+      const credential = await credentialForOrigin(serverUrl);
+      const { uuid } = await resolveAgentRecord(serverUrl, credential, agentName);
+      const current = await getCurrent(serverUrl, credential, uuid);
+      const updated = await patchConfig(serverUrl, credential, uuid, current.version, { serviceTier });
       success({
         agentId: updated.agentId,
         version: updated.version,

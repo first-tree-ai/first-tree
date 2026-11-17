@@ -12,8 +12,11 @@ import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const bootstrapMocks = vi.hoisted(() => ({
-  ensureFreshAdminToken: vi.fn(),
   resolveServerUrl: vi.fn(),
+}));
+
+const accessTokenMocks = vi.hoisted(() => ({
+  credentialForOrigin: vi.fn(),
 }));
 
 const fetcherMocks = vi.hoisted(() => ({
@@ -34,6 +37,7 @@ const outputMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../core/bootstrap.js", () => bootstrapMocks);
+vi.mock("../core/access-token.js", () => accessTokenMocks);
 vi.mock("../commands/agent/config/_shared/fetchers.js", () => fetcherMocks);
 
 const stdinMock = vi.hoisted(() => ({ readStdin: vi.fn() }));
@@ -42,6 +46,9 @@ const printMock = vi.hoisted(() => ({ line: vi.fn() }));
 vi.mock("../commands/_shared/stdin.js", () => stdinMock);
 vi.mock("../core/output.js", () => ({ print: printMock }));
 vi.mock("../cli/output.js", () => outputMocks);
+
+/** What `credentialForOrigin` hands the commands: a token plus its issuer. */
+const CREDENTIAL = { token: "admin-token", origin: "https://hub.example" };
 
 const NOW = "2026-06-01T00:00:00.000Z";
 let tempDir = "";
@@ -78,7 +85,7 @@ async function runConfig(args: string[]): Promise<void> {
 beforeEach(() => {
   tempDir = mkdtempSync(join(tmpdir(), "ft-cli-agent-config-"));
   vi.clearAllMocks();
-  bootstrapMocks.ensureFreshAdminToken.mockResolvedValue("admin-token");
+  accessTokenMocks.credentialForOrigin.mockResolvedValue(CREDENTIAL);
   bootstrapMocks.resolveServerUrl.mockReturnValue("https://hub.example");
   fetcherMocks.resolveAgentRecord.mockResolvedValue({ uuid: "agent-uuid", name: "nova" });
   fetcherMocks.getCurrent.mockResolvedValue(config());
@@ -136,27 +143,22 @@ describe("agent config command behavior", () => {
 
   it("updates git repos, env vars, model, reasoning effort, and prompt append", async () => {
     await runConfig(["add-repo", "nova", "https://github.com/acme/web.git", "--ref", "main", "--path", "web"]);
-    expect(fetcherMocks.patchAgentResources).toHaveBeenLastCalledWith(
-      "https://hub.example",
-      "admin-token",
-      "agent-uuid",
-      {
-        expectedVersion: 1,
-        bindings: [
-          {
-            type: "repo",
-            mode: "include",
-            agentExtraRepo: { url: "https://github.com/acme/web.git" },
-            repoRef: "main",
-            repoLocalPath: "web",
-            order: 1,
-          },
-        ],
-      },
-    );
+    expect(fetcherMocks.patchAgentResources).toHaveBeenLastCalledWith("https://hub.example", CREDENTIAL, "agent-uuid", {
+      expectedVersion: 1,
+      bindings: [
+        {
+          type: "repo",
+          mode: "include",
+          agentExtraRepo: { url: "https://github.com/acme/web.git" },
+          repoRef: "main",
+          repoLocalPath: "web",
+          order: 1,
+        },
+      ],
+    });
 
     await runConfig(["set-env", "nova", "OPENAI_API_KEY=secret", "--sensitive"]);
-    expect(fetcherMocks.patchConfig).toHaveBeenLastCalledWith("https://hub.example", "admin-token", "agent-uuid", 1, {
+    expect(fetcherMocks.patchConfig).toHaveBeenLastCalledWith("https://hub.example", CREDENTIAL, "agent-uuid", 1, {
       env: [
         { key: "KEEP", value: "1", sensitive: false },
         { key: "OPENAI_API_KEY", value: "secret", sensitive: true },
@@ -169,7 +171,7 @@ describe("agent config command behavior", () => {
     // trailing newline a pipe adds is not part of the credential.
     stdinMock.readStdin.mockResolvedValueOnce("s3cret-value\n");
     await runConfig(["set-env", "nova", "OPENAI_API_KEY", "--sensitive", "--value-stdin"]);
-    expect(fetcherMocks.patchConfig).toHaveBeenLastCalledWith("https://hub.example", "admin-token", "agent-uuid", 1, {
+    expect(fetcherMocks.patchConfig).toHaveBeenLastCalledWith("https://hub.example", CREDENTIAL, "agent-uuid", 1, {
       env: [
         { key: "KEEP", value: "1", sensitive: false },
         { key: "OPENAI_API_KEY", value: "s3cret-value", sensitive: true },
@@ -212,13 +214,13 @@ describe("agent config command behavior", () => {
     expect(warning).not.toContain("$(id)");
 
     await runConfig(["set-model", "nova", "opus"]);
-    expect(fetcherMocks.patchConfig).toHaveBeenLastCalledWith("https://hub.example", "admin-token", "agent-uuid", 1, {
+    expect(fetcherMocks.patchConfig).toHaveBeenLastCalledWith("https://hub.example", CREDENTIAL, "agent-uuid", 1, {
       model: "opus",
     });
     expect(outputMocks.success).toHaveBeenLastCalledWith({ agentId: "agent-1", version: 2, model: "opus" });
 
     await runConfig(["set-reasoning-effort", "nova", "high"]);
-    expect(fetcherMocks.patchConfig).toHaveBeenLastCalledWith("https://hub.example", "admin-token", "agent-uuid", 1, {
+    expect(fetcherMocks.patchConfig).toHaveBeenLastCalledWith("https://hub.example", CREDENTIAL, "agent-uuid", 1, {
       reasoningEffort: "high",
     });
     expect(outputMocks.success).toHaveBeenLastCalledWith({
@@ -230,23 +232,18 @@ describe("agent config command behavior", () => {
     const promptFile = join(tempDir, "prompt.md");
     writeFileSync(promptFile, "Prefer small diffs.");
     await runConfig(["append-prompt", "nova", "--file", promptFile]);
-    expect(fetcherMocks.patchAgentResources).toHaveBeenLastCalledWith(
-      "https://hub.example",
-      "admin-token",
-      "agent-uuid",
-      {
-        expectedVersion: 1,
-        bindings: [
-          {
-            type: "prompt",
-            mode: "include",
-            resourceId: null,
-            inlinePromptBody: "Prefer small diffs.",
-            order: 1,
-          },
-        ],
-      },
-    );
+    expect(fetcherMocks.patchAgentResources).toHaveBeenLastCalledWith("https://hub.example", CREDENTIAL, "agent-uuid", {
+      expectedVersion: 1,
+      bindings: [
+        {
+          type: "prompt",
+          mode: "include",
+          resourceId: null,
+          inlinePromptBody: "Prefer small diffs.",
+          order: 1,
+        },
+      ],
+    });
     expect(outputMocks.success).toHaveBeenLastCalledWith({ agentId: "agent-uuid", version: 2, append_length: 19 });
   });
 
@@ -269,7 +266,7 @@ describe("agent config command behavior", () => {
 
     await runConfig(["set-service-tier", "nova", "fast"]);
 
-    expect(fetcherMocks.patchConfig).toHaveBeenCalledWith("https://hub.example", "admin-token", "agent-uuid", 1, {
+    expect(fetcherMocks.patchConfig).toHaveBeenCalledWith("https://hub.example", CREDENTIAL, "agent-uuid", 1, {
       serviceTier: "fast",
     });
     expect(outputMocks.success).toHaveBeenCalledWith({
@@ -308,30 +305,25 @@ describe("agent config command behavior", () => {
     writeFileSync(promptFile, "New prompt.");
     await runConfig(["append-prompt", "nova", "--file", promptFile]);
 
-    expect(fetcherMocks.patchAgentResources).toHaveBeenLastCalledWith(
-      "https://hub.example",
-      "admin-token",
-      "agent-uuid",
-      {
-        expectedVersion: 3,
-        bindings: [
-          {
-            id: "keep-repo",
-            type: "repo",
-            mode: "include",
-            resourceId: "team-repo",
-            order: 1,
-          },
-          {
-            type: "prompt",
-            mode: "include",
-            resourceId: null,
-            inlinePromptBody: "New prompt.",
-            order: 2,
-          },
-        ],
-      },
-    );
+    expect(fetcherMocks.patchAgentResources).toHaveBeenLastCalledWith("https://hub.example", CREDENTIAL, "agent-uuid", {
+      expectedVersion: 3,
+      bindings: [
+        {
+          id: "keep-repo",
+          type: "repo",
+          mode: "include",
+          resourceId: "team-repo",
+          order: 1,
+        },
+        {
+          type: "prompt",
+          mode: "include",
+          resourceId: null,
+          inlinePromptBody: "New prompt.",
+          order: 2,
+        },
+      ],
+    });
   });
 
   it("replaces an existing agent-scoped repo binding by canonical url", async () => {
@@ -379,24 +371,19 @@ describe("agent config command behavior", () => {
 
     await runConfig(["add-repo", "nova", "https://github.com/acme/web.git", "--ref", "main", "--path", "web"]);
 
-    expect(fetcherMocks.patchAgentResources).toHaveBeenLastCalledWith(
-      "https://hub.example",
-      "admin-token",
-      "agent-uuid",
-      {
-        expectedVersion: 4,
-        bindings: [
-          {
-            type: "repo",
-            mode: "include",
-            agentExtraRepo: { url: "https://github.com/acme/web.git" },
-            repoRef: "main",
-            repoLocalPath: "web",
-            order: 3,
-          },
-        ],
-      },
-    );
+    expect(fetcherMocks.patchAgentResources).toHaveBeenLastCalledWith("https://hub.example", CREDENTIAL, "agent-uuid", {
+      expectedVersion: 4,
+      bindings: [
+        {
+          type: "repo",
+          mode: "include",
+          agentExtraRepo: { url: "https://github.com/acme/web.git" },
+          repoRef: "main",
+          repoLocalPath: "web",
+          order: 3,
+        },
+      ],
+    });
   });
 
   it("updates a matching team repo binding without converting it to an agent extra", async () => {
@@ -461,24 +448,19 @@ describe("agent config command behavior", () => {
 
     await runConfig(["add-repo", "nova", "https://github.com/acme/web.git", "--ref", "main", "--path", "web"]);
 
-    expect(fetcherMocks.patchAgentResources).toHaveBeenLastCalledWith(
-      "https://hub.example",
-      "admin-token",
-      "agent-uuid",
-      {
-        expectedVersion: 5,
-        bindings: [
-          {
-            type: "repo",
-            mode: "include",
-            resourceId: "team-repo",
-            repoRef: "main",
-            repoLocalPath: "web",
-            order: 2,
-          },
-        ],
-      },
-    );
+    expect(fetcherMocks.patchAgentResources).toHaveBeenLastCalledWith("https://hub.example", CREDENTIAL, "agent-uuid", {
+      expectedVersion: 5,
+      bindings: [
+        {
+          type: "repo",
+          mode: "include",
+          resourceId: "team-repo",
+          repoRef: "main",
+          repoLocalPath: "web",
+          order: 2,
+        },
+      ],
+    });
   });
 
   it("matches repo resources from payload fallback and preserves unrelated bindings", async () => {
@@ -532,32 +514,27 @@ describe("agent config command behavior", () => {
 
     await runConfig(["add-repo", "nova", "https://github.com/acme/web.git"]);
 
-    expect(fetcherMocks.patchAgentResources).toHaveBeenLastCalledWith(
-      "https://hub.example",
-      "admin-token",
-      "agent-uuid",
-      {
-        expectedVersion: 6,
-        bindings: [
-          {
-            id: "prompt-binding",
-            type: "prompt",
-            mode: "include",
-            resourceId: null,
-            inlinePromptBody: "Keep me.",
-            order: 1,
-          },
-          {
-            type: "repo",
-            mode: "include",
-            resourceId: "payload-team-repo",
-            repoRef: undefined,
-            repoLocalPath: undefined,
-            order: 4,
-          },
-        ],
-      },
-    );
+    expect(fetcherMocks.patchAgentResources).toHaveBeenLastCalledWith("https://hub.example", CREDENTIAL, "agent-uuid", {
+      expectedVersion: 6,
+      bindings: [
+        {
+          id: "prompt-binding",
+          type: "prompt",
+          mode: "include",
+          resourceId: null,
+          inlinePromptBody: "Keep me.",
+          order: 1,
+        },
+        {
+          type: "repo",
+          mode: "include",
+          resourceId: "payload-team-repo",
+          repoRef: undefined,
+          repoLocalPath: undefined,
+          order: 4,
+        },
+      ],
+    });
   });
 
   it("adds invalid repo URLs as agent extras without canonical matching", async () => {
@@ -578,54 +555,44 @@ describe("agent config command behavior", () => {
 
     await runConfig(["add-repo", "nova", "not a repo url"]);
 
-    expect(fetcherMocks.patchAgentResources).toHaveBeenLastCalledWith(
-      "https://hub.example",
-      "admin-token",
-      "agent-uuid",
-      {
-        expectedVersion: 7,
-        bindings: [
-          {
-            id: "keep-repo",
-            type: "repo",
-            mode: "include",
-            agentExtraRepo: { url: "not a canonical url either" },
-            order: 1,
-          },
-          {
-            type: "repo",
-            mode: "include",
-            agentExtraRepo: { url: "not a repo url" },
-            repoRef: undefined,
-            repoLocalPath: undefined,
-            order: 2,
-          },
-        ],
-      },
-    );
+    expect(fetcherMocks.patchAgentResources).toHaveBeenLastCalledWith("https://hub.example", CREDENTIAL, "agent-uuid", {
+      expectedVersion: 7,
+      bindings: [
+        {
+          id: "keep-repo",
+          type: "repo",
+          mode: "include",
+          agentExtraRepo: { url: "not a canonical url either" },
+          order: 1,
+        },
+        {
+          type: "repo",
+          mode: "include",
+          agentExtraRepo: { url: "not a repo url" },
+          repoRef: undefined,
+          repoLocalPath: undefined,
+          order: 2,
+        },
+      ],
+    });
   });
 
   it("`prompt set` replaces the inline fragment exactly like append-prompt", async () => {
     const promptFile = join(tempDir, "fragment.md");
     writeFileSync(promptFile, "Prefer small diffs.");
     await runConfig(["prompt", "set", "nova", "--file", promptFile]);
-    expect(fetcherMocks.patchAgentResources).toHaveBeenLastCalledWith(
-      "https://hub.example",
-      "admin-token",
-      "agent-uuid",
-      {
-        expectedVersion: 1,
-        bindings: [
-          {
-            type: "prompt",
-            mode: "include",
-            resourceId: null,
-            inlinePromptBody: "Prefer small diffs.",
-            order: 1,
-          },
-        ],
-      },
-    );
+    expect(fetcherMocks.patchAgentResources).toHaveBeenLastCalledWith("https://hub.example", CREDENTIAL, "agent-uuid", {
+      expectedVersion: 1,
+      bindings: [
+        {
+          type: "prompt",
+          mode: "include",
+          resourceId: null,
+          inlinePromptBody: "Prefer small diffs.",
+          order: 1,
+        },
+      ],
+    });
     expect(outputMocks.success).toHaveBeenLastCalledWith({ agentId: "agent-uuid", version: 2, append_length: 19 });
   });
 
@@ -642,23 +609,18 @@ describe("agent config command behavior", () => {
       stdinSpy.mockRestore();
     }
 
-    expect(fetcherMocks.patchAgentResources).toHaveBeenLastCalledWith(
-      "https://hub.example",
-      "admin-token",
-      "agent-uuid",
-      {
-        expectedVersion: 1,
-        bindings: [
-          {
-            type: "prompt",
-            mode: "include",
-            resourceId: null,
-            inlinePromptBody: "Prefer stdin fragments.",
-            order: 1,
-          },
-        ],
-      },
-    );
+    expect(fetcherMocks.patchAgentResources).toHaveBeenLastCalledWith("https://hub.example", CREDENTIAL, "agent-uuid", {
+      expectedVersion: 1,
+      bindings: [
+        {
+          type: "prompt",
+          mode: "include",
+          resourceId: null,
+          inlinePromptBody: "Prefer stdin fragments.",
+          order: 1,
+        },
+      ],
+    });
   });
 
   it("`prompt set` hard-rejects a body carrying the generated-briefing marker (no --force escape)", async () => {
@@ -930,7 +892,7 @@ describe("agent config command behavior", () => {
       "https://hub.example/api/v1/agents/agent-uuid/config/dry-run",
       {
         method: "POST",
-        adminToken: "admin-token",
+        credential: CREDENTIAL,
         body: JSON.stringify({ payload: { model: "haiku", env: [] } }),
       },
     );
