@@ -53,6 +53,11 @@ import {
   resolveDeepseekModel,
   resolveDeepseekRuntimeBinary,
 } from "./binary.js";
+import {
+  desktopCredentialOptIn,
+  resolveDeepseekApiKeyForLaunch,
+  trustedDeepseekBaseUrlOverride,
+} from "./credentials.js";
 import { classifyDeepseekRunFailure, mapDeepseekSessionEvent, sessionEventFromNotification } from "./events.js";
 
 export const DEEPSEEK_PENDING_SESSION_PREFIX = "deepseek-harness-pending-";
@@ -222,6 +227,24 @@ export const createDeepseekHandler: HandlerFactory = (config) => {
     const env: Record<string, string> = {};
     for (const [key, value] of Object.entries(merged)) {
       if (typeof value === "string") env[key] = value;
+    }
+    if (!env.DEEPSEEK_API_KEY) {
+      // Desktop reuse is host-authorized and origin-bound: the opt-in, the
+      // DSH home path, and any DEEPSEEK_BASE_URL override are read from the
+      // trusted daemon environment (process.env) only — never from the
+      // agent-managed config entries merged into `base` above.
+      if (desktopCredentialOptIn(process.env, sessionCtx.agent.agentId)) {
+        const fallbackKey = resolveDeepseekApiKeyForLaunch({ env: process.env, optIn: true });
+        if (fallbackKey) {
+          env.DEEPSEEK_API_KEY = fallbackKey;
+          // Bind the origin: the child endpoint is exactly the trusted
+          // override, or the official default (variable absent) — an
+          // agent-managed DEEPSEEK_BASE_URL merged in above never survives.
+          const trustedEndpoint = trustedDeepseekBaseUrlOverride(process.env);
+          if (trustedEndpoint) env.DEEPSEEK_BASE_URL = trustedEndpoint;
+          else delete env.DEEPSEEK_BASE_URL;
+        }
+      }
     }
     env.DSH_SESSION_ROOT = deepseekSessionRoot(workspaceCwd);
     env.DSH_SKILLS_ROOT = PROVIDER_SKILL_ROOTS["deepseek-harness"];
