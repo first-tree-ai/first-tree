@@ -217,6 +217,51 @@ describe("buildApp — Web fallback boundary", () => {
   });
 });
 
+describe("buildApp — browser security headers", () => {
+  it("enforces the policy on API, static, SPA, error, and HEAD responses", async () => {
+    const webRoot = await mkdtemp(join(tmpdir(), "first-tree-security-headers-"));
+    await writeFile(join(webRoot, "index.html"), "<!doctype html><html><body>App shell</body></html>", "utf8");
+    await writeFile(join(webRoot, "app.js"), "globalThis.firstTreeLoaded = true;", "utf8");
+
+    let app: FastifyInstance | undefined;
+    try {
+      app = await buildApp({ ...baseConfig, webDistPath: webRoot });
+
+      const responses = await Promise.all([
+        app.inject({ method: "GET", url: "/healthz" }),
+        app.inject({ method: "GET", url: "/app.js" }),
+        app.inject({ method: "GET", url: "/workspace/deep-link" }),
+        app.inject({ method: "GET", url: "/api/missing" }),
+        app.inject({ method: "HEAD", url: "/" }),
+      ]);
+
+      expect(responses.map((response) => response.statusCode)).toEqual([200, 200, 200, 404, 200]);
+      for (const response of responses) {
+        expect(response.headers["content-security-policy-report-only"]).toBeUndefined();
+        expect(response.headers["content-security-policy"]).toContain("default-src 'self'");
+        expect(response.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
+        expect(response.headers["strict-transport-security"]).toBe("max-age=31536000; includeSubDomains");
+        expect(response.headers["x-content-type-options"]).toBe("nosniff");
+        expect(response.headers["referrer-policy"]).toBe("strict-origin-when-cross-origin");
+        expect(response.headers["x-frame-options"]).toBe("DENY");
+        expect(response.headers["permissions-policy"]).toBe(
+          "camera=(), geolocation=(), microphone=(), payment=(), usb=()",
+        );
+      }
+
+      const csp = responses[0]?.headers["content-security-policy"];
+      expect(csp).toBeTypeOf("string");
+      const scriptDirective = csp?.split("; ").find((directive) => directive.startsWith("script-src "));
+      expect(scriptDirective).toBe("script-src 'self' https://*.googletagmanager.com https://*.clarity.ms");
+      expect(scriptDirective).not.toContain("'unsafe-inline'");
+      expect(scriptDirective).not.toContain("'unsafe-eval'");
+    } finally {
+      await safeClose(app);
+      await rm(webRoot, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("buildApp — boot-time edge branches", () => {
   it("boots with package-version fallback, trusted proxy logging, trace attrs, and backfill failure tolerance", async () => {
     const backfill = vi.spyOn(resourcesMigration, "backfillResourcesPhase1").mockRejectedValueOnce(new Error("down"));
