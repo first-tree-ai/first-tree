@@ -14,9 +14,16 @@ import { getMeDocPreview, type WorkspaceDocPreviewInput } from "../services/chat
  */
 function descriptorSeam(): Pick<WorkspaceDocPreviewInput, "openDir" | "openFile" | "readDescriptorPath"> {
   const opened = new Map<number, string>();
+  // The module opens the leaf as `/proc/self/fd/<dirfd>/<name>`. macOS has no
+  // procfs, so the seam resolves that form through the directory handle the
+  // module holds; the descriptor-backed open itself is asserted in
+  // `me-doc-preview-parent-swap.test.ts`.
   const track = async (path: string, flags: number) => {
-    const handle = await open(path, flags);
-    opened.set(handle.fd, path);
+    const match = /^\/proc\/self\/fd\/(\d+)\/([^/]+)$/.exec(path);
+    const directory = match ? opened.get(Number(match[1])) : undefined;
+    const real = match && directory !== undefined ? join(directory, match[2] as string) : path;
+    const handle = await open(real, flags);
+    opened.set(handle.fd, real);
     return handle;
   };
   return {

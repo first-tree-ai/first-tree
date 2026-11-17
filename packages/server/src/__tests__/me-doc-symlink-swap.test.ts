@@ -27,17 +27,33 @@ const baseInput = { chatId: "chat-1", agentId: "agent-1", agentName: "coder" };
  * wrap the real `open` so the stub answers with the path the module actually
  * opened, which is exactly what the kernel reports there.
  */
-function descriptorSeam(): Pick<WorkspaceDocPreviewInput, "openDir" | "openFile" | "readDescriptorPath"> {
+function descriptorSeam(): {
+  resolve(path: string): string;
+  seam: Pick<WorkspaceDocPreviewInput, "openDir" | "openFile" | "readDescriptorPath">;
+} {
   const opened = new Map<number, string>();
+  // Production lets the kernel resolve `/proc/self/fd/<dirfd>/<name>` inside the
+  // directory object; macOS has no procfs, so the case resolves it through the
+  // handle the module actually holds.
+  const resolve = (path: string): string => {
+    const match = /^\/proc\/self\/fd\/(\d+)\/([^/]+)$/.exec(path);
+    if (!match) return path;
+    const directory = opened.get(Number(match[1]));
+    return directory === undefined ? path : join(directory, match[2] as string);
+  };
   const track = async (path: string, flags: number) => {
-    const handle = await open(path, flags);
-    opened.set(handle.fd, path);
+    const real = resolve(path);
+    const handle = await open(real, flags);
+    opened.set(handle.fd, real);
     return handle;
   };
   return {
-    openDir: track,
-    openFile: track,
-    readDescriptorPath: async (handle) => opened.get(handle.fd) ?? null,
+    resolve,
+    seam: {
+      openDir: track,
+      openFile: track,
+      readDescriptorPath: async (handle) => opened.get(handle.fd) ?? null,
+    },
   };
 }
 
@@ -58,18 +74,20 @@ describe("getMeDocPreview symlink swap", () => {
     await writeFile(target, "# Guide", "utf8");
     let swapped = false;
 
+    const { resolve, seam } = descriptorSeam();
     const outcome = await getMeDocPreview({
       ...baseInput,
-      ...descriptorSeam(),
+      ...seam,
       path: "guide.md",
       workspacesRoot,
       openFile: async (path, flags) => {
         // The name resolved a moment ago was a regular file; by the time the
         // descriptor is opened it is a symlink pointing outside the workspace.
-        await rename(path, `${path}-moved`);
-        await symlink(outsideFile, path);
+        const real = resolve(path);
+        await rename(real, `${real}-moved`);
+        await symlink(outsideFile, real);
         swapped = true;
-        return open(path, flags);
+        return open(real, flags);
       },
     }).catch((thrown: unknown) => thrown);
 
@@ -85,7 +103,7 @@ describe("getMeDocPreview symlink swap", () => {
     await symlink(outsideFile, join(workspaceRoot, "linked.md"));
 
     await expect(
-      getMeDocPreview({ ...baseInput, ...descriptorSeam(), path: "linked.md", workspacesRoot }),
+      getMeDocPreview({ ...baseInput, ...descriptorSeam().seam, path: "linked.md", workspacesRoot }),
     ).rejects.toBeInstanceOf(ForbiddenError);
   });
 
@@ -96,10 +114,10 @@ describe("getMeDocPreview symlink swap", () => {
     await symlink(join(workspaceRoot, "real.md"), join(workspaceRoot, "inside-link.md"));
 
     await expect(
-      getMeDocPreview({ ...baseInput, ...descriptorSeam(), path: "guide.md", workspacesRoot }),
+      getMeDocPreview({ ...baseInput, ...descriptorSeam().seam, path: "guide.md", workspacesRoot }),
     ).resolves.toMatchObject({ content: "# Guide" });
     await expect(
-      getMeDocPreview({ ...baseInput, ...descriptorSeam(), path: "inside-link.md", workspacesRoot }),
+      getMeDocPreview({ ...baseInput, ...descriptorSeam().seam, path: "inside-link.md", workspacesRoot }),
     ).resolves.toMatchObject({ content: "# Real" });
   });
 });
@@ -115,7 +133,7 @@ describe("getMeDocPreview non-file entries", () => {
     // Opening a FIFO for reading without O_NONBLOCK waits for a writer; the
     // request would hang rather than 404.
     await expect(
-      getMeDocPreview({ ...baseInput, ...descriptorSeam(), path: "pipe.md", workspacesRoot }),
+      getMeDocPreview({ ...baseInput, ...descriptorSeam().seam, path: "pipe.md", workspacesRoot }),
     ).rejects.toBeInstanceOf(NotFoundError);
   });
 });

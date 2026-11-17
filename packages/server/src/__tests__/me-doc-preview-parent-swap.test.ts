@@ -30,18 +30,40 @@ function descriptorAnswers(...answers: Array<string | null>): (handle: { fd: num
   };
 }
 
-/** Tracks the paths the module actually opened, so the stub can answer for real descriptors. */
-function descriptorSeam(): Pick<WorkspaceDocPreviewInput, "openDir" | "openFile" | "readDescriptorPath"> {
+/**
+ * Descriptor seam.
+ *
+ * Production opens the leaf as `/proc/self/fd/<dirfd>/<name>`, which the kernel
+ * resolves inside the directory *object*. macOS has no procfs, so these cases
+ * resolve that form through the directory handle the module actually holds; the
+ * "opens the leaf through the descriptor" case asserts the module asked for the
+ * descriptor-backed path, so this translation cannot hide a regression back to
+ * a plain pathname lookup.
+ */
+function descriptorSeam(): {
+  resolve(path: string): string;
+  seam: Pick<WorkspaceDocPreviewInput, "openDir" | "openFile" | "readDescriptorPath">;
+} {
   const opened = new Map<number, string>();
+  const resolve = (path: string): string => {
+    const match = /^\/proc\/self\/fd\/(\d+)\/([^/]+)$/.exec(path);
+    if (!match) return path;
+    const directory = opened.get(Number(match[1]));
+    return directory === undefined ? path : join(directory, match[2] as string);
+  };
   const track = async (path: string, flags: number) => {
-    const handle = await open(path, flags);
-    opened.set(handle.fd, path);
+    const real = resolve(path);
+    const handle = await open(real, flags);
+    opened.set(handle.fd, real);
     return handle;
   };
   return {
-    openDir: track,
-    openFile: track,
-    readDescriptorPath: async (handle) => opened.get(handle.fd) ?? null,
+    resolve,
+    seam: {
+      openDir: track,
+      openFile: track,
+      readDescriptorPath: async (handle) => opened.get(handle.fd) ?? null,
+    },
   };
 }
 
@@ -63,7 +85,7 @@ describe("getMeDocPreview directory anchoring", () => {
 
     const preview = await getMeDocPreview({
       ...baseInput,
-      ...descriptorSeam(),
+      ...descriptorSeam().seam,
       basePath: "sub",
       path: "guide.md",
       workspacesRoot,
@@ -84,7 +106,7 @@ describe("getMeDocPreview directory anchoring", () => {
     const { workspacesRoot } = await fixture();
     const preview = await getMeDocPreview({
       ...baseInput,
-      ...descriptorSeam(),
+      ...descriptorSeam().seam,
       basePath: "sub",
       path: "guide.md",
       workspacesRoot,
@@ -93,19 +115,61 @@ describe("getMeDocPreview directory anchoring", () => {
     expect(preview.path).toBe("sub/guide.md");
   });
 
-  it("refuses a leaf replaced by a symlink between resolution and open", async () => {
-    const { workspacesRoot, outsideDir } = await fixture();
+  it("opens the leaf through the directory descriptor, not through a path string", async () => {
+    const { workspacesRoot } = await fixture();
+    const opened = new Map<number, string>();
+    const leafPaths: string[] = [];
+    let directoryFd: number | null = null;
 
     const preview = await getMeDocPreview({
       ...baseInput,
-      ...descriptorSeam(),
+      basePath: "sub",
+      path: "guide.md",
+      workspacesRoot,
+      openDir: async (path, flags) => {
+        const handle = await open(path, flags);
+        directoryFd = handle.fd;
+        opened.set(handle.fd, path);
+        return handle;
+      },
+      openFile: async (path, flags) => {
+        leafPaths.push(path);
+        const match = /^\/proc\/self\/fd\/(\d+)\/([^/]+)$/.exec(path);
+        // A plain `join(realParentPath, name)` would land here and be refused by
+        // the assertion below: the whole point is that the leaf is resolved
+        // inside the object the anchor holds.
+        if (!match) throw new Error(`leaf was opened by name: ${path}`);
+        const directory = opened.get(Number(match[1]));
+        if (directory === undefined) throw new Error(`unknown descriptor ${match[1]}`);
+        const real = join(directory, match[2] as string);
+        const handle = await open(real, flags);
+        opened.set(handle.fd, real);
+        return handle;
+      },
+      readDescriptorPath: async (handle) => opened.get(handle.fd) ?? null,
+    });
+
+    expect(preview.content).toBe("# Guide");
+    expect(leafPaths).toHaveLength(1);
+    expect(leafPaths[0]).toBe(`/proc/self/fd/${directoryFd}/guide.md`);
+  });
+
+  it("refuses a leaf replaced by a symlink between resolution and open", async () => {
+    const { workspacesRoot, outsideDir } = await fixture();
+    const { resolve, seam } = descriptorSeam();
+
+    const preview = await getMeDocPreview({
+      ...baseInput,
+      ...seam,
       basePath: "sub",
       path: "guide.md",
       workspacesRoot,
       openFile: async (path, flags) => {
-        await rename(path, `${path}-moved`);
-        await symlink(join(outsideDir, "guide.md"), path);
-        return open(path, flags);
+        // `path` is the descriptor-backed form; swap the name it resolves to.
+        const real = resolve(path);
+        await rename(real, `${real}-moved`);
+        await symlink(join(outsideDir, "guide.md"), real);
+        return open(real, flags);
       },
     }).catch((thrown: unknown) => thrown);
 
@@ -123,7 +187,7 @@ describe("getMeDocPreview directory anchoring", () => {
       basePath: "sub",
       path: "guide.md",
       workspacesRoot,
-      ...descriptorSeam(),
+      ...descriptorSeam().seam,
       // Directory answer is truthful; the file's descriptor claims elsewhere.
       readDescriptorPath: descriptorAnswers(await realpath(subDir), join(await realpath(outsideDir), "guide.md")),
     }).catch((thrown: unknown) => thrown);
@@ -140,7 +204,7 @@ describe("getMeDocPreview directory anchoring", () => {
       basePath: "sub",
       path: "guide.md",
       workspacesRoot,
-      ...descriptorSeam(),
+      ...descriptorSeam().seam,
       // Inside the workspace, but not in the directory the leaf was opened
       // against: the two observations do not describe one object.
       readDescriptorPath: descriptorAnswers(
@@ -160,7 +224,7 @@ describe("getMeDocPreview directory anchoring", () => {
       basePath: "sub",
       path: "guide.md",
       workspacesRoot,
-      ...descriptorSeam(),
+      ...descriptorSeam().seam,
       readDescriptorPath: descriptorAnswers(null),
     }).catch((thrown: unknown) => thrown);
 

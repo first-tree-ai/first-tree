@@ -127,9 +127,12 @@ export async function getMeDocPreview(input: WorkspaceDocPreviewInput): Promise<
     assertDirectoryInsideWorkspace(workspaceRootReal, anchorPath);
 
     const openFile = input.openFile ?? open;
-    // Opened *through the descriptor*, so a later swap of any name in the path
-    // cannot change which directory the file is resolved in.
-    const handle = await openFile(join(anchorPath, basename(resolvedFile)), READ_FLAGS).catch((error: unknown) => {
+    // Opened *through the descriptor*: the kernel resolves the directory object
+    // the anchor holds and looks the leaf up inside it. `join(anchorPath, name)`
+    // would have been a fresh pathname lookup against a string that may name a
+    // different directory by the time the open runs.
+    const leafPath = join(`${DESCRIPTOR_ROOT}/${directory.fd}`, basename(resolvedFile));
+    const handle = await openFile(leafPath, READ_FLAGS).catch((error: unknown) => {
       // `O_NOFOLLOW` turns a final-component symlink into ELOOP. Say so: the
       // path exists, the shape is what we refuse.
       if (isErrnoCode(error, "ELOOP")) {
