@@ -1,14 +1,23 @@
 import { Command } from "commander";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const bootstrapMocks = vi.hoisted(() => ({
-  ensureFreshAccessToken: vi.fn(),
+const bootstrapMocks = vi.hoisted(() => {
+  const ensureFreshAccessToken = vi.fn();
+  return {
+    ensureFreshAccessToken,
+    // SEC-023 resolves the bound form. Derive it from the string stub so every
+    // resolver/rejection in these cases applies to both without mirroring.
+    ensureFreshBoundAccessToken: async (...args: unknown[]) => ({
+      token: await ensureFreshAccessToken(...args),
+      origin: null,
+    }),
   resolveServerUrl: vi.fn(),
   saveAgentConfig: vi.fn(),
   loadConfig: vi.fn(),
   loadAgentConfig: vi.fn(),
   readActiveRootClientId: vi.fn(),
-}));
+};
+});
 
 const ioMocks = vi.hoisted(() => ({
   readStdin: vi.fn(),

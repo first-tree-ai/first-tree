@@ -24,46 +24,60 @@ const configMocks = vi.hoisted(() => ({
   setConfigValue: vi.fn(),
 }));
 
-const bootstrapMocks = vi.hoisted(() => ({
-  ensureFreshAccessToken: vi.fn(),
-  resolveServerUrl: vi.fn(),
-  saveAgentConfig: vi.fn(),
-}));
+const bootstrapMocks = vi.hoisted(() => {
+  const ensureFreshAccessToken = vi.fn();
+  return {
+    ensureFreshAccessToken,
+    // SEC-023 resolves the bound form. Derive it from the string stub so every
+    // resolver/rejection in these cases applies to both without mirroring.
+    ensureFreshBoundAccessToken: async (...args: unknown[]) => ({
+      token: await ensureFreshAccessToken(...args),
+      origin: null,
+    }),
+    resolveServerUrl: vi.fn(),
+    saveAgentConfig: vi.fn(),
+  };
+});
 
 const cliFetchMock = vi.hoisted(() => vi.fn());
 
-const coreMocks = vi.hoisted(() => ({
-  COMMAND_VERSION: "0.5.0",
-  CLI_USER_AGENT: "first-tree-test",
-  cliFetch: cliFetchMock,
-  detectInstallMode: vi.fn(),
-  ensureFreshAccessToken: vi.fn(),
-  fetchLatestVersion: vi.fn(),
-  fetchPortableLatestVersion: vi.fn(),
-  fetchServerCommandVersion: vi.fn(),
-  findStaleAliases: vi.fn(),
-  formatStaleReason: vi.fn((reason: string) => reason),
-  getClientServiceStatus: vi.fn(),
-  installClientService: vi.fn(),
-  installGlobalLatest: vi.fn(),
-  installGlobalSpec: vi.fn(),
-  installPortableSpec: vi.fn(),
-  isServiceSupported: vi.fn(),
-  listLiveClientRuntimeMarkers: vi.fn(),
-  listLocalContextDataLoss: vi.fn(),
-  loadCredentials: vi.fn(),
-  localContextDataLossForAgent: vi.fn(),
-  PACKAGE_NAME: "first-tree",
-  promptAddAgent: vi.fn(),
-  readActiveClientIdFromIndex: vi.fn(),
-  readActiveRootClientId: vi.fn(),
-  recordActiveClientOwner: vi.fn(),
-  removeLocalAgent: vi.fn(),
-  resolveServerUrl: vi.fn(),
-  restartClientService: vi.fn(),
-  stopClientService: vi.fn(),
-  stopClientRuntimeProcess: vi.fn(),
-}));
+const coreMocks = vi.hoisted(() => {
+  const ensureFreshAccessToken = vi.fn();
+  return {
+    COMMAND_VERSION: "0.5.0",
+    // SEC-023: the barrel's bound accessor, derived from the string stub below.
+    accessTokenForOrigin: async (...args: unknown[]) => ensureFreshAccessToken(...args),
+    CLI_USER_AGENT: "first-tree-test",
+    cliFetch: cliFetchMock,
+    detectInstallMode: vi.fn(),
+    ensureFreshAccessToken,
+    fetchLatestVersion: vi.fn(),
+    fetchPortableLatestVersion: vi.fn(),
+    fetchServerCommandVersion: vi.fn(),
+    findStaleAliases: vi.fn(),
+    formatStaleReason: vi.fn((reason: string) => reason),
+    getClientServiceStatus: vi.fn(),
+    installClientService: vi.fn(),
+    installGlobalLatest: vi.fn(),
+    installGlobalSpec: vi.fn(),
+    installPortableSpec: vi.fn(),
+    isServiceSupported: vi.fn(),
+    listLiveClientRuntimeMarkers: vi.fn(),
+    listLocalContextDataLoss: vi.fn(),
+    loadCredentials: vi.fn(),
+    localContextDataLossForAgent: vi.fn(),
+    PACKAGE_NAME: "first-tree",
+    promptAddAgent: vi.fn(),
+    readActiveClientIdFromIndex: vi.fn(),
+    readActiveRootClientId: vi.fn(),
+    recordActiveClientOwner: vi.fn(),
+    removeLocalAgent: vi.fn(),
+    resolveServerUrl: vi.fn(),
+    restartClientService: vi.fn(),
+    stopClientService: vi.fn(),
+    stopClientRuntimeProcess: vi.fn(),
+  };
+});
 
 const outputMocks = vi.hoisted(() => ({
   fail: vi.fn((code: string, message: string, exitCode = 1) => {
