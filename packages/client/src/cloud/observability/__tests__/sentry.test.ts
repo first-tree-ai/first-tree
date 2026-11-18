@@ -108,6 +108,10 @@ describe("sanitizeClientSentryEvent", () => {
       slack: ["xoxb", "1".repeat(12), "e".repeat(16)].join("-"),
     };
     const rawEvent: Event = {
+      // Top-level free-form fields: `captureMessage` text and a caller-supplied
+      // tag value reach Sentry through the same event object as `extra`.
+      message: `agent failed: ${secrets.githubPat} at https://x:${secrets.slack}@host/p`,
+      tags: { flow: `retry with ${secrets.aws}` },
       request: {
         url: `https://deploy:${secrets.urlUser}@git.example.test/repo.git?token=abc`,
         headers: { authorization: `Basic ${secrets.urlPass}` },
@@ -143,6 +147,10 @@ describe("sanitizeClientSentryEvent", () => {
     }
     // Redaction, not deletion: the event still explains what happened.
     expect(event.extra?.note).toBe("workspace prepared");
+    expect(event.message).toContain("agent failed:");
+    expect(event.tags?.flow).toContain("retry with");
+    // The keys this sanitizer adds itself are not scrubbed away.
+    expect(event.tags?.["first_tree.surface"]).toBe("client");
     expect(event.exception?.values?.[0]?.value).toContain("request failed with");
     expect(event.exception?.values?.[0]?.value).toContain("[REDACTED");
   });

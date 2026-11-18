@@ -98,11 +98,15 @@ export async function flushClientSentry(timeoutMs = 2_000): Promise<boolean> {
 
 export function sanitizeClientSentryEvent<T extends Sentry.Event>(event: T, config: ClientSentryConfig): T {
   event.tags = {
-    ...event.tags,
+    ...sanitizeTags(event.tags),
     "first_tree.surface": "client",
     "first_tree.git_sha": config.gitSha,
   };
   event.user = undefined;
+  // `message` is a top-level free-form field the SDK fills from whatever the
+  // caller passed to `captureMessage`, so it is as untrusted as `extra` and was
+  // the one string-valued field this sanitizer returned untouched.
+  if (event.message) event.message = sanitizeString(event.message);
   event.request = sanitizeRequest(event.request);
   event.contexts = scrubValue(event.contexts) as T["contexts"];
   event.extra = scrubValue(event.extra) as T["extra"];
@@ -110,6 +114,21 @@ export function sanitizeClientSentryEvent<T extends Sentry.Event>(event: T, conf
   event.exception = scrubValue(event.exception) as T["exception"];
   if (event.transaction) event.transaction = sanitizeString(event.transaction);
   return event;
+}
+
+/**
+ * Tag values are free-form: the SDK stringifies whatever the caller attaches
+ * (error text, host, a pasted command), so a token can arrive here just as
+ * easily as in `extra`. Sanitize the value, keep the key — losing the key would
+ * make the event harder to read without making it safer.
+ */
+function sanitizeTags(tags: Sentry.Event["tags"]): NonNullable<Sentry.Event["tags"]> {
+  if (!tags) return {};
+  const out: NonNullable<Sentry.Event["tags"]> = {};
+  for (const [key, value] of Object.entries(tags)) {
+    out[key] = typeof value === "string" ? sanitizeString(value) : value;
+  }
+  return out;
 }
 
 function sanitizeRequest(request: Sentry.Event["request"]): Sentry.Event["request"] {
