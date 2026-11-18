@@ -5,9 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const cliFetchMock = vi.hoisted(() => vi.fn());
 const ensureFreshAccessTokenMock = vi.hoisted(() => vi.fn());
+const credentialForOriginMock = vi.hoisted(() => vi.fn());
 const loadCredentialsMock = vi.hoisted(() => vi.fn());
 const stderrMock = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
 
+vi.mock("../core/access-token.js", () => ({ credentialForOrigin: credentialForOriginMock }));
 vi.mock("../core/cli-fetch.js", () => ({
   cliFetch: cliFetchMock,
 }));
@@ -32,6 +34,7 @@ beforeEach(() => {
   delete process.env.FIRST_TREE_SERVER_URL;
   cliFetchMock.mockReset();
   ensureFreshAccessTokenMock.mockReset();
+  credentialForOriginMock.mockReset();
   loadCredentialsMock.mockReset();
   stderrMock.mockClear();
 });
@@ -134,7 +137,7 @@ describe("onboard core", () => {
     const { onboardCreate, saveOnboardState } = await import("../core/onboard.js");
 
     process.env.FIRST_TREE_SERVER_URL = "http://first-tree.test/";
-    ensureFreshAccessTokenMock.mockResolvedValue("access-1");
+    credentialForOriginMock.mockResolvedValue({ token: "access-1", origin: "https://hub.example" });
     cliFetchMock
       .mockResolvedValueOnce(
         jsonResponse(200, {
@@ -189,7 +192,7 @@ describe("onboard core", () => {
     const { onboardCreate } = await import("../core/onboard.js");
 
     process.env.FIRST_TREE_SERVER_URL = "http://first-tree.test";
-    ensureFreshAccessTokenMock.mockResolvedValue("access-1");
+    credentialForOriginMock.mockResolvedValue({ token: "access-1", origin: "https://hub.example" });
     cliFetchMock.mockResolvedValueOnce(
       jsonResponse(200, {
         memberships: [
@@ -221,7 +224,7 @@ describe("onboard core", () => {
     const { onboardCreate } = await import("../core/onboard.js");
 
     process.env.FIRST_TREE_SERVER_URL = "http://hub.test";
-    ensureFreshAccessTokenMock.mockResolvedValue("access-1");
+    credentialForOriginMock.mockResolvedValue({ token: "access-1", origin: "https://hub.example" });
     cliFetchMock
       .mockResolvedValueOnce(
         jsonResponse(200, {

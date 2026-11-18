@@ -2,7 +2,8 @@ import { join } from "node:path";
 import type { PromptDef } from "@first-tree/shared/config";
 import { collectMissingPrompts, defaultConfigDir, defaultHome, setConfigValue } from "@first-tree/shared/config";
 import { input, password, select } from "@inquirer/prompts";
-import { ensureFreshAccessToken, loadCredentials, resolveServerUrl } from "./bootstrap.js";
+import { credentialForOrigin } from "./access-token.js";
+import { loadCredentials, resolveServerUrl } from "./bootstrap.js";
 import { channelConfig } from "./channel.js";
 import { cliFetch } from "./cli-fetch.js";
 
@@ -103,9 +104,11 @@ export async function promptAddAgent(opts: { agentId?: string } = {}): Promise<{
       validate: (v) => (v.length > 0 ? true : "Agent UUID is required"),
     }));
 
-  const token = await ensureFreshAccessToken();
+  // Bound at the destination this flow just resolved: the token cannot be
+  // handed to a different server by a later load or refresh (SEC-023).
+  const credential = await credentialForOrigin(serverUrl);
   const res = await cliFetch(`${serverUrl}/api/v1/agents/${encodeURIComponent(agentId)}`, {
-    headers: { Authorization: `Bearer ${token}` },
+    headers: { Authorization: `Bearer ${credential.token}` },
     signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) {

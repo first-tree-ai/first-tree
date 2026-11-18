@@ -1,7 +1,8 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { defaultConfigDir, defaultHome, setConfigValue } from "@first-tree/shared/config";
-import { ensureFreshAccessToken, loadCredentials, resolveServerUrl, saveAgentConfig } from "./bootstrap.js";
+import { credentialForOrigin } from "./access-token.js";
+import { loadCredentials, resolveServerUrl, saveAgentConfig } from "./bootstrap.js";
 import { channelConfig } from "./channel.js";
 import { cliFetch } from "./cli-fetch.js";
 import { print } from "./output.js";
@@ -190,7 +191,10 @@ async function createAgentViaAdmin(
 
 export async function onboardCreate(args: OnboardArgs): Promise<void> {
   const serverUrl = resolveServerUrl(args.server).replace(/\/+$/, "");
-  const accessToken = await ensureFreshAccessToken();
+  // One binding for every request this flow makes: the agent lookup, the org
+  // lookup and each created agent carry the same issuing origin (SEC-023).
+  const credential = await credentialForOrigin(serverUrl);
+  const accessToken = credential.token;
 
   const metadata: Record<string, unknown> = {};
   if (args.role) metadata.role = args.role;
