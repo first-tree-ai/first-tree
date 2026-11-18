@@ -138,4 +138,56 @@ describe("resolveWebSocketProxyAgent NO_PROXY", () => {
 
     expect(resolveWebSocketProxyAgent(WSS)).toBeDefined();
   });
+
+  it("accepts a whitespace-separated bypass list, like fetch does", () => {
+    process.env.NO_PROXY = "internal.example.com\tother.example.com cloud.first-tree.ai";
+
+    expect(resolveWebSocketProxyAgent(WSS)).toBeUndefined();
+  });
+});
+
+/**
+ * Node's fetch (undici's `EnvHttpProxyAgent`) reads lowercase first and only
+ * then the uppercase spelling. If the daemon disagreed, one destination could
+ * be proxied for HTTP and sent direct for the socket while both read the same
+ * environment.
+ */
+describe("resolveWebSocketProxyAgent environment precedence", () => {
+  const originalEnv = { ...process.env };
+  const WSS = "wss://cloud.first-tree.ai/api/v1/agent/ws/client";
+  const proxyOf = (agent: ReturnType<typeof resolveWebSocketProxyAgent>): string | undefined =>
+    agent ? agent.proxy.href : undefined;
+
+  beforeEach(() => {
+    delete process.env.no_proxy;
+    delete process.env.NO_PROXY;
+    delete process.env.https_proxy;
+    delete process.env.HTTPS_PROXY;
+    process.env.NODE_USE_ENV_PROXY = "1";
+  });
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  it("prefers the lowercase proxy variable when both are set", () => {
+    process.env.https_proxy = "http://lower.example:8080";
+    process.env.HTTPS_PROXY = "http://upper.example:8080";
+
+    expect(proxyOf(resolveWebSocketProxyAgent(WSS))).toBe("http://lower.example:8080/");
+  });
+
+  it("falls back to the uppercase proxy variable", () => {
+    process.env.HTTPS_PROXY = "http://upper.example:8080";
+
+    expect(proxyOf(resolveWebSocketProxyAgent(WSS))).toBe("http://upper.example:8080/");
+  });
+
+  it("prefers the lowercase bypass variable when both are set", () => {
+    process.env.https_proxy = "http://lower.example:8080";
+    process.env.no_proxy = "cloud.first-tree.ai";
+    process.env.NO_PROXY = "internal.example.com";
+
+    expect(resolveWebSocketProxyAgent(WSS)).toBeUndefined();
+  });
 });

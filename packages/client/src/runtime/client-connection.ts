@@ -80,7 +80,10 @@ export function shouldBypassProxy(hostname: string, port: number, noProxy: strin
   if (!noProxy) return false;
   const target = hostname.trim().toLowerCase();
   if (!target) return false;
-  for (const raw of noProxy.split(",")) {
+  // Fetch accepts comma- or whitespace-separated entries (`no_proxy="a b,c"`),
+  // so splitting on commas alone would leave `b` glued to `a` and the daemon
+  // would proxy a destination that HTTP already excludes.
+  for (const raw of noProxy.split(/[,\s]+/)) {
     const entry = raw.trim().toLowerCase();
     if (!entry) continue;
     if (entry === "*") return true;
@@ -110,9 +113,12 @@ export function shouldBypassProxy(hostname: string, port: number, noProxy: strin
 export function resolveWebSocketProxyAgent(wsUrl: string): HttpsProxyAgent<string> | undefined {
   if (process.env.NODE_USE_ENV_PROXY !== "1") return undefined;
   if (!/^wss:/i.test(wsUrl)) return undefined;
-  const proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy;
+  // Lowercase first, like Node's own fetch: undici reads
+  // `https_proxy` before `HTTPS_PROXY` and `no_proxy` before `NO_PROXY`, so the
+  // two egress paths agree on which value wins when both are set.
+  const proxyUrl = process.env.https_proxy ?? process.env.HTTPS_PROXY;
   if (!proxyUrl) return undefined;
-  const noProxy = process.env.NO_PROXY ?? process.env.no_proxy;
+  const noProxy = process.env.no_proxy ?? process.env.NO_PROXY;
   let target: URL;
   try {
     target = new URL(wsUrl);
