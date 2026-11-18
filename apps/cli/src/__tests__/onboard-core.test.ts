@@ -137,7 +137,7 @@ describe("onboard core", () => {
     const { onboardCreate, saveOnboardState } = await import("../core/onboard.js");
 
     process.env.FIRST_TREE_SERVER_URL = "http://first-tree.test/";
-    credentialForOriginMock.mockResolvedValue({ token: "access-1", origin: "https://hub.example" });
+    credentialForOriginMock.mockResolvedValue({ token: "access-1", origin: "http://first-tree.test" });
     cliFetchMock
       .mockResolvedValueOnce(
         jsonResponse(200, {
@@ -159,6 +159,11 @@ describe("onboard core", () => {
       clientId: "client-1",
     });
 
+    // The flow binds to the destination it resolved, and never reads a bare
+    // saved token: a regression to `ensureFreshAccessToken` fails here instead
+    // of silently sending `Bearer undefined`.
+    expect(credentialForOriginMock).toHaveBeenCalledWith("http://first-tree.test");
+    expect(ensureFreshAccessTokenMock).not.toHaveBeenCalled();
     expect(cliFetchMock.mock.calls.map((call) => String(call[0]))).toEqual([
       "http://first-tree.test/api/v1/me",
       "http://first-tree.test/api/v1/orgs/org-1/agents",
@@ -192,7 +197,7 @@ describe("onboard core", () => {
     const { onboardCreate } = await import("../core/onboard.js");
 
     process.env.FIRST_TREE_SERVER_URL = "http://first-tree.test";
-    credentialForOriginMock.mockResolvedValue({ token: "access-1", origin: "https://hub.example" });
+    credentialForOriginMock.mockResolvedValue({ token: "access-1", origin: "http://first-tree.test" });
     cliFetchMock.mockResolvedValueOnce(
       jsonResponse(200, {
         memberships: [
@@ -224,7 +229,7 @@ describe("onboard core", () => {
     const { onboardCreate } = await import("../core/onboard.js");
 
     process.env.FIRST_TREE_SERVER_URL = "http://hub.test";
-    credentialForOriginMock.mockResolvedValue({ token: "access-1", origin: "https://hub.example" });
+    credentialForOriginMock.mockResolvedValue({ token: "access-1", origin: "http://first-tree.test" });
     cliFetchMock
       .mockResolvedValueOnce(
         jsonResponse(200, {
