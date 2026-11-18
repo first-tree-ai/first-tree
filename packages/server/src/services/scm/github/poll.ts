@@ -52,6 +52,24 @@ function githubTimestamp(date: Date): string {
 export type GithubPollCursor = {
   updatedAt: string;
   entityNumber: number;
+  /**
+   * Resume point for one entity whose comment and review streams were only
+   * partly read.
+   *
+   * One record is enough because the poll stops at the first partially read
+   * entity and the repository watermark advances only once both of its streams
+   * are drained. A single timestamp for both streams — the first version —
+   * let a newer review move the watermark past comments nobody had read.
+   */
+  continuation?: GithubPollContinuation | null;
+};
+
+export type GithubPollContinuation = {
+  entityNumber: number;
+  /** Comments at or before this `created_at` were read; resume after it. */
+  commentsSince: string | null;
+  /** 1-based review-list page to request next (never page 1 once it was read). */
+  reviewsPage: number;
 };
 
 /**
@@ -121,6 +139,8 @@ type FetchedPages = {
   requests: number;
   /** The page cap was reached before the listing ended. */
   truncated: boolean;
+  /** Page to resume at when `truncated`; ignored otherwise. */
+  nextPage: number;
 };
 
 function requestHeaders(token: string | null): Record<string, string> {
@@ -133,10 +153,16 @@ function requestHeaders(token: string | null): Record<string, string> {
   return headers;
 }
 
-async function fetchPages(ctx: FetchPagesContext, path: string, query: Record<string, string>): Promise<FetchedPages> {
+async function fetchPages(
+  ctx: FetchPagesContext,
+  path: string,
+  query: Record<string, string>,
+  startPage = 1,
+): Promise<FetchedPages> {
   const items: Record<string, unknown>[] = [];
   let requests = 0;
-  for (let page = 1; page <= ctx.maxPages; page++) {
+  const lastPage = startPage + ctx.maxPages - 1;
+  for (let page = startPage; page <= lastPage; page++) {
     const search = new URLSearchParams({ ...query, per_page: String(ctx.perPage), page: String(page) });
     const url = `${ctx.apiBase}${path}?${search.toString()}`;
     const response = await ctx.fetch(url, { headers: requestHeaders(ctx.token) });
@@ -154,9 +180,9 @@ async function fetchPages(ctx: FetchPagesContext, path: string, query: Record<st
     }
     const pageItems = body.filter(isRecord);
     items.push(...pageItems);
-    if (pageItems.length < ctx.perPage) return { items, requests, truncated: false };
+    if (pageItems.length < ctx.perPage) return { items, requests, truncated: false, nextPage: page };
   }
-  return { items, requests, truncated: true };
+  return { items, requests, truncated: true, nextPage: lastPage + 1 };
 }
 
 /**
@@ -389,11 +415,20 @@ export async function pollGithubRepository(input: PollGithubRepositoryInput): Pr
   // forever and the poller would never deliver anything.
   if (nextCursor === null) nextCursor = { updatedAt: since, entityNumber: 0 };
 
+  const continuationFor = (entityNumber: number): GithubPollContinuation | null => {
+    const stored = input.cursor?.continuation ?? null;
+    return stored !== null && stored.entityNumber === entityNumber ? stored : null;
+  };
+
   for (const { item, number, updatedAt } of changed) {
     const isPullRequest = isRecord(item.pull_request);
     const createdAt = readString(item.created_at);
+    const continuation = continuationFor(number);
 
-    if (createdAt !== null && createdAt > since) {
+    // `opened` is emitted once. A resumed entity already had its creation
+    // announced in the pass that capped out, and re-emitting it would only
+    // rely on downstream dedupe to hide the repeat.
+    if (continuation === null && createdAt !== null && createdAt > since) {
       record(
         openedDeliveryId(readNumber(item.id), input.repository, number),
         isPullRequest ? "pull_request" : "issues",
@@ -401,58 +436,71 @@ export async function pollGithubRepository(input: PollGithubRepositoryInput): Pr
       );
     }
 
+    // Each stream resumes on its own axis: comments by timestamp (the endpoint
+    // supports `since`), reviews by page (it does not support either `since` or
+    // sorting, so re-requesting page 1 would stall on the same prefix forever).
+    const commentsSince = continuation?.commentsSince ?? since;
+    const reviewsStartPage = continuation?.reviewsPage ?? 1;
+
     const comments = await fetchPages(ctx, `/repos/${input.repository}/issues/${number}/comments`, {
-      since,
+      since: commentsSince,
       sort: "created",
       direction: "asc",
     });
     requests += comments.requests;
-    let lastCommentAt: string | null = null;
+    let lastCommentAt: string | null = continuation?.commentsSince ?? null;
     for (const comment of comments.items) {
       const createdAtComment = readString(comment.created_at);
       const deliveryId = commentDeliveryId(readNumber(comment.id));
       if (createdAtComment === null || deliveryId === null) continue;
       lastCommentAt = laterOf(lastCommentAt, createdAtComment);
-      if (createdAtComment <= since) continue;
+      if (createdAtComment <= commentsSince) continue;
       record(deliveryId, "issue_comment", commentPayload(input.repository, item, comment, isPullRequest));
     }
 
     let reviewsTruncated = false;
-    let lastReviewAt: string | null = null;
+    let nextReviewsPage = reviewsStartPage;
     if (isPullRequest) {
-      const reviews = await fetchPages(ctx, `/repos/${input.repository}/pulls/${number}/reviews`, {});
+      const reviews = await fetchPages(ctx, `/repos/${input.repository}/pulls/${number}/reviews`, {}, reviewsStartPage);
       requests += reviews.requests;
       reviewsTruncated = reviews.truncated;
+      nextReviewsPage = reviews.truncated ? reviews.nextPage : reviewsStartPage;
       for (const review of reviews.items) {
         const submittedAt = readString(review.submitted_at);
         const deliveryId = reviewDeliveryId(readNumber(review.id));
         // A pending review has no `submitted_at`; it becomes deliverable only
         // once GitHub stamps the submission.
         if (submittedAt === null || deliveryId === null) continue;
-        lastReviewAt = laterOf(lastReviewAt, submittedAt);
         if (submittedAt <= since) continue;
         record(deliveryId, "pull_request_review", reviewPayload(input.repository, item, review));
       }
     }
 
     if (comments.truncated || reviewsTruncated) {
-      // Part of the entity is unread. Park the watermark at the newest object
-      // that *was* read instead of at the entity: the next poll then starts
-      // exactly there and picks up the tail, so nothing is skipped and the
-      // repository never stalls behind one busy entity. When the cap hit
-      // before a single object was read there is no timestamp to park at, and
-      // the previous cursor is kept — re-reading is free, a gap is not.
+      // The entity is only partly read: keep the repository watermark where it
+      // is and remember where each stream got to. Advancing to the newest
+      // *any* stream saw (what the first version did) moved the comment query
+      // past comments nobody had read.
       truncated = true;
-      const parkedAt = laterOf(lastCommentAt, lastReviewAt);
-      if (parkedAt !== null && (nextCursor === null || parkedAt > nextCursor.updatedAt)) {
-        // `entityNumber: 0` keeps an entity whose `updated_at` equals the
-        // parked timestamp in the next listing.
-        nextCursor = { updatedAt: parkedAt, entityNumber: 0 };
-      }
-      return { requests, webhooks, dropped, nextCursor, truncated };
+      return {
+        requests,
+        webhooks,
+        dropped,
+        nextCursor: {
+          ...(nextCursor ?? { updatedAt: since, entityNumber: 0 }),
+          continuation: {
+            entityNumber: number,
+            commentsSince: lastCommentAt,
+            reviewsPage: nextReviewsPage,
+          },
+        },
+        truncated: true,
+      };
     }
 
-    nextCursor = { updatedAt, entityNumber: number };
+    // Both streams drained: this entity is fully read, and only now does the
+    // repository watermark move past it.
+    nextCursor = { updatedAt, entityNumber: number, continuation: null };
   }
 
   return { requests, webhooks, dropped, nextCursor, truncated };

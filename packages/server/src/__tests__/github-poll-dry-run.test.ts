@@ -167,7 +167,7 @@ describe("pollGithubRepository", () => {
       kind: "commented",
       actor: "reviewer",
     });
-    expect(result.nextCursor).toEqual({ updatedAt: "2026-11-17T08:30:00Z", entityNumber: 12 });
+    expect(result.nextCursor).toEqual({ updatedAt: "2026-11-17T08:30:00Z", entityNumber: 12, continuation: null });
     expect(calls.some((url) => new URL(url).searchParams.get("since") === CURSOR.updatedAt)).toBe(true);
   });
 
@@ -263,18 +263,32 @@ describe("pollGithubRepository", () => {
     expect(result.webhooks).toEqual([]);
   });
 
-  it("parks at the newest object it read when a resource hits the page cap", async () => {
+  it("resumes comments and reviews on separate axes and advances only when both drain", async () => {
+    // Page 1 of each stream is full at `perPage: 1`, so both cap out in the
+    // first pass — the case the reviewer flagged: a review newer than every
+    // comment must not move the *comment* query past comments nobody read.
     const { fetch, calls } = fetchStub((url) => {
       const page = Number(url.searchParams.get("page"));
       if (url.pathname.endsWith("/issues")) return { body: page === 1 ? [issueRow()] : [] };
       if (url.pathname.endsWith("/comments")) {
-        // A full page on every allowed page: the listing did not end.
-        return { body: [commentRow({ id: 5000 + page, created_at: `2026-11-17T08:2${page}:00Z` })] };
+        const since = url.searchParams.get("since") ?? "";
+        const rows = [
+          commentRow({ id: 5001, created_at: "2026-11-17T08:21:00Z" }),
+          commentRow({ id: 5002, created_at: "2026-11-17T08:22:00Z" }),
+        ].filter((row) => String(row.created_at) > since);
+        return { body: page === 1 ? rows.slice(0, 1) : rows.slice(1, 2) };
+      }
+      if (url.pathname.endsWith("/reviews")) {
+        const rows = [
+          reviewRow({ id: 7001, submitted_at: "2026-11-17T08:40:00Z" }),
+          reviewRow({ id: 7002, submitted_at: "2026-11-17T08:41:00Z" }),
+        ];
+        return { body: page === 1 ? rows.slice(0, 1) : page === 2 ? rows.slice(1, 2) : [] };
       }
       return { body: [] };
     });
 
-    const result = await pollGithubRepository({
+    const first = await pollGithubRepository({
       organizationId: ORGANIZATION_ID,
       repository: REPOSITORY,
       cursor: CURSOR,
@@ -283,30 +297,43 @@ describe("pollGithubRepository", () => {
       maxPages: 2,
     });
 
-    expect(result.truncated).toBe(true);
-    expect(result.webhooks).toHaveLength(2);
-    // Not the entity's `updated_at` (08:30): the newest comment actually read
-    // (08:22). Parking further would skip the unread tail; parking at the
-    // entity would re-read the same two comments forever.
-    expect(result.nextCursor).toEqual({ updatedAt: "2026-11-17T08:22:00Z", entityNumber: 0 });
+    expect(first.truncated).toBe(true);
+    expect(first.webhooks).toHaveLength(4);
+    // The repository watermark does not move: the entity is only half read.
+    expect(first.nextCursor?.updatedAt).toBe(CURSOR.updatedAt);
+    expect(first.nextCursor?.continuation).toEqual({
+      entityNumber: 12,
+      commentsSince: "2026-11-17T08:22:00Z",
+      reviewsPage: 3,
+    });
 
-    // The tail is not duplicated on the next pass, and the next pass resumes
-    // from what was read rather than from the entity boundary.
-    const followUp = await pollGithubRepository({
+    calls.length = 0;
+    const second = await pollGithubRepository({
       organizationId: ORGANIZATION_ID,
       repository: REPOSITORY,
-      cursor: result.nextCursor,
+      cursor: first.nextCursor,
       fetch,
       perPage: 1,
       maxPages: 2,
     });
-    expect(followUp.webhooks).toEqual([]);
-    expect(
-      calls.filter((url) => new URL(url).pathname.endsWith("/comments")).at(-1) &&
-        new URL(calls.filter((url) => new URL(url).pathname.endsWith("/comments")).at(-1) as string).searchParams.get(
-          "since",
-        ),
-    ).toBe("2026-11-17T08:22:00Z");
+
+    const commentRequest = calls.find((url) => new URL(url).pathname.endsWith("/comments"));
+    const reviewRequests = calls.filter((url) => new URL(url).pathname.endsWith("/reviews"));
+    // Comments resume after the last one read (08:22) — not after the newest
+    // review (08:41), which is what the previous single-timestamp cursor did.
+    expect(new URL(commentRequest as string).searchParams.get("since")).toBe("2026-11-17T08:22:00Z");
+    // The review stream resumes at page 3 instead of re-reading pages 1-2.
+    expect(new URL(reviewRequests[0] as string).searchParams.get("page")).toBe("3");
+
+    // Both streams are drained now, so the entity is complete and the
+    // repository watermark finally moves past it.
+    expect(second.truncated).toBe(false);
+    expect(second.webhooks).toEqual([]);
+    expect(second.nextCursor).toEqual({
+      updatedAt: "2026-11-17T08:30:00Z",
+      entityNumber: 12,
+      continuation: null,
+    });
   });
 
   it("surfaces a rate-limit refusal with the time to wait", async () => {
