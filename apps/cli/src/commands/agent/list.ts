@@ -2,7 +2,8 @@ import { join } from "node:path";
 import { agentConfigSchema, defaultConfigDir, loadAgents } from "@first-tree/shared/config";
 import type { Command } from "commander";
 import { fail } from "../../cli/output.js";
-import { ensureFreshAccessToken, resolveServerUrl } from "../../core/bootstrap.js";
+import { accessTokenForOrigin } from "../../core/access-token.js";
+import { resolveServerUrl } from "../../core/bootstrap.js";
 import { cliFetch } from "../../core/cli-fetch.js";
 import { print } from "../../core/output.js";
 
@@ -42,7 +43,9 @@ export function registerAgentListCommand(agent: Command): void {
 
       try {
         const serverUrl = resolveServerUrl(options.server);
-        const token = await ensureFreshAccessToken();
+        // Bound at resolution: the origin this token was minted for travels with
+        // it, so `--server` cannot borrow another origin's credential (SEC-023).
+        const token = await accessTokenForOrigin(serverUrl);
         const res = await cliFetch(`${serverUrl}/api/v1/me/managed-agents`, {
           headers: { Authorization: `Bearer ${token}` },
           signal: AbortSignal.timeout(10_000),

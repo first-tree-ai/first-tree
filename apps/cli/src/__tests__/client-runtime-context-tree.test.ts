@@ -148,6 +148,9 @@ vi.mock("@first-tree/client", () => {
 vi.mock("../core/bootstrap.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../core/bootstrap.js")>()),
   ensureFreshAccessToken: vi.fn(async () => "tok-test"),
+  // `accessTokenForOrigin` resolves the bound form; no origin here, so the
+  // SEC-023 check abstains and these cases stay about connection wiring.
+  ensureFreshBoundAccessToken: vi.fn(async () => ({ token: "tok-test", origin: null })),
 }));
 
 vi.mock("../core/cli-fetch.js", () => ({

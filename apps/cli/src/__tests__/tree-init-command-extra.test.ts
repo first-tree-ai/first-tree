@@ -16,6 +16,12 @@ const treeSharedMocks = vi.hoisted(() => ({
 
 vi.mock("../core/bootstrap.js", () => ({
   ensureFreshAccessToken: bootstrapMocks.ensureFreshAccessToken,
+  // SEC-023 resolves the bound form; these cases never check an origin, so the
+  // pair abstains (`origin: null`) and the assertion is a no-op.
+  ensureFreshBoundAccessToken: async (...args: unknown[]) => ({
+    token: await bootstrapMocks.ensureFreshAccessToken(...args),
+    origin: null,
+  }),
   resolveServerUrl: bootstrapMocks.resolveServerUrl,
 }));
 

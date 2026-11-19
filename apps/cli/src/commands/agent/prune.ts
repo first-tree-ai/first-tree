@@ -4,9 +4,9 @@ import { defaultDataDir } from "@first-tree/shared/config";
 import { confirm } from "@inquirer/prompts";
 import type { Command } from "commander";
 import { fail } from "../../cli/output.js";
+import { accessTokenForOrigin } from "../../core/access-token.js";
 import {
   CLI_USER_AGENT,
-  ensureFreshAccessToken,
   findStaleAliases,
   formatStaleReason,
   localContextDataLossForAgent,
@@ -37,7 +37,7 @@ export function registerAgentPruneCommand(agent: Command): void {
         const clientId = readClientId();
         const sdk = new FirstTreeHubSDK({
           serverUrl,
-          getAccessToken: (opts) => ensureFreshAccessToken(opts),
+          getAccessToken: (opts) => accessTokenForOrigin(serverUrl, opts),
           userAgent: CLI_USER_AGENT,
         });
         const stale = await findStaleAliases({

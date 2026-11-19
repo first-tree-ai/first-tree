@@ -10,6 +10,11 @@ import {
   uploadClientCapabilities,
 } from "../core/runtime-provider-reconcile.js";
 
+/** SEC-023: these request paths take the credential bound to its issuing origin. */
+function credentialFor(token: string): { token: string; origin: string } {
+  return { token, origin: "http://first-tree.test" };
+}
+
 /**
  * Two CLI helpers, both fetch-driven against the server:
  *   - `listPinnedAgents` reads the server-authoritative local-agent set.
@@ -43,7 +48,7 @@ describe("listPinnedAgents", () => {
       }),
     );
 
-    const rows = await listPinnedAgents({ serverUrl: "http://first-tree.test", accessToken: "tok-xyz" });
+    const rows = await listPinnedAgents({ serverUrl: "http://first-tree.test", credential: credentialFor("tok-xyz") });
 
     expect(rows).toEqual([{ agentId: "agent-1", clientId: "client-1", runtimeProvider: "claude-code" }]);
     expect(fetchMock).toHaveBeenCalledWith(
@@ -55,7 +60,9 @@ describe("listPinnedAgents", () => {
   it("throws on non-OK status so daemon startup can fall back to best-effort upload", async () => {
     fetchMock.mockResolvedValue(new Response("nope", { status: 500 }));
 
-    await expect(listPinnedAgents({ serverUrl: "http://first-tree.test", accessToken: "tok" })).rejects.toThrow(/500/);
+    await expect(
+      listPinnedAgents({ serverUrl: "http://first-tree.test", credential: credentialFor("tok") }),
+    ).rejects.toThrow(/500/);
   });
 });
 
@@ -97,7 +104,7 @@ describe("reconcileLocalRuntimeProviders", () => {
 
     await reconcileLocalRuntimeProviders({
       serverUrl: "http://first-tree.test",
-      accessToken: "tok",
+      credential: credentialFor("tok"),
       agentsDir,
     });
 
@@ -119,7 +126,7 @@ describe("reconcileLocalRuntimeProviders", () => {
 
     await reconcileLocalRuntimeProviders({
       serverUrl: "http://first-tree.test",
-      accessToken: "tok",
+      credential: credentialFor("tok"),
       agentsDir,
     });
 
@@ -133,7 +140,7 @@ describe("reconcileLocalRuntimeProviders", () => {
 
     await reconcileLocalRuntimeProviders({
       serverUrl: "http://first-tree.test",
-      accessToken: "tok",
+      credential: credentialFor("tok"),
       agentsDir,
     });
 
@@ -145,7 +152,7 @@ describe("reconcileLocalRuntimeProviders", () => {
     await expect(
       reconcileLocalRuntimeProviders({
         serverUrl: "http://first-tree.test",
-        accessToken: "tok",
+        credential: credentialFor("tok"),
         agentsDir,
       }),
     ).rejects.toThrow(/500/);
@@ -166,7 +173,7 @@ describe("reconcileLocalRuntimeProviders", () => {
     const logs: Array<[string, string]> = [];
     await reconcileLocalRuntimeProviders({
       serverUrl: "http://first-tree.test",
-      accessToken: "tok",
+      credential: credentialFor("tok"),
       agentsDir,
       log: (level, msg) => logs.push([level, msg]),
     });
@@ -187,7 +194,7 @@ describe("reconcileLocalRuntimeProviders", () => {
     await expect(
       reconcileLocalRuntimeProviders({
         serverUrl: "http://first-tree.test",
-        accessToken: "tok",
+        credential: credentialFor("tok"),
         agentsDir: join(agentsDir, "missing"),
       }),
     ).resolves.toBeUndefined();
@@ -208,7 +215,7 @@ describe("reconcileLocalRuntimeProviders", () => {
 
     await reconcileLocalRuntimeProviders({
       serverUrl: "http://first-tree.test",
-      accessToken: "tok",
+      credential: credentialFor("tok"),
       agentsDir,
       log: (level, msg) => logs.push([level, msg]),
     });
@@ -238,7 +245,7 @@ describe("uploadClientCapabilities", () => {
 
     await uploadClientCapabilities({
       serverUrl: "http://first-tree.test",
-      accessToken: "tok-xyz",
+      credential: { token: "tok-xyz", origin: "http://first-tree.test" },
       clientId: "cli-1",
       capabilities: {
         "claude-code": {
@@ -266,7 +273,7 @@ describe("uploadClientCapabilities", () => {
     fetchMock.mockResolvedValue(new Response(null, { status: 204 }));
     await uploadClientCapabilities({
       serverUrl: "http://first-tree.test",
-      accessToken: "tok",
+      credential: { token: "tok", origin: "http://first-tree.test" },
       clientId: "weird/client id",
       capabilities: {},
     });
@@ -281,7 +288,7 @@ describe("uploadClientCapabilities", () => {
     await expect(
       uploadClientCapabilities({
         serverUrl: "http://first-tree.test",
-        accessToken: "tok",
+        credential: { token: "tok", origin: "http://first-tree.test" },
         clientId: "cli-1",
         capabilities: {},
       }),
@@ -298,7 +305,7 @@ describe("uploadClientCapabilities", () => {
 
     const upload = uploadClientCapabilities({
       serverUrl: "http://first-tree.test",
-      accessToken: "tok",
+      credential: { token: "tok", origin: "http://first-tree.test" },
       clientId: "cli-1",
       capabilities: {},
     });
@@ -345,7 +352,7 @@ describe("uploadAgentSkills", () => {
 
     await uploadAgentSkills({
       serverUrl: "http://first-tree.test",
-      accessToken: "tok-xyz",
+      credential: { token: "tok-xyz", origin: "http://first-tree.test" },
       agentId: "agent-1",
       skills: [{ name: "review", description: "Pre-landing PR review", source: "user" }],
     });
@@ -366,7 +373,7 @@ describe("uploadAgentSkills", () => {
     fetchMock.mockResolvedValue(new Response(null, { status: 204 }));
     await uploadAgentSkills({
       serverUrl: "http://first-tree.test",
-      accessToken: "tok",
+      credential: { token: "tok", origin: "http://first-tree.test" },
       agentId: "agent/with slash",
       skills: [],
     });
@@ -381,7 +388,7 @@ describe("uploadAgentSkills", () => {
     await expect(
       uploadAgentSkills({
         serverUrl: "http://first-tree.test",
-        accessToken: "tok",
+        credential: { token: "tok", origin: "http://first-tree.test" },
         agentId: "agent-1",
         skills: [],
       }),

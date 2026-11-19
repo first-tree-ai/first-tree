@@ -1,7 +1,8 @@
 import { isCanonicalEnvKey } from "@first-tree/shared";
 import type { Command } from "commander";
 import { fail, success } from "../../../cli/output.js";
-import { ensureFreshAdminToken, resolveServerUrl } from "../../../core/bootstrap.js";
+import { credentialForOrigin } from "../../../core/access-token.js";
+import { resolveServerUrl } from "../../../core/bootstrap.js";
 import { print } from "../../../core/output.js";
 import { readStdin } from "../../_shared/stdin.js";
 import { getCurrent, patchConfig, resolveAgentRecord } from "./_shared/fetchers.js";
@@ -19,12 +20,12 @@ export function registerAgentConfigSetEnvCommand(config: Command): void {
     )
     .action(async (agentName: string, kv: string | undefined, opts: { sensitive?: boolean; valueStdin?: boolean }) => {
       const serverUrl = resolveServerUrl(process.env.FIRST_TREE_SERVER_URL);
-      const adminToken = await ensureFreshAdminToken();
-      const { uuid } = await resolveAgentRecord(serverUrl, adminToken, agentName);
+      const credential = await credentialForOrigin(serverUrl);
+      const { uuid } = await resolveAgentRecord(serverUrl, credential, agentName);
       const { key, value } = await resolveKeyValue(kv, opts);
-      const current = await getCurrent(serverUrl, adminToken, uuid);
+      const current = await getCurrent(serverUrl, credential, uuid);
       const remaining = current.payload.env.filter((e) => e.key !== key);
-      const updated = await patchConfig(serverUrl, adminToken, uuid, current.version, {
+      const updated = await patchConfig(serverUrl, credential, uuid, current.version, {
         env: [...remaining, { key, value, sensitive: opts.sensitive ?? false }],
       });
       success({ agentId: updated.agentId, version: updated.version, env: key });

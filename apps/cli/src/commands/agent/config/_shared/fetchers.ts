@@ -6,6 +6,7 @@ import type {
 } from "@first-tree/shared";
 import { fail } from "../../../../cli/output.js";
 import { cliFetch } from "../../../../core/cli-fetch.js";
+import { assertBoundCredentialOrigin, type BoundCredential } from "../../../../core/credential-origin.js";
 import { type ResolvedAgent, resolveAgent } from "../../../_shared/resolve-agent.js";
 
 /**
@@ -23,18 +24,24 @@ export type { ResolvedAgent };
 
 export async function resolveAgentRecord(
   serverUrl: string,
-  adminToken: string,
+  credential: BoundCredential,
   agentName: string,
 ): Promise<ResolvedAgent> {
-  return resolveAgent(serverUrl, adminToken, agentName);
+  // The pair is checked against the destination this helper actually calls, so
+  // the guarantee does not fall back to "is this token in the file right now".
+  assertBoundCredentialOrigin(serverUrl, credential);
+  return resolveAgent(serverUrl, credential.token, agentName);
 }
 
-export async function adminFetch<T>(url: string, init: RequestInit & { adminToken: string }): Promise<T> {
-  const { adminToken, headers, ...rest } = init;
+export async function adminFetch<T>(url: string, init: RequestInit & { credential: BoundCredential }): Promise<T> {
+  const { credential, headers, ...rest } = init;
+  // Bound at the URL being called (SEC-023): the origin travels with the token,
+  // so a credential obtained once for one server cannot be spent on another.
+  assertBoundCredentialOrigin(url, credential);
   const res = await cliFetch(url, {
     ...rest,
     headers: {
-      Authorization: `Bearer ${adminToken}`,
+      Authorization: `Bearer ${credential.token}`,
       ...(rest.body ? { "Content-Type": "application/json" } : {}),
       ...(headers as Record<string, string> | undefined),
     },
@@ -47,47 +54,51 @@ export async function adminFetch<T>(url: string, init: RequestInit & { adminToke
   return (await res.json()) as T;
 }
 
-export async function getCurrent(serverUrl: string, adminToken: string, agentId: string): Promise<AgentRuntimeConfig> {
+export async function getCurrent(
+  serverUrl: string,
+  credential: BoundCredential,
+  agentId: string,
+): Promise<AgentRuntimeConfig> {
   return adminFetch<AgentRuntimeConfig>(`${serverUrl}/api/v1/agents/${agentId}/config`, {
     method: "GET",
-    adminToken,
+    credential,
   });
 }
 
 export async function patchConfig(
   serverUrl: string,
-  adminToken: string,
+  credential: BoundCredential,
   agentId: string,
   expectedVersion: number,
   patch: AgentRuntimeConfigPatch,
 ): Promise<AgentRuntimeConfig> {
   return adminFetch<AgentRuntimeConfig>(`${serverUrl}/api/v1/agents/${agentId}/config`, {
     method: "PATCH",
-    adminToken,
+    credential,
     body: JSON.stringify({ expectedVersion, payload: patch }),
   });
 }
 
 export async function getAgentResources(
   serverUrl: string,
-  adminToken: string,
+  credential: BoundCredential,
   agentId: string,
 ): Promise<AgentResourcesOutput> {
   return adminFetch<AgentResourcesOutput>(`${serverUrl}/api/v1/agents/${agentId}/resources`, {
     method: "GET",
-    adminToken,
+    credential,
   });
 }
 
 export async function patchAgentResources(
   serverUrl: string,
-  adminToken: string,
+  credential: BoundCredential,
   agentId: string,
   body: UpdateAgentResources,
 ): Promise<AgentResourcesOutput> {
   return adminFetch<AgentResourcesOutput>(`${serverUrl}/api/v1/agents/${agentId}/resources`, {
     method: "PATCH",
-    adminToken,
+    credential,
     body: JSON.stringify(body),
   });
 }

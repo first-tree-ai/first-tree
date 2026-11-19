@@ -1,3 +1,4 @@
+import { assertStoredCredentialOriginForToken } from "./credential-origin.js";
 import { CLI_USER_AGENT } from "./version.js";
 
 /**
@@ -19,9 +20,29 @@ import { CLI_USER_AGENT } from "./version.js";
  * Header precedence: caller-provided `User-Agent` in `init.headers` wins,
  * so callers can override (e.g. tests injecting a deterministic UA).
  */
-export function cliFetch(input: string | URL, init?: RequestInit): Promise<Response> {
+export async function cliFetch(input: string | URL, init?: RequestInit): Promise<Response> {
   const merged = mergeHeaders(init?.headers as HeadersInput | undefined);
+  // SEC-023: the target URL and the persisted credential are resolved
+  // separately, so an override (`--server`, `FIRST_TREE_SERVER_URL`, config)
+  // used to ship the token saved for another origin. This is the *file-derived*
+  // check: it can only classify a token the store still contains, and a token
+  // it does not know (a login code, a one-shot exchange token) is passed
+  // through by design. Callers that hold the credential itself bind it with
+  // `accessTokenForOrigin`, which carries the issuing origin with the value and
+  // does not depend on the file or on any process-wide memory.
+  const token = bearerToken(merged);
+  if (token) assertStoredCredentialOriginForToken(String(input), token);
   return fetch(input, { ...init, headers: merged });
+}
+
+/** `Bearer <token>` from an Authorization header, if the caller set one. */
+function bearerToken(headers: Record<string, string>): string | null {
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() !== "authorization") continue;
+    const match = /^\s*Bearer\s+(\S+)\s*$/iu.exec(value);
+    if (match?.[1]) return match[1];
+  }
+  return null;
 }
 
 type HeadersInput = Headers | Record<string, string> | [string, string][];

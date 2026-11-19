@@ -6,7 +6,8 @@ import {
 } from "@first-tree/shared";
 import type { Command } from "commander";
 import { fail, success } from "../../../cli/output.js";
-import { ensureFreshAdminToken, resolveServerUrl } from "../../../core/bootstrap.js";
+import { credentialForOrigin } from "../../../core/access-token.js";
+import { resolveServerUrl } from "../../../core/bootstrap.js";
 import { getAgentResources, patchAgentResources, resolveAgentRecord } from "./_shared/fetchers.js";
 
 /**
@@ -34,9 +35,9 @@ export function registerAgentConfigPromptCommands(config: Command): void {
     .option("--raw", "Print only the stored fragment text, suitable for redirecting to a file")
     .action(async (agentName: string, opts: { raw?: boolean }) => {
       const serverUrl = resolveServerUrl(process.env.FIRST_TREE_SERVER_URL);
-      const adminToken = await ensureFreshAdminToken();
-      const { uuid } = await resolveAgentRecord(serverUrl, adminToken, agentName);
-      const resources = await getAgentResources(serverUrl, adminToken, uuid);
+      const credential = await credentialForOrigin(serverUrl);
+      const { uuid } = await resolveAgentRecord(serverUrl, credential, agentName);
+      const resources = await getAgentResources(serverUrl, credential, uuid);
       const fragment = inlineFragmentText(resources.bindings);
 
       if (opts.raw) {
@@ -177,9 +178,9 @@ function guardAgainstAssembledBriefing(text: string, force: boolean): void {
 /** Replace the agent's inline prompt fragment binding (empty text clears it). */
 async function replaceInlineFragment(agentName: string, text: string): Promise<void> {
   const serverUrl = resolveServerUrl(process.env.FIRST_TREE_SERVER_URL);
-  const adminToken = await ensureFreshAdminToken();
-  const { uuid } = await resolveAgentRecord(serverUrl, adminToken, agentName);
-  const current = await getAgentResources(serverUrl, adminToken, uuid);
+  const credential = await credentialForOrigin(serverUrl);
+  const { uuid } = await resolveAgentRecord(serverUrl, credential, agentName);
+  const current = await getAgentResources(serverUrl, credential, uuid);
   const removedOrders: number[] = [];
   const remaining = current.bindings.filter((binding) => {
     if (!isInlineFragmentBinding(binding)) return true;
@@ -196,7 +197,7 @@ async function replaceInlineFragment(agentName: string, text: string): Promise<v
       order: removedOrders.length > 0 ? Math.min(...removedOrders) : remaining.length + 1,
     });
   }
-  const updated = await patchAgentResources(serverUrl, adminToken, uuid, {
+  const updated = await patchAgentResources(serverUrl, credential, uuid, {
     expectedVersion: current.version,
     bindings: nextBindings,
   });

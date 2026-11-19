@@ -15,6 +15,7 @@ const configMocks = vi.hoisted(() => ({
 
 const bootstrapMocks = vi.hoisted(() => ({
   ensureFreshAccessToken: vi.fn(),
+  ensureFreshBoundAccessToken: vi.fn(),
   resolveServerUrl: vi.fn(),
 }));
 
@@ -58,6 +59,7 @@ beforeEach(() => {
   configMocks.defaultDataDir.mockReturnValue("/tmp/first-tree-data");
   configMocks.loadAgents.mockReturnValue(new Map([["nova", { agentId: "agent-1" }]]));
   bootstrapMocks.ensureFreshAccessToken.mockResolvedValue("member-token");
+  bootstrapMocks.ensureFreshBoundAccessToken.mockResolvedValue({ token: "member-token", origin: null });
   bootstrapMocks.resolveServerUrl.mockReturnValue("https://hub.example");
 });
 

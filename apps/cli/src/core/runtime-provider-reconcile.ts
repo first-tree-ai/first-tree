@@ -4,6 +4,7 @@ import { FirstTreeHubSDK } from "@first-tree/client";
 import type { ClientCapabilities, RuntimeProvider, SkillDescriptor } from "@first-tree/shared";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { cliFetch } from "./cli-fetch.js";
+import { assertBoundCredentialOrigin, type BoundCredential } from "./credential-origin.js";
 import { CLI_USER_AGENT } from "./version.js";
 
 type LogFn = (level: "info" | "warn", msg: string) => void;
@@ -19,10 +20,13 @@ export type PinnedAgentRuntimeRecord = AuthoritativePinnedAgent;
 
 export async function listPinnedAgents(opts: {
   serverUrl: string;
-  accessToken: string;
+  credential: BoundCredential;
 }): Promise<PinnedAgentRuntimeRecord[]> {
+  // The destination is known here, so the pair is checked before the request:
+  // a credential minted for another origin never leaves the process (SEC-023).
+  assertBoundCredentialOrigin(opts.serverUrl, opts.credential);
   const res = await cliFetch(`${opts.serverUrl}/api/v1/me/pinned-agents`, {
-    headers: { Authorization: `Bearer ${opts.accessToken}` },
+    headers: { Authorization: `Bearer ${opts.credential.token}` },
   });
   if (!res.ok) {
     throw new Error(`server returned ${res.status} on /me/pinned-agents`);
@@ -41,7 +45,7 @@ export async function listPinnedAgents(opts: {
  */
 export async function reconcileLocalRuntimeProviders(opts: {
   serverUrl: string;
-  accessToken: string;
+  credential: BoundCredential;
   agentsDir: string;
   log?: LogFn;
 }): Promise<void> {
@@ -91,13 +95,16 @@ export async function reconcileLocalRuntimeProviders(opts: {
  */
 export async function uploadClientCapabilities(opts: {
   serverUrl: string;
-  accessToken: string;
+  credential: BoundCredential;
   clientId: string;
   capabilities: ClientCapabilities;
 }): Promise<void> {
   const sdk = new FirstTreeHubSDK({
     serverUrl: opts.serverUrl,
-    getAccessToken: () => opts.accessToken,
+    getAccessToken: () => {
+      assertBoundCredentialOrigin(opts.serverUrl, opts.credential);
+      return opts.credential.token;
+    },
     userAgent: CLI_USER_AGENT,
   });
   await sdk.updateCapabilities(opts.clientId, opts.capabilities);
@@ -113,14 +120,17 @@ export async function uploadClientCapabilities(opts: {
  */
 export async function uploadAgentSkills(opts: {
   serverUrl: string;
-  accessToken: string;
+  credential: BoundCredential;
   agentId: string;
   skills: SkillDescriptor[];
 }): Promise<void> {
+  // Bound at load time and checked here, so the origin is the one the token was
+  // minted for rather than whatever the store says now (SEC-023).
+  assertBoundCredentialOrigin(opts.serverUrl, opts.credential);
   const res = await cliFetch(`${opts.serverUrl}/api/v1/agents/${encodeURIComponent(opts.agentId)}/skills`, {
     method: "PATCH",
     headers: {
-      Authorization: `Bearer ${opts.accessToken}`,
+      Authorization: `Bearer ${opts.credential.token}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ skills: opts.skills }),

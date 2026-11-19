@@ -16,6 +16,7 @@ import type { Command } from "commander";
 import { fail } from "../cli/output.js";
 import { channelConfig } from "../core/channel.js";
 import {
+  accessTokenForOrigin,
   ClientRuntime,
   COMMAND_VERSION,
   cliFetch,
@@ -24,7 +25,6 @@ import {
   createExecuteUpdate,
   ensureActiveRootClientIdPersisted,
   ensureContextTreeSkills,
-  ensureFreshAccessToken,
   formatContextTreeSetupReport,
   getClientServiceStatus,
   handleClientOrgMismatch,
@@ -263,7 +263,7 @@ export function registerLoginCommand(program: Command): void {
             agentsDir,
             workspacesDir: join(defaultDataDir(), "workspaces"),
             sessionsDir: join(defaultDataDir(), "sessions"),
-            resolver: createApiNameResolver(config.server.url, () => ensureFreshAccessToken()),
+            resolver: createApiNameResolver(config.server.url, () => accessTokenForOrigin(config.server.url)),
           });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);

@@ -1,6 +1,7 @@
 import type { Command } from "commander";
 import { fail, success } from "../../../cli/output.js";
-import { ensureFreshAccessToken, resolveServerUrl } from "../../../core/bootstrap.js";
+import { accessTokenForOrigin } from "../../../core/access-token.js";
+import { resolveServerUrl } from "../../../core/bootstrap.js";
 import { channelConfig } from "../../../core/channel.js";
 import { cliFetch } from "../../../core/cli-fetch.js";
 import { print } from "../../../core/output.js";
@@ -18,7 +19,7 @@ export function registerAgentBindClientCommand(bind: Command): void {
     .action(async (agentName: string, options: { clientId: string; server?: string }) => {
       try {
         const serverUrl = resolveServerUrl(options.server);
-        const accessToken = await ensureFreshAccessToken();
+        const accessToken = await accessTokenForOrigin(serverUrl);
         const target = await resolveAgent(serverUrl, accessToken, agentName);
 
         const patchRes = await cliFetch(`${serverUrl}/api/v1/agents/${target.uuid}`, {

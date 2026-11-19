@@ -5,10 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const cliFetchMock = vi.hoisted(() => vi.fn());
 const ensureFreshAccessTokenMock = vi.hoisted(() => vi.fn());
+const credentialForOriginMock = vi.hoisted(() => vi.fn());
 const inputMock = vi.hoisted(() => vi.fn());
 const passwordMock = vi.hoisted(() => vi.fn());
 const selectMock = vi.hoisted(() => vi.fn());
 
+vi.mock("../core/access-token.js", () => ({ credentialForOrigin: credentialForOriginMock }));
 vi.mock("../core/cli-fetch.js", () => ({
   cliFetch: cliFetchMock,
 }));
@@ -52,6 +54,7 @@ beforeEach(() => {
   delete process.env.FIRST_TREE_SERVER_URL;
   cliFetchMock.mockReset();
   ensureFreshAccessTokenMock.mockReset();
+  credentialForOriginMock.mockReset();
   inputMock.mockReset();
   passwordMock.mockReset();
   selectMock.mockReset();
@@ -218,10 +221,12 @@ describe("prompt core", () => {
 
     writeCredentials();
     process.env.FIRST_TREE_SERVER_URL = "http://first-tree.test";
-    ensureFreshAccessTokenMock.mockResolvedValue("access-1");
+    credentialForOriginMock.mockResolvedValue({ token: "access-1", origin: "http://first-tree.test" });
     cliFetchMock.mockResolvedValueOnce(response(200, { name: "nova" }));
     await expect(promptAddAgent({ agentId: "agent-1" })).resolves.toEqual({ name: "nova", agentId: "agent-1" });
     expect(cliFetchMock.mock.calls[0]?.[0]).toBe("http://first-tree.test/api/v1/agents/agent-1");
+    expect(credentialForOriginMock).toHaveBeenCalledWith("http://first-tree.test");
+    expect(ensureFreshAccessTokenMock).not.toHaveBeenCalled();
 
     cliFetchMock.mockResolvedValueOnce(response(404, { error: "missing" }));
     await expect(promptAddAgent({ agentId: "missing" })).rejects.toThrow("HTTP 404");
@@ -268,7 +273,7 @@ describe("prompt core", () => {
     writeCredentials("http://first-tree.test/");
     process.env.FIRST_TREE_SERVER_URL = "http://override.test";
     inputMock.mockResolvedValueOnce("agent-from-prompt");
-    ensureFreshAccessTokenMock.mockResolvedValue("access-1");
+    credentialForOriginMock.mockResolvedValue({ token: "access-1", origin: "http://first-tree.test" });
     cliFetchMock.mockResolvedValueOnce(response(200, { name: "prompted" }));
 
     await expect(promptAddAgent()).resolves.toEqual({ name: "prompted", agentId: "agent-from-prompt" });
