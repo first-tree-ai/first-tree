@@ -205,9 +205,16 @@ function sanitizeString(value: string): string {
   // Slack) and URL userinfo reached Sentry untouched (SEC-033). `shared` owns
   // that pattern set; `cloud` may not import `runtime` (directory boundary
   // guard), and duplicating the patterns there is how the two drifted apart.
-  return redactCredentialText(sanitized).replace(
-    /((?:prompt|model output|tool output|stdout|stderr)\s*[:=]\s*)([^\n\r]+)/gi,
-    `$1${LOG_REDACT_CENSOR}`,
+  return (
+    redactCredentialText(sanitized)
+      // The shared pass requires eight or more characters after `Bearer` (it is
+      // tuned to avoid censoring ordinary prose), while this client's previous
+      // redactor censored any non-empty value. Keep that coverage: a short opaque
+      // bearer token is still a credential. The pass above already turned long
+      // values into `[REDACTED…]`, which does not match this class, so it cannot
+      // double-redact its own placeholder.
+      .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, `Bearer ${LOG_REDACT_CENSOR}`)
+      .replace(/((?:prompt|model output|tool output|stdout|stderr)\s*[:=]\s*)([^\n\r]+)/gi, `$1${LOG_REDACT_CENSOR}`)
   );
 }
 

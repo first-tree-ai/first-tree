@@ -155,6 +155,31 @@ describe("sanitizeClientSentryEvent", () => {
     expect(event.exception?.values?.[0]?.value).toContain("[REDACTED");
   });
 
+  it("still redacts a short bearer value the shared pass leaves alone", () => {
+    // The shared helper requires eight characters after `Bearer` so it does not
+    // censor ordinary prose; the client previously censored any non-empty
+    // value, and a short opaque token is exactly what that covered.
+    const shortToken = "ab12cd3";
+    const event = sanitizeClientSentryEvent(
+      {
+        message: `upgrade rejected: Authorization: Bearer ${shortToken}`,
+        tags: { header: `Bearer ${shortToken}` },
+      },
+      {
+        enabled: true,
+        dsn: "https://public@example.ingest.sentry.io/1",
+        environment: "production",
+        release: "first-tree-client@abc123",
+        gitSha: "abc123",
+        sampleRate: 0.05,
+      },
+    );
+
+    expect(JSON.stringify(event)).not.toContain(shortToken);
+    expect(event.message).toContain("upgrade rejected");
+    expect(event.tags?.header).toContain("Bearer");
+  });
+
   it("redacts FIRST_TREE_HOME runtime paths outside the OS home and cwd", () => {
     const previousHome = process.env.FIRST_TREE_HOME;
     process.env.FIRST_TREE_HOME = "/mnt/ft";
