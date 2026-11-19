@@ -40,10 +40,101 @@ import {
   sessionEventRejectedFrameSchema,
   type UpdateAttempt,
 } from "@first-tree/shared";
+import { HttpsProxyAgent } from "https-proxy-agent";
 import WebSocket from "ws";
 import { createLogger, type pino } from "../cloud/observability/logger.js";
 import { type AccessTokenProvider, FirstTreeHubSDK, type RuntimeSessionTokenProvider } from "../cloud/sdk.js";
 import { classify, ERROR_KINDS, nextRetryDelayMs } from "./error-taxonomy.js";
+
+/** `example.com:8080` / `[::1]:8080` → host + port; no port → `null`. */
+function splitProxyBypassEntry(entry: string): { host: string; port: number | null } {
+  if (entry.startsWith("[")) {
+    const end = entry.indexOf("]");
+    if (end < 0) return { host: entry, port: null };
+    const host = entry.slice(0, end + 1);
+    const rest = entry.slice(end + 1);
+    if (!rest.startsWith(":")) return { host, port: null };
+    const port = Number(rest.slice(1));
+    return { host, port: Number.isFinite(port) && port > 0 ? port : null };
+  }
+  const colon = entry.lastIndexOf(":");
+  if (colon < 0) return { host: entry, port: null };
+  const port = Number(entry.slice(colon + 1));
+  if (!Number.isFinite(port) || port <= 0) return { host: entry, port: null };
+  return { host: entry.slice(0, colon), port };
+}
+
+/**
+ * Does `NO_PROXY` exclude this destination?
+ *
+ * `https-proxy-agent` proxies whatever it is handed — it does not read
+ * `NO_PROXY`, so an excluded destination would still be tunnelled. The decision
+ * is therefore made here, with the entry forms operators already write for
+ * curl: `*`, a bare host (and its subdomains), a leading-dot or `*.` suffix, an
+ * optional `:port`, and bracketed IPv6 literals.
+ *
+ * Matching is on label boundaries: `example.com` excludes `api.example.com`
+ * but not `evil-example.com`.
+ */
+export function shouldBypassProxy(hostname: string, port: number, noProxy: string | null | undefined): boolean {
+  if (!noProxy) return false;
+  const target = hostname.trim().toLowerCase();
+  if (!target) return false;
+  // Fetch accepts comma- or whitespace-separated entries (`no_proxy="a b,c"`),
+  // so splitting on commas alone would leave `b` glued to `a` and the daemon
+  // would proxy a destination that HTTP already excludes.
+  for (const raw of noProxy.split(/[,\s]+/)) {
+    const entry = raw.trim().toLowerCase();
+    if (!entry) continue;
+    if (entry === "*") return true;
+    const parsed = splitProxyBypassEntry(entry);
+    if (parsed.port !== null && parsed.port !== port) continue;
+    const bare = parsed.host.replace(/^\*\./, "").replace(/^\./, "");
+    if (!bare) continue;
+    if (target === bare) return true;
+    // IPv6 literals are bracketed and only ever match exactly.
+    if (!bare.startsWith("[") && target.endsWith(`.${bare}`)) return true;
+  }
+  return false;
+}
+
+/**
+ * `ws` opens its own TCP/TLS socket with Node's `http(s).request` and never
+ * looks at `HTTP(S)_PROXY`, so the daemon's WebSocket stayed direct even when
+ * `fetch` went through the proxy via `NODE_USE_ENV_PROXY`. On a network where
+ * direct egress to the server is blocked or flaky, HTTP succeeded while the
+ * socket reconnect-looped forever.
+ *
+ * Honour the same opt-in switch the built-in fetch honours (`NODE_USE_ENV_PROXY`)
+ * so one setting covers both egress paths, then hand the upgrade request an
+ * explicit proxy agent — but only when this destination is not what `NO_PROXY`
+ * excludes, because the agent itself never consults it.
+ */
+export function resolveWebSocketProxyAgent(wsUrl: string): HttpsProxyAgent<string> | undefined {
+  if (process.env.NODE_USE_ENV_PROXY !== "1") return undefined;
+  if (!/^wss:/i.test(wsUrl)) return undefined;
+  // Lowercase first, like Node's own fetch: undici reads
+  // `https_proxy` before `HTTPS_PROXY` and `no_proxy` before `NO_PROXY`, so the
+  // two egress paths agree on which value wins when both are set.
+  // Same order undici uses for a TLS request: `https_proxy` (either case), then
+  // the plain HTTP proxy — undici's HTTPS agent falls back to the HTTP agent, so
+  // a host with only `HTTP_PROXY` set still proxies HTTPS while this path would
+  // otherwise go direct.
+  const proxyUrl =
+    process.env.https_proxy ?? process.env.HTTPS_PROXY ?? process.env.http_proxy ?? process.env.HTTP_PROXY;
+  if (!proxyUrl) return undefined;
+  const noProxy = process.env.no_proxy ?? process.env.NO_PROXY;
+  let target: URL;
+  try {
+    target = new URL(wsUrl);
+  } catch {
+    // `ws` rejects the url a moment later; do not change the proxy decision here.
+    return new HttpsProxyAgent(proxyUrl);
+  }
+  const port = target.port ? Number(target.port) : 443;
+  if (shouldBypassProxy(target.hostname, port, noProxy)) return undefined;
+  return new HttpsProxyAgent(proxyUrl);
+}
 
 /**
  * Per-agent bind retry bookkeeping (Bug 5). A failed `agent:bind` no longer
@@ -1712,7 +1803,12 @@ export class ClientConnection extends EventEmitter<ClientConnectionEvents> {
       // the upgrade (4401 close, expired token, handshake aborts) happen
       // before `client:register` lands, so without UA the trace has no install
       // identifier at all. Issue #246.
-      const ws = new WebSocket(wsUrl, this.userAgent ? { headers: { "User-Agent": this.userAgent } } : undefined);
+      const agent = resolveWebSocketProxyAgent(wsUrl);
+      const wsOptions = {
+        ...(this.userAgent ? { headers: { "User-Agent": this.userAgent } } : {}),
+        ...(agent ? { agent } : {}),
+      };
+      const ws = new WebSocket(wsUrl, Object.keys(wsOptions).length > 0 ? wsOptions : undefined);
       let settled = false;
       let connectTimer: ReturnType<typeof setTimeout> | null = null;
 

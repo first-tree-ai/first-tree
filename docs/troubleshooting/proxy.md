@@ -48,10 +48,36 @@ cat > ~/.first-tree/daemon.env <<'EOF'
 HTTPS_PROXY=http://127.0.0.1:7897
 HTTP_PROXY=http://127.0.0.1:7897
 NO_PROXY=localhost,127.0.0.1
+NODE_USE_ENV_PROXY=1
 EOF
 
 first-tree daemon stop && first-tree daemon start   # use your channel's binary
 ```
+
+What each egress path reads, and when, is not the same — this matters when
+`daemon.env` is the only place you set your proxy:
+
+| Egress | Honours the proxy from `daemon.env`? | Why |
+|---|---|---|
+| agent runtimes (`claude`, `git`, `npm`) and anything the daemon spawns | **yes** | they inherit the daemon's environment when they start |
+| the daemon's WebSocket to the server | **yes** | the upgrade reads the variables each time it connects |
+| the daemon's own `fetch` calls to the server | **no** | Node installs fetch's environment-proxy agent at **process start**, before the daemon loads `daemon.env` |
+
+So `daemon.env` is enough for agent runtimes and for the socket. If the daemon's
+own HTTP traffic to the server must go through the proxy too, the variables have
+to be in the daemon's environment *before* Node starts — the service unit or the
+shell you launch it from — and a CLI switch that injects them into the unit does
+not exist yet.
+
+`NO_PROXY` follows the same split. For the socket the daemon checks the
+destination itself before building its agent (that agent does not read the
+variable); for `fetch`, Node's proxy agent reads it at start. Entries take the
+forms `curl` accepts — `*` (proxy nothing), a host and its subdomains
+(`example.com` also excludes `api.example.com`), a leading-dot or `*.` suffix,
+an optional port (`example.com:8443`), and bracketed IPv6 literals (`[::1]`).
+Lowercase `https_proxy` / `no_proxy` win over the uppercase spelling, and a
+plain `HTTP_PROXY` is used for TLS destinations when no `https_proxy` is set —
+the same choices `fetch` makes.
 
 `KEY=VALUE` only — one per line. A `# comment` is allowed on its own line or as
 a trailing ` # ...` on an unquoted value; quote the value (`KEY="..."`) to keep
@@ -70,7 +96,10 @@ it. Edit or delete it any time and restart to apply.
 vars (`HTTP(S)_PROXY`, `ALL_PROXY`, `NO_PROXY`). Notes for other setups:
 
 - **HTTP / HTTPS proxy** (Clash / mihomo / Surge / V2Ray "mixed" or HTTP port):
-  fully supported — put the URL in `daemon.env`.
+  fully supported — put the URL in `daemon.env` and set
+  `NODE_USE_ENV_PROXY=1`. That one switch covers HTTP (`fetch`) and the
+  WebSocket upgrade alike; `NODE_USE_ENV_PROXY` alone does not, because `ws`
+  opens its own socket and reads no proxy env by itself.
 - **SOCKS-only** (`ALL_PROXY=socks5://…`): `git` / `curl` honor it, but the
   Claude CLI's HTTP stack does not speak SOCKS — prefer exposing your proxy's
   **HTTP / mixed** port and using that in `daemon.env`.
