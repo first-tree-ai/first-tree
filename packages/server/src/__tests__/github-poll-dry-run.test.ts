@@ -303,7 +303,9 @@ describe("pollGithubRepository", () => {
     expect(first.nextCursor?.updatedAt).toBe(CURSOR.updatedAt);
     expect(first.nextCursor?.continuation).toEqual({
       entityNumber: 12,
-      commentsSince: "2026-11-17T08:22:00Z",
+      commentsDone: false,
+      commentPosition: { createdAt: "2026-11-17T08:22:00Z", id: 5002 },
+      reviewsDone: false,
       reviewsPage: 3,
     });
 
@@ -321,13 +323,111 @@ describe("pollGithubRepository", () => {
     const reviewRequests = calls.filter((url) => new URL(url).pathname.endsWith("/reviews"));
     // Comments resume after the last one read (08:22) — not after the newest
     // review (08:41), which is what the previous single-timestamp cursor did.
-    expect(new URL(commentRequest as string).searchParams.get("since")).toBe("2026-11-17T08:22:00Z");
+    // One second before the resume position, because `since` filters on
+    // `updated_at`: asking from the position's own second would hide comments
+    // created in it.
+    expect(new URL(commentRequest as string).searchParams.get("since")).toBe("2026-11-17T08:21:59Z");
     // The review stream resumes at page 3 instead of re-reading pages 1-2.
     expect(new URL(reviewRequests[0] as string).searchParams.get("page")).toBe("3");
 
     // Both streams are drained now, so the entity is complete and the
     // repository watermark finally moves past it.
     expect(second.truncated).toBe(false);
+    expect(second.webhooks).toEqual([]);
+    expect(second.nextCursor).toEqual({
+      updatedAt: "2026-11-17T08:30:00Z",
+      entityNumber: 12,
+      continuation: null,
+    });
+  });
+
+  it("keeps a same-second comment group across a page boundary", async () => {
+    const sameInstant = "2026-11-17T08:22:00Z";
+    const { fetch } = fetchStub((url) => {
+      const page = Number(url.searchParams.get("page"));
+      const since = url.searchParams.get("since") ?? "";
+      if (url.pathname.endsWith("/issues")) return { body: page === 1 ? [issueRow()] : [] };
+      if (url.pathname.endsWith("/comments")) {
+        const rows = [
+          commentRow({ id: 5002, created_at: sameInstant }),
+          commentRow({ id: 5003, created_at: sameInstant }),
+        ].filter((row) => String(row.created_at) > since);
+        // Page 1 of each pass is full, so the stream stays open until a page
+        // comes back short.
+        return { body: rows.length >= page ? [rows[page - 1]] : [] };
+      }
+      return { body: [] };
+    });
+
+    const first = await pollGithubRepository({
+      organizationId: ORGANIZATION_ID,
+      repository: REPOSITORY,
+      cursor: CURSOR,
+      fetch,
+      perPage: 1,
+      maxPages: 1,
+    });
+    expect(first.webhooks.map((webhook) => webhook.deliveryId)).toEqual(["github:issue_comment:5002"]);
+
+    // Resume with headroom to page through the rest of the tie.
+    const second = await pollGithubRepository({
+      organizationId: ORGANIZATION_ID,
+      repository: REPOSITORY,
+      cursor: first.nextCursor,
+      fetch,
+      perPage: 1,
+      maxPages: 3,
+    });
+
+    // The comment already read is not repeated, and the same-timestamp sibling
+    // is not lost.
+    expect(second.webhooks.map((webhook) => webhook.deliveryId)).toEqual(["github:issue_comment:5003"]);
+    expect(second.nextCursor).toEqual({
+      updatedAt: "2026-11-17T08:30:00Z",
+      entityNumber: 12,
+      continuation: null,
+    });
+  });
+
+  it("does not re-read a stream that already finished", async () => {
+    const { fetch, calls } = fetchStub((url) => {
+      const page = Number(url.searchParams.get("page"));
+      if (url.pathname.endsWith("/issues")) return { body: page === 1 ? [issueRow()] : [] };
+      if (url.pathname.endsWith("/comments")) return { body: [] }; // drained at once
+      if (url.pathname.endsWith("/reviews")) {
+        return { body: page === 1 ? [reviewRow({ id: 7001 })] : page === 2 ? [reviewRow({ id: 7002 })] : [] };
+      }
+      return { body: [] };
+    });
+
+    const first = await pollGithubRepository({
+      organizationId: ORGANIZATION_ID,
+      repository: REPOSITORY,
+      cursor: CURSOR,
+      fetch,
+      perPage: 1,
+      maxPages: 2,
+    });
+
+    expect(first.webhooks).toHaveLength(2);
+    expect(first.nextCursor?.continuation).toMatchObject({ commentsDone: true, reviewsDone: false, reviewsPage: 3 });
+
+    calls.length = 0;
+    const second = await pollGithubRepository({
+      organizationId: ORGANIZATION_ID,
+      repository: REPOSITORY,
+      cursor: first.nextCursor,
+      fetch,
+      perPage: 1,
+      maxPages: 2,
+    });
+
+    // The finished comment stream is not requested again; only the reviews
+    // continue, from the page after the last one read.
+    expect(calls.some((url) => new URL(url).pathname.endsWith("/comments"))).toBe(false);
+    expect(
+      new URL(calls.find((url) => new URL(url).pathname.endsWith("/reviews")) as string).searchParams.get("page"),
+    ).toBe("3");
     expect(second.webhooks).toEqual([]);
     expect(second.nextCursor).toEqual({
       updatedAt: "2026-11-17T08:30:00Z",

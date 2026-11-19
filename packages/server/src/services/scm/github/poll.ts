@@ -23,10 +23,31 @@ function readNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-/** Latest of two provider timestamps (they compare correctly as strings). */
-function laterOf(current: string | null, candidate: string | null): string | null {
-  if (candidate === null) return current;
-  return current === null || candidate > current ? candidate : current;
+type CommentPosition = { createdAt: string; id: number };
+
+/** Did `candidate` come after `current` in the comment listing's order? */
+function isAfterPosition(current: CommentPosition, candidate: CommentPosition): boolean {
+  if (candidate.createdAt !== current.createdAt) return candidate.createdAt > current.createdAt;
+  return candidate.id > current.id;
+}
+
+function laterPosition(current: CommentPosition | null, candidate: CommentPosition): CommentPosition {
+  if (current === null) return candidate;
+  return isAfterPosition(current, candidate) ? candidate : current;
+}
+
+/**
+ * One second earlier, in GitHub's whole-second format.
+ *
+ * `since` on issue comments filters `updated_at`, not `created_at`, and the
+ * comparison is strict. Asking from the position's own second would therefore
+ * hide comments created in that same second, so the request starts a second
+ * early and the position filter removes what was already read.
+ */
+function oneSecondEarlier(timestamp: string): string {
+  const parsed = Date.parse(timestamp);
+  if (Number.isNaN(parsed)) return timestamp;
+  return githubTimestamp(new Date(parsed - 1_000));
 }
 
 /**
@@ -66,9 +87,20 @@ export type GithubPollCursor = {
 
 export type GithubPollContinuation = {
   entityNumber: number;
-  /** Comments at or before this `created_at` were read; resume after it. */
-  commentsSince: string | null;
-  /** 1-based review-list page to request next (never page 1 once it was read). */
+  /** True once the comment stream reached its end; a finished stream is not refetched. */
+  commentsDone: boolean;
+  /**
+   * Last comment read, as `(created_at, id)`.
+   *
+   * A timestamp alone is not a position: the endpoint's `since` filters on
+   * `updated_at`, and a page can end in the middle of a group of comments that
+   * share a `created_at`, so resuming with the bare timestamp either drops the
+   * rest of the group or re-reads it forever.
+   */
+  commentPosition: { createdAt: string; id: number } | null;
+  /** True once the review stream reached its end. */
+  reviewsDone: boolean;
+  /** 1-based review-list page to request next. */
   reviewsPage: number;
 };
 
@@ -436,35 +468,41 @@ export async function pollGithubRepository(input: PollGithubRepositoryInput): Pr
       );
     }
 
-    // Each stream resumes on its own axis: comments by timestamp (the endpoint
-    // supports `since`), reviews by page (it does not support either `since` or
-    // sorting, so re-requesting page 1 would stall on the same prefix forever).
-    const commentsSince = continuation?.commentsSince ?? since;
-    const reviewsStartPage = continuation?.reviewsPage ?? 1;
+    // Each stream resumes on its own axis and remembers whether it finished:
+    // comments by `(created_at, id)` position (the endpoint filters `since` on
+    // `updated_at`, so a bare timestamp loses same-second ties), reviews by
+    // page. A stream that reached its end is not requested again.
+    let commentsDone = continuation?.commentsDone ?? false;
+    let commentPosition: CommentPosition | null = continuation?.commentPosition ?? null;
+    let reviewsDone = continuation?.reviewsDone ?? !isPullRequest;
+    let reviewsPage = continuation?.reviewsPage ?? 1;
 
-    const comments = await fetchPages(ctx, `/repos/${input.repository}/issues/${number}/comments`, {
-      since: commentsSince,
-      sort: "created",
-      direction: "asc",
-    });
-    requests += comments.requests;
-    let lastCommentAt: string | null = continuation?.commentsSince ?? null;
-    for (const comment of comments.items) {
-      const createdAtComment = readString(comment.created_at);
-      const deliveryId = commentDeliveryId(readNumber(comment.id));
-      if (createdAtComment === null || deliveryId === null) continue;
-      lastCommentAt = laterOf(lastCommentAt, createdAtComment);
-      if (createdAtComment <= commentsSince) continue;
-      record(deliveryId, "issue_comment", commentPayload(input.repository, item, comment, isPullRequest));
+    if (!commentsDone) {
+      const comments = await fetchPages(ctx, `/repos/${input.repository}/issues/${number}/comments`, {
+        since: commentPosition === null ? since : oneSecondEarlier(commentPosition.createdAt),
+        sort: "created",
+        direction: "asc",
+      });
+      requests += comments.requests;
+      for (const comment of comments.items) {
+        const createdAtComment = readString(comment.created_at);
+        const commentId = readNumber(comment.id);
+        const deliveryId = commentDeliveryId(commentId);
+        if (createdAtComment === null || commentId === null || deliveryId === null) continue;
+        const position = { createdAt: createdAtComment, id: commentId };
+        const isNew = commentPosition === null ? createdAtComment > since : isAfterPosition(commentPosition, position);
+        commentPosition = laterPosition(commentPosition, position);
+        if (!isNew) continue;
+        record(deliveryId, "issue_comment", commentPayload(input.repository, item, comment, isPullRequest));
+      }
+      commentsDone = !comments.truncated;
     }
 
-    let reviewsTruncated = false;
-    let nextReviewsPage = reviewsStartPage;
-    if (isPullRequest) {
-      const reviews = await fetchPages(ctx, `/repos/${input.repository}/pulls/${number}/reviews`, {}, reviewsStartPage);
+    if (!reviewsDone) {
+      const reviews = await fetchPages(ctx, `/repos/${input.repository}/pulls/${number}/reviews`, {}, reviewsPage);
       requests += reviews.requests;
-      reviewsTruncated = reviews.truncated;
-      nextReviewsPage = reviews.truncated ? reviews.nextPage : reviewsStartPage;
+      reviewsDone = !reviews.truncated;
+      reviewsPage = reviews.truncated ? reviews.nextPage : reviewsPage;
       for (const review of reviews.items) {
         const submittedAt = readString(review.submitted_at);
         const deliveryId = reviewDeliveryId(readNumber(review.id));
@@ -476,11 +514,9 @@ export async function pollGithubRepository(input: PollGithubRepositoryInput): Pr
       }
     }
 
-    if (comments.truncated || reviewsTruncated) {
-      // The entity is only partly read: keep the repository watermark where it
-      // is and remember where each stream got to. Advancing to the newest
-      // *any* stream saw (what the first version did) moved the comment query
-      // past comments nobody had read.
+    if (!commentsDone || !reviewsDone) {
+      // At least one stream is still open: keep the repository watermark where
+      // it is and remember exactly how far each one got.
       truncated = true;
       return {
         requests,
@@ -490,8 +526,10 @@ export async function pollGithubRepository(input: PollGithubRepositoryInput): Pr
           ...(nextCursor ?? { updatedAt: since, entityNumber: 0 }),
           continuation: {
             entityNumber: number,
-            commentsSince: lastCommentAt,
-            reviewsPage: nextReviewsPage,
+            commentsDone,
+            commentPosition,
+            reviewsDone,
+            reviewsPage,
           },
         },
         truncated: true,
