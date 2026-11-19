@@ -91,6 +91,95 @@ describe("sanitizeClientSentryEvent", () => {
     });
   });
 
+  it("strips URL userinfo and vendor tokens from every event field", () => {
+    // SEC-033: the previous URL sanitizer dropped only query/fragment and the
+    // string redactor only knew Bearer plus a few `key=value` names, so a
+    // PAT-bearing remote or an SDK error carried live credentials to Sentry.
+    // Assembled at runtime: the file must not itself contain token-shaped
+    // literals, or GitHub push protection refuses the branch.
+    const secrets = {
+      urlUser: `ghp_${"U".repeat(32)}`,
+      urlPass: "hunter2",
+      github: `ghp_${"A".repeat(30)}`,
+      githubPat: `github_pat_${"1".repeat(10)}_${"b".repeat(20)}`,
+      aws: `AKIA${"IOSFODNN7EXAMPLE"}`,
+      openai: `sk-proj-${"c".repeat(30)}`,
+      anthropic: `sk-ant-api03-${"d".repeat(30)}`,
+      slack: ["xoxb", "1".repeat(12), "e".repeat(16)].join("-"),
+    };
+    const rawEvent: Event = {
+      // Top-level free-form fields: `captureMessage` text and a caller-supplied
+      // tag value reach Sentry through the same event object as `extra`.
+      message: `agent failed: ${secrets.githubPat} at https://x:${secrets.slack}@host/p`,
+      tags: { flow: `retry with ${secrets.aws}` },
+      request: {
+        url: `https://deploy:${secrets.urlUser}@git.example.test/repo.git?token=abc`,
+        headers: { authorization: `Basic ${secrets.urlPass}` },
+      },
+      extra: {
+        clone: `git clone https://${secrets.urlPass}:${secrets.urlUser}@git.example.test/repo.git`,
+        keys: [secrets.github, secrets.githubPat, secrets.aws, secrets.openai, secrets.anthropic, secrets.slack],
+        note: "workspace prepared",
+      },
+      exception: {
+        values: [
+          {
+            type: "Error",
+            value: `request failed with ${secrets.githubPat} and ${secrets.aws} at https://x:${secrets.slack}@host/p`,
+          },
+        ],
+      },
+      transaction: `GET /agents/${secrets.openai}`,
+    };
+
+    const event = sanitizeClientSentryEvent(rawEvent, {
+      enabled: true,
+      dsn: "https://public@example.ingest.sentry.io/1",
+      environment: "production",
+      release: "first-tree-client@abc123",
+      gitSha: "abc123",
+      sampleRate: 0.05,
+    });
+
+    const serialized = JSON.stringify(event);
+    for (const [name, secret] of Object.entries(secrets)) {
+      expect(serialized, `${name} must not reach Sentry`).not.toContain(secret);
+    }
+    // Redaction, not deletion: the event still explains what happened.
+    expect(event.extra?.note).toBe("workspace prepared");
+    expect(event.message).toContain("agent failed:");
+    expect(event.tags?.flow).toContain("retry with");
+    // The keys this sanitizer adds itself are not scrubbed away.
+    expect(event.tags?.["first_tree.surface"]).toBe("client");
+    expect(event.exception?.values?.[0]?.value).toContain("request failed with");
+    expect(event.exception?.values?.[0]?.value).toContain("[REDACTED");
+  });
+
+  it("still redacts a short bearer value the shared pass leaves alone", () => {
+    // The shared helper requires eight characters after `Bearer` so it does not
+    // censor ordinary prose; the client previously censored any non-empty
+    // value, and a short opaque token is exactly what that covered.
+    const shortToken = "ab12cd3";
+    const event = sanitizeClientSentryEvent(
+      {
+        message: `upgrade rejected: Authorization: Bearer ${shortToken}`,
+        tags: { header: `Bearer ${shortToken}` },
+      },
+      {
+        enabled: true,
+        dsn: "https://public@example.ingest.sentry.io/1",
+        environment: "production",
+        release: "first-tree-client@abc123",
+        gitSha: "abc123",
+        sampleRate: 0.05,
+      },
+    );
+
+    expect(JSON.stringify(event)).not.toContain(shortToken);
+    expect(event.message).toContain("upgrade rejected");
+    expect(event.tags?.header).toContain("Bearer");
+  });
+
   it("redacts FIRST_TREE_HOME runtime paths outside the OS home and cwd", () => {
     const previousHome = process.env.FIRST_TREE_HOME;
     process.env.FIRST_TREE_HOME = "/mnt/ft";

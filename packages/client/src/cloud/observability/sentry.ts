@@ -1,6 +1,6 @@
 import * as os from "node:os";
 import { defaultDataDir, defaultHome } from "@first-tree/shared/config";
-import { LOG_REDACT_CENSOR } from "@first-tree/shared/observability";
+import { LOG_REDACT_CENSOR, redactCredentialText } from "@first-tree/shared/observability";
 import * as Sentry from "@sentry/node";
 import { createLogger } from "./logger.js";
 
@@ -98,11 +98,15 @@ export async function flushClientSentry(timeoutMs = 2_000): Promise<boolean> {
 
 export function sanitizeClientSentryEvent<T extends Sentry.Event>(event: T, config: ClientSentryConfig): T {
   event.tags = {
-    ...event.tags,
+    ...sanitizeTags(event.tags),
     "first_tree.surface": "client",
     "first_tree.git_sha": config.gitSha,
   };
   event.user = undefined;
+  // `message` is a top-level free-form field the SDK fills from whatever the
+  // caller passed to `captureMessage`, so it is as untrusted as `extra` and was
+  // the one string-valued field this sanitizer returned untouched.
+  if (event.message) event.message = sanitizeString(event.message);
   event.request = sanitizeRequest(event.request);
   event.contexts = scrubValue(event.contexts) as T["contexts"];
   event.extra = scrubValue(event.extra) as T["extra"];
@@ -110,6 +114,21 @@ export function sanitizeClientSentryEvent<T extends Sentry.Event>(event: T, conf
   event.exception = scrubValue(event.exception) as T["exception"];
   if (event.transaction) event.transaction = sanitizeString(event.transaction);
   return event;
+}
+
+/**
+ * Tag values are free-form: the SDK stringifies whatever the caller attaches
+ * (error text, host, a pasted command), so a token can arrive here just as
+ * easily as in `extra`. Sanitize the value, keep the key — losing the key would
+ * make the event harder to read without making it safer.
+ */
+function sanitizeTags(tags: Sentry.Event["tags"]): NonNullable<Sentry.Event["tags"]> {
+  if (!tags) return {};
+  const out: NonNullable<Sentry.Event["tags"]> = {};
+  for (const [key, value] of Object.entries(tags)) {
+    out[key] = typeof value === "string" ? sanitizeString(value) : value;
+  }
+  return out;
 }
 
 function sanitizeRequest(request: Sentry.Event["request"]): Sentry.Event["request"] {
@@ -157,6 +176,11 @@ function sanitizeUrl(url: string | undefined): string | undefined {
     const parsed = new URL(url);
     parsed.search = "";
     parsed.hash = "";
+    // `user:password@host` is a credential in its own right — PAT-bearing git
+    // remotes and database connection strings both put one there, and dropping
+    // only the query string left it intact (SEC-033).
+    parsed.username = "";
+    parsed.password = "";
     parsed.pathname = sanitizeString(parsed.pathname);
     return parsed.toString();
   } catch {
@@ -176,10 +200,22 @@ function sanitizeString(value: string): string {
   for (const path of localPathRedactionRoots()) {
     sanitized = redactUserPath(sanitized, path);
   }
-  return sanitized
-    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, `Bearer ${LOG_REDACT_CENSOR}`)
-    .replace(/(access_token|refresh_token|token|api_key|apiKey|secret|password)=([^&\s]+)/gi, `$1=${LOG_REDACT_CENSOR}`)
-    .replace(/((?:prompt|model output|tool output|stdout|stderr)\s*[:=]\s*)([^\n\r]+)/gi, `$1${LOG_REDACT_CENSOR}`);
+  // One shared credential pass. The previous local regexes only knew Bearer and
+  // a few `key=value` names, so vendor tokens (GitHub/AWS/OpenAI/Anthropic/
+  // Slack) and URL userinfo reached Sentry untouched (SEC-033). `shared` owns
+  // that pattern set; `cloud` may not import `runtime` (directory boundary
+  // guard), and duplicating the patterns there is how the two drifted apart.
+  return (
+    redactCredentialText(sanitized)
+      // The shared pass requires eight or more characters after `Bearer` (it is
+      // tuned to avoid censoring ordinary prose), while this client's previous
+      // redactor censored any non-empty value. Keep that coverage: a short opaque
+      // bearer token is still a credential. The pass above already turned long
+      // values into `[REDACTED…]`, which does not match this class, so it cannot
+      // double-redact its own placeholder.
+      .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, `Bearer ${LOG_REDACT_CENSOR}`)
+      .replace(/((?:prompt|model output|tool output|stdout|stderr)\s*[:=]\s*)([^\n\r]+)/gi, `$1${LOG_REDACT_CENSOR}`)
+  );
 }
 
 function localPathRedactionRoots(): string[] {
