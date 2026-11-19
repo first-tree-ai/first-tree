@@ -17,6 +17,8 @@ describe("resolveWebSocketProxyAgent", () => {
     delete process.env.NODE_USE_ENV_PROXY;
     delete process.env.HTTPS_PROXY;
     delete process.env.https_proxy;
+    delete process.env.HTTP_PROXY;
+    delete process.env.http_proxy;
     delete process.env.NO_PROXY;
     delete process.env.no_proxy;
   });
@@ -162,6 +164,8 @@ describe("resolveWebSocketProxyAgent environment precedence", () => {
     delete process.env.no_proxy;
     delete process.env.NO_PROXY;
     delete process.env.https_proxy;
+    delete process.env.HTTP_PROXY;
+    delete process.env.http_proxy;
     delete process.env.HTTPS_PROXY;
     process.env.NODE_USE_ENV_PROXY = "1";
   });
@@ -181,6 +185,21 @@ describe("resolveWebSocketProxyAgent environment precedence", () => {
     process.env.HTTPS_PROXY = "http://upper.example:8080";
 
     expect(proxyOf(resolveWebSocketProxyAgent(WSS))).toBe("http://upper.example:8080/");
+  });
+
+  it("falls back to the plain HTTP proxy for a TLS upgrade", () => {
+    // undici's HTTPS agent falls back to the HTTP agent, so a host that only
+    // exports HTTP_PROXY still proxies HTTPS.
+    process.env.HTTP_PROXY = "http://only-http.example:3128";
+
+    expect(proxyOf(resolveWebSocketProxyAgent(WSS))).toBe("http://only-http.example:3128/");
+  });
+
+  it("prefers an https_proxy over a plain HTTP proxy", () => {
+    process.env.https_proxy = "http://tls.example:8080";
+    process.env.HTTP_PROXY = "http://only-http.example:3128";
+
+    expect(proxyOf(resolveWebSocketProxyAgent(WSS))).toBe("http://tls.example:8080/");
   });
 
   it("prefers the lowercase bypass variable when both are set", () => {

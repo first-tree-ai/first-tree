@@ -116,7 +116,12 @@ export function resolveWebSocketProxyAgent(wsUrl: string): HttpsProxyAgent<strin
   // Lowercase first, like Node's own fetch: undici reads
   // `https_proxy` before `HTTPS_PROXY` and `no_proxy` before `NO_PROXY`, so the
   // two egress paths agree on which value wins when both are set.
-  const proxyUrl = process.env.https_proxy ?? process.env.HTTPS_PROXY;
+  // Same order undici uses for a TLS request: `https_proxy` (either case), then
+  // the plain HTTP proxy — undici's HTTPS agent falls back to the HTTP agent, so
+  // a host with only `HTTP_PROXY` set still proxies HTTPS while this path would
+  // otherwise go direct.
+  const proxyUrl =
+    process.env.https_proxy ?? process.env.HTTPS_PROXY ?? process.env.http_proxy ?? process.env.HTTP_PROXY;
   if (!proxyUrl) return undefined;
   const noProxy = process.env.no_proxy ?? process.env.NO_PROXY;
   let target: URL;

@@ -54,17 +54,30 @@ EOF
 first-tree daemon stop && first-tree daemon start   # use your channel's binary
 ```
 
-`NODE_USE_ENV_PROXY=1` is what makes Node's built-in `fetch` and the daemon's
-WebSocket honour `HTTP(S)_PROXY`. Without it Node ignores those variables and
-both paths go direct — on a blocked network the daemon then alternates between
-working HTTP calls and a socket that reconnect-loops.
+What each egress path reads, and when, is not the same — this matters when
+`daemon.env` is the only place you set your proxy:
 
-`NO_PROXY` applies to both paths too, including the WebSocket upgrade: that
-upgrade builds its own agent, which does not read the variable, so the daemon
-checks the destination before constructing it. Entries take the forms `curl`
-accepts — `*` (proxy nothing), a host and its subdomains (`example.com` also
-excludes `api.example.com`), a leading-dot or `*.` suffix, an optional port
-(`example.com:8443`), and bracketed IPv6 literals (`[::1]`).
+| Egress | Honours the proxy from `daemon.env`? | Why |
+|---|---|---|
+| agent runtimes (`claude`, `git`, `npm`) and anything the daemon spawns | **yes** | they inherit the daemon's environment when they start |
+| the daemon's WebSocket to the server | **yes** | the upgrade reads the variables each time it connects |
+| the daemon's own `fetch` calls to the server | **no** | Node installs fetch's environment-proxy agent at **process start**, before the daemon loads `daemon.env` |
+
+So `daemon.env` is enough for agent runtimes and for the socket. If the daemon's
+own HTTP traffic to the server must go through the proxy too, the variables have
+to be in the daemon's environment *before* Node starts — the service unit or the
+shell you launch it from — and a CLI switch that injects them into the unit does
+not exist yet.
+
+`NO_PROXY` follows the same split. For the socket the daemon checks the
+destination itself before building its agent (that agent does not read the
+variable); for `fetch`, Node's proxy agent reads it at start. Entries take the
+forms `curl` accepts — `*` (proxy nothing), a host and its subdomains
+(`example.com` also excludes `api.example.com`), a leading-dot or `*.` suffix,
+an optional port (`example.com:8443`), and bracketed IPv6 literals (`[::1]`).
+Lowercase `https_proxy` / `no_proxy` win over the uppercase spelling, and a
+plain `HTTP_PROXY` is used for TLS destinations when no `https_proxy` is set —
+the same choices `fetch` makes.
 
 `KEY=VALUE` only — one per line. A `# comment` is allowed on its own line or as
 a trailing ` # ...` on an unquoted value; quote the value (`KEY="..."`) to keep
