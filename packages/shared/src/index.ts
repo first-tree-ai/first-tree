@@ -176,6 +176,7 @@ export {
   DEFAULT_KIMI_CODE_RUNTIME_CONFIG_PAYLOAD,
   DEFAULT_OPENCODE_RUNTIME_CONFIG_PAYLOAD,
   DEFAULT_PI_RUNTIME_CONFIG_PAYLOAD,
+  DEFAULT_ZCODE_RUNTIME_CONFIG_PAYLOAD,
   type DeepseekRuntimeConfigPayload,
   type DryRunAgentRuntimeConfig,
   defaultRuntimeConfigPayload,
@@ -216,6 +217,7 @@ export {
   runtimeSkillBundleSchema,
   type UpdateAgentRuntimeConfig,
   updateAgentRuntimeConfigSchema,
+  type ZcodeRuntimeConfigPayload,
 } from "./schemas/agent-runtime-config.js";
 export {
   AGENT_ENGAGEMENTS,
@@ -1569,6 +1571,7 @@ export {
   runtimeProviderPreferredCredential,
   runtimeProviderPreferredCredentialProse,
   runtimeProviderShowsHostLoginOnSetup,
+  ZCODE_INSTALL_COMMAND,
 } from "./schemas/runtime-provider-catalog.js";
 export {
   type ScmAttentionLine,

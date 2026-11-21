@@ -15,6 +15,7 @@ import { probeGrokCapability } from "./grok/capability.js";
 import { probeKimiCodeCapability } from "./kimi-code/capability.js";
 import { probeOpenCodeCapability } from "./opencode/capability.js";
 import { probePiCapability } from "./pi/capability.js";
+import { probeZcodeCapability } from "./zcode/capability.js";
 
 export type CapabilityProbe = () => Promise<CapabilityEntry>;
 
@@ -93,6 +94,7 @@ export const BUILTIN_PROVIDER_PROBES: BuiltinProviderProbeTable = Object.freeze(
   "kimi-code": probeKimiCodeCapability,
   opencode: probeOpenCodeCapability,
   pi: probePiCapability,
+  zcode: probeZcodeCapability,
 } satisfies Record<RuntimeProvider, CapabilityProbe>);
 
 /** Enabled providers that have a built-in probe (drives daemon re-probe loops). */

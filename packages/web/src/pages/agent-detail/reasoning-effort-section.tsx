@@ -66,6 +66,7 @@ const EFFORT_OPTIONS_BY_PROVIDER: Record<RuntimeProvider, SelectOption[]> = {
   "kimi-code": [],
   opencode: [],
   pi: [],
+  zcode: [],
 };
 
 export const EFFORT_HELP_BY_PROVIDER: Record<RuntimeProvider, string> = {
@@ -82,6 +83,7 @@ export const EFFORT_HELP_BY_PROVIDER: Record<RuntimeProvider, string> = {
   "kimi-code": "Kimi thinking configuration is inherited from the local Kimi configuration.",
   opencode: "OpenCode model variants are provider-native; there is no separate First Tree effort control.",
   pi: "Pi thinking level is inherited from the local Pi configuration; there is no separate First Tree effort control.",
+  zcode: "ZCode reasoning is provider-native; First Tree does not inject a separate effort control.",
 };
 
 export type ReasoningEffortSectionProps = {
