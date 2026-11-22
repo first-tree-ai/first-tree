@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
+  ApprovalHandler,
   CreateSessionOptions,
   Event as KimiEvent,
   KimiHarnessOptions,
@@ -24,6 +25,7 @@ class FakeSession {
   readonly listeners = new Set<(event: KimiEvent) => void>();
   readonly setPermission = vi.fn().mockResolvedValue(undefined);
   readonly setModel = vi.fn().mockResolvedValue(undefined);
+  readonly setApprovalHandler = vi.fn();
   readonly cancel = vi.fn().mockResolvedValue(undefined);
   readonly close = vi.fn().mockResolvedValue(undefined);
   usage: SessionUsage = {
@@ -438,6 +440,60 @@ describe("Kimi Code handler", () => {
     expect(captures.resume?.roleAdditional).toContain("First Tree");
     expect(fakeSession.setPermission).toHaveBeenCalledWith("yolo");
     expect(fakeSession.setModel).toHaveBeenCalledWith("kimi-for-coding");
+  });
+
+  it("registers an approval handler that approves plan exits and cancels other requests", async () => {
+    const fakeSession = new FakeSession("kimi-session-approval", [
+      successfulTurn("kimi-session-approval"),
+      successfulTurn("kimi-session-approval"),
+    ]);
+    const payload = {
+      kind: "kimi-code" as const,
+      prompt: { append: "" },
+      model: "",
+      mcpServers: [],
+      env: [],
+      gitRepos: [],
+      resourceSkills: [],
+    };
+    const handler = createKimiCodeHandler({
+      workspaceRoot,
+      agentName: "kimi-test-agent",
+      runtimeProvider: "kimi-code",
+      agentConfigCache: { refresh: async () => ({ payload }), get: () => ({ payload }) },
+      kimiKaosFactory: async () => ({ withCwd: vi.fn().mockReturnThis(), withEnv: vi.fn().mockReturnThis() }),
+      kimiHarnessFactory: () => ({
+        createSession: async () => fakeSession,
+        resumeSession: async () => fakeSession,
+        close: async () => {},
+      }),
+    });
+
+    await handler.start(message("m1", "start work"), makeContext([]), makeToken());
+    await handler.resume(message("m2", "continue"), "kimi-session-approval", makeContext([]), makeToken());
+
+    expect(fakeSession.setApprovalHandler).toHaveBeenCalledTimes(2);
+    const approvalHandler = fakeSession.setApprovalHandler.mock.calls[0]?.[0] as ApprovalHandler;
+    expect(fakeSession.setApprovalHandler.mock.calls[1]?.[0]).toBe(approvalHandler);
+
+    const planApproval = await approvalHandler({
+      toolName: "ExitPlanMode",
+      toolCallId: "t1",
+      action: "exit plan mode",
+      display: { kind: "plan_review", plan: "x", path: "/tmp/p.md" },
+    });
+    expect(planApproval).toEqual({ decision: "approved" });
+
+    const otherApproval = await approvalHandler({
+      toolName: "Bash",
+      toolCallId: "t2",
+      action: "run a shell command",
+      display: { kind: "command", command: "ls" },
+    });
+    expect(otherApproval).toEqual({
+      decision: "cancelled",
+      feedback: "No interactive approval surface in hosted sessions.",
+    });
   });
 
   it("does not pass declared but unmaterialized workspace repos as SDK additional directories", async () => {
