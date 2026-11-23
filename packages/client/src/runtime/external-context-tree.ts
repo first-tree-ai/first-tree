@@ -22,7 +22,7 @@ import { CORE_SKILL_NAMES } from "./first-tree-skills/installer.js";
 import { acquireWorkspaceFileLock } from "./workspace-file-lock.js";
 
 /**
- * The external Context Tree CLI (`@first-tree-ai/context-tree`, 1.x).
+ * The external Context Tree CLI (`@first-tree-ai/context-tree`, 2.x).
  *
  * It ships the `context-tree-*` Skill family and the command surface those
  * Skills call by name. First Tree pins it as a normal dependency rather than
@@ -30,7 +30,7 @@ import { acquireWorkspaceFileLock } from "./workspace-file-lock.js";
  * with. We never import it as a module — we resolve its bin and spawn it, so the
  * bundler never pulls it into `dist/`.
  *
- * Everything 1.x needs is per project: Skills are installed into each Agent
+ * Everything 2.x needs is per project: Skills are installed into each Agent
  * workspace (`.claude/skills`, `.agents/skills`) and the connection is the
  * workspace's own `.context-tree.json`. Nothing here writes to the account-level
  * Skill directories or a global connection store; what earlier releases left
@@ -280,7 +280,7 @@ const defaultBranchCache = new Map<string, string>();
 
 /**
  * The branch to connect: the configured `context_tree.ref`, or the repository's
- * default branch. 1.x `connect` requires an explicit ref, and resolving it from
+ * default branch. 2.x `connect` requires an explicit ref, and resolving it from
  * the remote keeps the zero-configuration behaviour of the 0.1 CLI, which
  * followed the default branch on its own.
  */
@@ -427,7 +427,7 @@ function sameTarget(left: ExternalContextTreeTarget | null, right: ExternalConte
   return left !== null && left.repository.toLowerCase() === right.repository.toLowerCase() && left.ref === right.ref;
 }
 
-/** Repository name, which is how 1.x `--tree` selects a declared Git source. */
+/** Repository name, which is how 2.x `--tree` selects a declared Git source. */
 function treeSelector(repository: string): string {
   return repository.slice(repository.indexOf("/") + 1);
 }

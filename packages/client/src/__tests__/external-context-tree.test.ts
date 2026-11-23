@@ -47,8 +47,8 @@ afterEach(() => {
 });
 
 describe("packaged Context Tree Skills", () => {
-  it("bundles a 1.x CLI whose Skills never collide with First Tree Core Skills", () => {
-    expect(contextTreeCliVersion()).toMatch(/^1\./);
+  it("bundles a 2.x CLI whose Skills never collide with First Tree Core Skills", () => {
+    expect(contextTreeCliVersion()).toMatch(/^2\./);
     const names = packagedContextTreeSkillNames();
     expect(names).toEqual(expect.arrayContaining(["context-tree-read", "context-tree-write"]));
     for (const core of FIRST_TREE_CORE_SKILL_NAMES) expect(names).not.toContain(core);
