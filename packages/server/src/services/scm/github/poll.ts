@@ -98,6 +98,18 @@ export type GithubPollContinuation = {
    * rest of the group or re-reads it forever.
    */
   commentPosition: { createdAt: string; id: number } | null;
+  /**
+   * `since` bound the comment pages belong to.
+   *
+   * GitHub paginates the *filtered* list, so a page number only means
+   * something while the bound stands. The bound narrows to the last comment
+   * read, so it moves when the read position crosses into another timestamp
+   * group — the page then restarts at one, because page three of the old list
+   * is not page three of the new one.
+   */
+  commentsSince: string;
+  /** 1-based comment-list page to request next. */
+  commentsPage: number;
   /** True once the review stream reached its end. */
   reviewsDone: boolean;
   /** 1-based review-list page to request next. */
@@ -470,19 +482,35 @@ export async function pollGithubRepository(input: PollGithubRepositoryInput): Pr
 
     // Each stream resumes on its own axis and remembers whether it finished:
     // comments by `(created_at, id)` position (the endpoint filters `since` on
-    // `updated_at`, so a bare timestamp loses same-second ties), reviews by
-    // page. A stream that reached its end is not requested again.
+    // `updated_at`, so a bare timestamp loses same-second ties) plus the page
+    // the position belongs to, reviews by page. A stream that reached its end
+    // is not requested again.
     let commentsDone = continuation?.commentsDone ?? false;
     let commentPosition: CommentPosition | null = continuation?.commentPosition ?? null;
+    // The bound and the page describe the same filtered list: GitHub paginates
+    // the result of `since`, so a page number stays valid only while the bound
+    // stands. The bound narrows to the last comment read, so it moves when the
+    // position crosses into another timestamp group — then the page restarts at
+    // one for the new list. Asking for page one every time instead left a
+    // timestamp group larger than the page budget stuck: every pass re-read the
+    // same prefix, emitted nothing and moved the position nowhere.
+    const commentsSince = commentPosition === null ? since : oneSecondEarlier(commentPosition.createdAt);
+    let commentsPage =
+      continuation !== null && continuation.commentsSince === commentsSince ? continuation.commentsPage : 1;
     let reviewsDone = continuation?.reviewsDone ?? !isPullRequest;
     let reviewsPage = continuation?.reviewsPage ?? 1;
 
     if (!commentsDone) {
-      const comments = await fetchPages(ctx, `/repos/${input.repository}/issues/${number}/comments`, {
-        since: commentPosition === null ? since : oneSecondEarlier(commentPosition.createdAt),
-        sort: "created",
-        direction: "asc",
-      });
+      const comments = await fetchPages(
+        ctx,
+        `/repos/${input.repository}/issues/${number}/comments`,
+        {
+          since: commentsSince,
+          sort: "created",
+          direction: "asc",
+        },
+        commentsPage,
+      );
       requests += comments.requests;
       for (const comment of comments.items) {
         const createdAtComment = readString(comment.created_at);
@@ -496,6 +524,7 @@ export async function pollGithubRepository(input: PollGithubRepositoryInput): Pr
         record(deliveryId, "issue_comment", commentPayload(input.repository, item, comment, isPullRequest));
       }
       commentsDone = !comments.truncated;
+      commentsPage = comments.truncated ? comments.nextPage : commentsPage;
     }
 
     if (!reviewsDone) {
@@ -528,6 +557,8 @@ export async function pollGithubRepository(input: PollGithubRepositoryInput): Pr
             entityNumber: number,
             commentsDone,
             commentPosition,
+            commentsSince,
+            commentsPage,
             reviewsDone,
             reviewsPage,
           },

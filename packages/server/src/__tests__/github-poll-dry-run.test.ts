@@ -305,6 +305,8 @@ describe("pollGithubRepository", () => {
       entityNumber: 12,
       commentsDone: false,
       commentPosition: { createdAt: "2026-11-17T08:22:00Z", id: 5002 },
+      commentsSince: CURSOR.updatedAt,
+      commentsPage: 3,
       reviewsDone: false,
       reviewsPage: 3,
     });
@@ -383,6 +385,62 @@ describe("pollGithubRepository", () => {
     // is not lost.
     expect(second.webhooks.map((webhook) => webhook.deliveryId)).toEqual(["github:issue_comment:5003"]);
     expect(second.nextCursor).toEqual({
+      updatedAt: "2026-11-17T08:30:00Z",
+      entityNumber: 12,
+      continuation: null,
+    });
+  });
+
+  it("keeps paging when one timestamp group is larger than the page budget", async () => {
+    // The comment request used to restart at page one on every pass, so a group
+    // of comments sharing a timestamp that does not fit into one page budget was
+    // re-read forever: every pass emitted nothing and the position never moved.
+    const sameInstant = "2026-11-17T08:22:00Z";
+    const rows = [5002, 5003, 5004, 5005, 5006].map((id) => commentRow({ id, created_at: sameInstant }));
+    const { fetch, calls } = fetchStub((url) => {
+      const page = Number(url.searchParams.get("page"));
+      const since = url.searchParams.get("since") ?? "";
+      if (url.pathname.endsWith("/issues")) return { body: page === 1 ? [issueRow()] : [] };
+      if (url.pathname.endsWith("/comments")) {
+        const visible = rows.filter((row) => String(row.created_at) > since);
+        return { body: visible.length >= page ? [visible[page - 1]] : [] };
+      }
+      return { body: [] };
+    });
+
+    let cursor: GithubPollCursor | null = CURSOR;
+    const delivered: string[] = [];
+    for (let pass = 0; pass < 6; pass += 1) {
+      const result = await pollGithubRepository({
+        organizationId: ORGANIZATION_ID,
+        repository: REPOSITORY,
+        cursor,
+        fetch,
+        perPage: 1,
+        maxPages: 2,
+      });
+      delivered.push(...result.webhooks.map((webhook) => webhook.deliveryId));
+      cursor = result.nextCursor;
+      if (!result.truncated) break;
+    }
+
+    // Every comment of the group arrives exactly once, ...
+    expect(delivered).toEqual([
+      "github:issue_comment:5002",
+      "github:issue_comment:5003",
+      "github:issue_comment:5004",
+      "github:issue_comment:5005",
+      "github:issue_comment:5006",
+    ]);
+    // ... and the request paged forward instead of re-reading the same prefix.
+    // The bound narrows to the last comment read, so it moves once the position
+    // leaves the group; the page restarts at one for the new list and keeps
+    // moving forward from there.
+    const pages = calls
+      .filter((url) => new URL(url).pathname.endsWith("/comments"))
+      .map((url) => new URL(url).searchParams.get("page"));
+    expect(pages).toEqual(["1", "2", "1", "2", "3", "4", "5", "6"]);
+    expect(cursor).toEqual({
       updatedAt: "2026-11-17T08:30:00Z",
       entityNumber: 12,
       continuation: null,
