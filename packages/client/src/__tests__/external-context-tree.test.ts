@@ -59,7 +59,9 @@ describe("context-tree shim", () => {
   it("writes a marked shim into First Tree's own directory and puts it first on PATH", () => {
     const written = writeContextTreeShim();
     expect(written).toEqual({ path: join(home, "data", "context-tree", "bin", "context-tree") });
-    expect(readFileSync(join(contextTreeShimDir(), "context-tree"), "utf8")).toContain(CONTEXT_TREE_SHIM_MARKER);
+    const shim = readFileSync(join(contextTreeShimDir(), "context-tree"), "utf8");
+    expect(shim).toContain(CONTEXT_TREE_SHIM_MARKER);
+    expect(shim).toContain("export CONTEXT_TREE_NO_UPDATE_CHECK=1");
 
     const env = withContextTreeShimDirOnPath({ PATH: ["/usr/bin", contextTreeShimDir(), "/bin"].join(delimiter) });
     expect(env.PATH).toBe([contextTreeShimDir(), "/usr/bin", "/bin"].join(delimiter));

@@ -139,7 +139,8 @@ export async function runContextTreeCommand(
   const result = await spawnForStdout(cli.command, [...cli.args, ...args], `context-tree ${args.join(" ")}`, {
     ...options,
     // The CLI clones and fetches with `git`; a daemon has no terminal to prompt on.
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    // First Tree upgrades its pinned copy itself, so the CLI's own update check stays off.
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0", CONTEXT_TREE_NO_UPDATE_CHECK: "1" },
   });
   if ("reason" in result) return { ok: false, reason: result.reason };
 
@@ -249,7 +250,8 @@ export function contextTreeShimName(): string {
  *
  * Absolute paths are baked in deliberately: the Agent's `PATH` is a controlled
  * list that need not contain `node`. Every call rewrites it, so a Node version
- * bump or a First Tree upgrade heals itself.
+ * bump or a First Tree upgrade heals itself. The CLI's update check stays off:
+ * First Tree upgrades its pinned copy through its own releases.
  */
 export function writeContextTreeShim(): { path: string } | { reason: string } {
   const cli = resolveContextTreeCli();
@@ -259,8 +261,8 @@ export function writeContextTreeShim(): { path: string } | { reason: string } {
   const shimPath = join(directory, contextTreeShimName());
   const body =
     process.platform === "win32"
-      ? `@echo off\r\nrem ${CONTEXT_TREE_SHIM_MARKER}\r\n"${cli.command}" "${target}" %*\r\n`
-      : `#!/bin/sh\n# ${CONTEXT_TREE_SHIM_MARKER}\nexec "${cli.command}" "${target}" "$@"\n`;
+      ? `@echo off\r\nrem ${CONTEXT_TREE_SHIM_MARKER}\r\nset CONTEXT_TREE_NO_UPDATE_CHECK=1\r\n"${cli.command}" "${target}" %*\r\n`
+      : `#!/bin/sh\n# ${CONTEXT_TREE_SHIM_MARKER}\nexport CONTEXT_TREE_NO_UPDATE_CHECK=1\nexec "${cli.command}" "${target}" "$@"\n`;
   try {
     mkdirSync(directory, { recursive: true });
     if (existsSync(shimPath) && readFileSync(shimPath, "utf8") === body) return { path: shimPath };
