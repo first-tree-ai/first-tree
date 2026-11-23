@@ -16,7 +16,7 @@ import { setCliBinding } from "@first-tree/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 /**
- * Everything here runs the real bundled `@first-tree-ai/context-tree` 1.x CLI.
+ * Everything here runs the real bundled `@first-tree-ai/context-tree` 2.x CLI.
  *
  * Three things are redirected so nothing reaches the developer's machine or the
  * network:
@@ -52,7 +52,7 @@ function writeConfig(context?: { repository?: string; ref?: string }): void {
   writeFileSync(join(home, "config", "client.yaml"), `${lines.join("\n")}\n`, "utf8");
 }
 
-/** A valid 1.x tree in a bare repository served as `https://github.com/<repository>.git`. */
+/** A valid 2.x tree in a bare repository served as `https://github.com/<repository>.git`. */
 function createRemoteTree(repository: string, branches: readonly string[] = ["trunk"]): void {
   const source = mkdtempSync(join(tmpdir(), "ft-context-tree-src-"));
   const git = (...args: string[]) =>
@@ -119,14 +119,14 @@ afterEach(() => {
 });
 
 describe("resolveContextTreeCli", () => {
-  it("resolves the packaged 1.x bin and invokes it through the current Node binary", async () => {
+  it("resolves the packaged 2.x bin and invokes it through the current Node binary", async () => {
     const { resolveContextTreeCli, inspectContextTreeCli } = await loadModule();
     const invocation = resolveContextTreeCli();
     expect(invocation?.command).toBe(process.execPath);
     // Spawning the .mjs entry directly (rather than a bin shim) is what keeps
     // this working on Windows, where a `.cmd` shim raises EINVAL.
     expect(invocation?.args[0]).toMatch(/[/\\]context-tree[/\\]dist[/\\]cli[/\\]index\.mjs$/);
-    expect(inspectContextTreeCli().version).toMatch(/^1\./);
+    expect(inspectContextTreeCli().version).toMatch(/^2\./);
   });
 });
 
@@ -195,7 +195,7 @@ describe("ensureContextTreeSkills", () => {
     expect(report.shimPath).toBe(shim);
     expect(readFileSync(shim, "utf8")).toContain("first-tree-managed context-tree shim");
     expect(formatContextTreeSetupReport(report)).toMatch(
-      /installed \(context-tree 1\.[^,]+, trunk\); linked 2 workspaces$/,
+      /installed \(context-tree 2\.[^,]+, trunk\); linked 2 workspaces$/,
     );
   });
 
