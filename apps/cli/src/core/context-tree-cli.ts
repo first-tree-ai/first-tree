@@ -19,7 +19,7 @@ import { defaultDataDir, readContextTreeRefSetting, readContextTreeRepositorySet
 /**
  * Login-time setup for external Context Tree mode.
  *
- * The bundled `@first-tree-ai/context-tree` CLI (1.x) and everything it needs
+ * The bundled `@first-tree-ai/context-tree` CLI (2.x) and everything it needs
  * per workspace live in `@first-tree/client`, because a session start does the
  * same work for Agents created after login. This module adds what only `login`
  * does: connect every existing workspace up front, retire what earlier First

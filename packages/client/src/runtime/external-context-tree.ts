@@ -22,7 +22,7 @@ import { CORE_SKILL_NAMES } from "./first-tree-skills/installer.js";
 import { acquireWorkspaceFileLock } from "./workspace-file-lock.js";
 
 /**
- * The external Context Tree CLI (`@first-tree-ai/context-tree`, 1.x).
+ * The external Context Tree CLI (`@first-tree-ai/context-tree`, 2.x).
  *
  * It ships the `context-tree-*` Skill family and the command surface those
  * Skills call by name. First Tree pins it as a normal dependency rather than
@@ -30,7 +30,7 @@ import { acquireWorkspaceFileLock } from "./workspace-file-lock.js";
  * with. We never import it as a module — we resolve its bin and spawn it, so the
  * bundler never pulls it into `dist/`.
  *
- * Everything 1.x needs is per project: Skills are installed into each Agent
+ * Everything 2.x needs is per project: Skills are installed into each Agent
  * workspace (`.claude/skills`, `.agents/skills`) and the connection is the
  * workspace's own `.context-tree.json`. Nothing here writes to the account-level
  * Skill directories or a global connection store; what earlier releases left
@@ -139,7 +139,8 @@ export async function runContextTreeCommand(
   const result = await spawnForStdout(cli.command, [...cli.args, ...args], `context-tree ${args.join(" ")}`, {
     ...options,
     // The CLI clones and fetches with `git`; a daemon has no terminal to prompt on.
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    // First Tree upgrades its pinned copy itself, so the CLI's own update check stays off.
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0", CONTEXT_TREE_NO_UPDATE_CHECK: "1" },
   });
   if ("reason" in result) return { ok: false, reason: result.reason };
 
@@ -249,7 +250,8 @@ export function contextTreeShimName(): string {
  *
  * Absolute paths are baked in deliberately: the Agent's `PATH` is a controlled
  * list that need not contain `node`. Every call rewrites it, so a Node version
- * bump or a First Tree upgrade heals itself.
+ * bump or a First Tree upgrade heals itself. The CLI's update check stays off:
+ * First Tree upgrades its pinned copy through its own releases.
  */
 export function writeContextTreeShim(): { path: string } | { reason: string } {
   const cli = resolveContextTreeCli();
@@ -259,8 +261,8 @@ export function writeContextTreeShim(): { path: string } | { reason: string } {
   const shimPath = join(directory, contextTreeShimName());
   const body =
     process.platform === "win32"
-      ? `@echo off\r\nrem ${CONTEXT_TREE_SHIM_MARKER}\r\n"${cli.command}" "${target}" %*\r\n`
-      : `#!/bin/sh\n# ${CONTEXT_TREE_SHIM_MARKER}\nexec "${cli.command}" "${target}" "$@"\n`;
+      ? `@echo off\r\nrem ${CONTEXT_TREE_SHIM_MARKER}\r\nset CONTEXT_TREE_NO_UPDATE_CHECK=1\r\n"${cli.command}" "${target}" %*\r\n`
+      : `#!/bin/sh\n# ${CONTEXT_TREE_SHIM_MARKER}\nexport CONTEXT_TREE_NO_UPDATE_CHECK=1\nexec "${cli.command}" "${target}" "$@"\n`;
   try {
     mkdirSync(directory, { recursive: true });
     if (existsSync(shimPath) && readFileSync(shimPath, "utf8") === body) return { path: shimPath };
@@ -280,7 +282,7 @@ const defaultBranchCache = new Map<string, string>();
 
 /**
  * The branch to connect: the configured `context_tree.ref`, or the repository's
- * default branch. 1.x `connect` requires an explicit ref, and resolving it from
+ * default branch. 2.x `connect` requires an explicit ref, and resolving it from
  * the remote keeps the zero-configuration behaviour of the 0.1 CLI, which
  * followed the default branch on its own.
  */
@@ -427,7 +429,7 @@ function sameTarget(left: ExternalContextTreeTarget | null, right: ExternalConte
   return left !== null && left.repository.toLowerCase() === right.repository.toLowerCase() && left.ref === right.ref;
 }
 
-/** Repository name, which is how 1.x `--tree` selects a declared Git source. */
+/** Repository name, which is how 2.x `--tree` selects a declared Git source. */
 function treeSelector(repository: string): string {
   return repository.slice(repository.indexOf("/") + 1);
 }
