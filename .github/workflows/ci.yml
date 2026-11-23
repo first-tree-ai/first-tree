@@ -31,12 +31,6 @@ jobs:
             echo "Branch '$BRANCH' is auto-named by the hub agent runtime; skipping convention check."
             exit 0
           fi
-          # Dependabot always names its branches dependabot/<ecosystem>/...;
-          # the prefix is not configurable.
-          if [[ "$BRANCH" =~ ^dependabot/ ]]; then
-            echo "Branch '$BRANCH' is named by Dependabot; skipping convention check."
-            exit 0
-          fi
           PATTERN="^(feat|fix|refactor|test|docs|chore|merge)/"
           if [[ ! "$BRANCH" =~ $PATTERN ]]; then
             echo "::error::Branch name '$BRANCH' does not follow convention: feat/, fix/, refactor/, test/, docs/, chore/, merge/"

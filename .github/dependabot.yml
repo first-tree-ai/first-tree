@@ -7,6 +7,9 @@ updates:
     schedule:
       interval: daily
       time: "04:00"
+    # Branches become chore/npm_and_yarn/..., which the CI branch-name check accepts.
+    pull-request-branch-name:
+      prefix: chore
     allow:
       - dependency-name: "@first-tree-ai/context-tree"
     groups:
