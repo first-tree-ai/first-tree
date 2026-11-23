@@ -209,4 +209,37 @@ describe("resolveWebSocketProxyAgent environment precedence", () => {
 
     expect(resolveWebSocketProxyAgent(WSS)).toBeUndefined();
   });
+
+  it("keeps the plain HTTP proxy when the HTTPS variable is explicitly empty", () => {
+    // An empty value counts as unset, so the HTTPS fallback to the HTTP proxy
+    // still applies — a single chain stopped here and left the socket direct.
+    process.env.HTTPS_PROXY = "";
+    process.env.HTTP_PROXY = "http://only-http.example:3128";
+
+    expect(proxyOf(resolveWebSocketProxyAgent(WSS))).toBe("http://only-http.example:3128/");
+  });
+
+  it("reads the uppercase proxy variable when the lowercase one is empty", () => {
+    process.env.https_proxy = "";
+    process.env.HTTPS_PROXY = "http://upper.example:8080";
+
+    expect(proxyOf(resolveWebSocketProxyAgent(WSS))).toBe("http://upper.example:8080/");
+  });
+
+  it("stays direct when every proxy variable is empty", () => {
+    process.env.https_proxy = "";
+    process.env.HTTPS_PROXY = "";
+    process.env.http_proxy = "";
+    process.env.HTTP_PROXY = "";
+
+    expect(resolveWebSocketProxyAgent(WSS)).toBeUndefined();
+  });
+
+  it("reads the uppercase bypass variable when the lowercase one is empty", () => {
+    process.env.https_proxy = "http://lower.example:8080";
+    process.env.no_proxy = "";
+    process.env.NO_PROXY = "cloud.first-tree.ai";
+
+    expect(resolveWebSocketProxyAgent(WSS)).toBeUndefined();
+  });
 });

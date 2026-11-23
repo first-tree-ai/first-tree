@@ -99,6 +99,19 @@ export function shouldBypassProxy(hostname: string, port: number, noProxy: strin
 }
 
 /**
+ * A proxy variable that is set but blank counts as unset, the way `fetch`
+ * treats it: undici reads `https_proxy || HTTPS_PROXY`, so an empty lowercase
+ * value falls through to the uppercase spelling.
+ */
+function proxyVariable(...values: (string | undefined)[]): string | undefined {
+  for (const value of values) {
+    const trimmed = value?.trim();
+    if (trimmed) return trimmed;
+  }
+  return undefined;
+}
+
+/**
  * `ws` opens its own TCP/TLS socket with Node's `http(s).request` and never
  * looks at `HTTP(S)_PROXY`, so the daemon's WebSocket stayed direct even when
  * `fetch` went through the proxy via `NODE_USE_ENV_PROXY`. On a network where
@@ -116,14 +129,16 @@ export function resolveWebSocketProxyAgent(wsUrl: string): HttpsProxyAgent<strin
   // Lowercase first, like Node's own fetch: undici reads
   // `https_proxy` before `HTTPS_PROXY` and `no_proxy` before `NO_PROXY`, so the
   // two egress paths agree on which value wins when both are set.
-  // Same order undici uses for a TLS request: `https_proxy` (either case), then
-  // the plain HTTP proxy — undici's HTTPS agent falls back to the HTTP agent, so
-  // a host with only `HTTP_PROXY` set still proxies HTTPS while this path would
-  // otherwise go direct.
+  // The two protocols are resolved separately and the HTTPS one falls back to
+  // the HTTP one, like undici: its HTTPS agent uses the HTTP proxy when no
+  // HTTPS proxy is configured, so a host with only `HTTP_PROXY` set still
+  // proxies HTTPS while this path would otherwise go direct. A single chain
+  // stopped at a blank value and dropped that fallback.
   const proxyUrl =
-    process.env.https_proxy ?? process.env.HTTPS_PROXY ?? process.env.http_proxy ?? process.env.HTTP_PROXY;
+    proxyVariable(process.env.https_proxy, process.env.HTTPS_PROXY) ??
+    proxyVariable(process.env.http_proxy, process.env.HTTP_PROXY);
   if (!proxyUrl) return undefined;
-  const noProxy = process.env.no_proxy ?? process.env.NO_PROXY;
+  const noProxy = proxyVariable(process.env.no_proxy, process.env.NO_PROXY);
   let target: URL;
   try {
     target = new URL(wsUrl);

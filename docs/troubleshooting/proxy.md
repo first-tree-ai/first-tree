@@ -48,7 +48,7 @@ cat > ~/.first-tree/daemon.env <<'EOF'
 HTTPS_PROXY=http://127.0.0.1:7897
 HTTP_PROXY=http://127.0.0.1:7897
 NO_PROXY=localhost,127.0.0.1
-NODE_USE_ENV_PROXY=1
+NODE_USE_ENV_PROXY=1   # for the Node processes the daemon spawns; the daemon's own fetch needs it at process start
 EOF
 
 first-tree daemon stop && first-tree daemon start   # use your channel's binary
@@ -96,10 +96,14 @@ it. Edit or delete it any time and restart to apply.
 vars (`HTTP(S)_PROXY`, `ALL_PROXY`, `NO_PROXY`). Notes for other setups:
 
 - **HTTP / HTTPS proxy** (Clash / mihomo / Surge / V2Ray "mixed" or HTTP port):
-  fully supported — put the URL in `daemon.env` and set
-  `NODE_USE_ENV_PROXY=1`. That one switch covers HTTP (`fetch`) and the
-  WebSocket upgrade alike; `NODE_USE_ENV_PROXY` alone does not, because `ws`
-  opens its own socket and reads no proxy env by itself.
+  fully supported — put the URL in `daemon.env`. The WebSocket upgrade reads
+  that URL on every connect, and the agent runtimes the daemon spawns inherit
+  it. `NODE_USE_ENV_PROXY=1` is what turns on fetch's environment proxy, and
+  only for a Node process that starts with it in its environment: the daemon's
+  own `fetch` needs the proxy variables in its environment before it starts, so
+  the switch in `daemon.env` does not reach it (see the table above). `ws`
+  opens its own socket and reads no proxy env by itself, so the upgrade needs
+  the URL, not the switch.
 - **SOCKS-only** (`ALL_PROXY=socks5://…`): `git` / `curl` honor it, but the
   Claude CLI's HTTP stack does not speak SOCKS — prefer exposing your proxy's
   **HTTP / mixed** port and using that in `daemon.env`.
