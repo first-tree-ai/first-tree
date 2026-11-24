@@ -1,0 +1,18 @@
+version: 2
+updates:
+  # Only the Context Tree package: a new release opens one small bump PR within
+  # a day, updating every workspace pin and the lockfile together.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: daily
+      time: "04:00"
+    # Branches become chore/npm_and_yarn/..., which the CI branch-name check accepts.
+    pull-request-branch-name:
+      prefix: chore
+    allow:
+      - dependency-name: "@first-tree-ai/context-tree"
+    groups:
+      context-tree:
+        patterns:
+          - "@first-tree-ai/context-tree"
