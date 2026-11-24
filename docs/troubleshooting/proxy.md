@@ -48,7 +48,7 @@ cat > ~/.first-tree/daemon.env <<'EOF'
 HTTPS_PROXY=http://127.0.0.1:7897
 HTTP_PROXY=http://127.0.0.1:7897
 NO_PROXY=localhost,127.0.0.1
-NODE_USE_ENV_PROXY=1   # for the Node processes the daemon spawns; the daemon's own fetch needs it at process start
+NODE_USE_ENV_PROXY=1   # for the Node processes the daemon spawns and for the daemon's WebSocket; the daemon's own fetch needs it at process start
 EOF
 
 first-tree daemon stop && first-tree daemon start   # use your channel's binary
@@ -60,14 +60,16 @@ What each egress path reads, and when, is not the same — this matters when
 | Egress | Honours the proxy from `daemon.env`? | Why |
 |---|---|---|
 | agent runtimes (`claude`, `git`, `npm`) and anything the daemon spawns | **yes** | they inherit the daemon's environment when they start |
-| the daemon's WebSocket to the server | **yes** | the upgrade reads the variables each time it connects |
+| the daemon's WebSocket to the server | **yes**, but only with `NODE_USE_ENV_PROXY=1` | the upgrade reads the variables each time it connects, and stays direct without the opt-in switch |
 | the daemon's own `fetch` calls to the server | **no** | Node installs fetch's environment-proxy agent at **process start**, before the daemon loads `daemon.env` |
 
-So `daemon.env` is enough for agent runtimes and for the socket. If the daemon's
-own HTTP traffic to the server must go through the proxy too, the variables have
-to be in the daemon's environment *before* Node starts — the service unit or the
-shell you launch it from — and a CLI switch that injects them into the unit does
-not exist yet.
+So `daemon.env` is enough for agent runtimes and for the socket — the socket needs
+the `NODE_USE_ENV_PROXY=1` switch in the file, because the daemon loads the file
+into its environment at start and the upgrade reads the switch on every connect.
+If the daemon's own HTTP traffic to the server must go through the proxy too,
+**both** the switch and the proxy variables have to be in the daemon's environment
+*before* Node starts — the service unit or the shell you launch it from — and a
+CLI switch that injects them into the unit does not exist yet.
 
 `NO_PROXY` follows the same split. For the socket the daemon checks the
 destination itself before building its agent (that agent does not read the
@@ -100,10 +102,12 @@ vars (`HTTP(S)_PROXY`, `ALL_PROXY`, `NO_PROXY`). Notes for other setups:
   that URL on every connect, and the agent runtimes the daemon spawns inherit
   it. `NODE_USE_ENV_PROXY=1` is what turns on fetch's environment proxy, and
   only for a Node process that starts with it in its environment: the daemon's
-  own `fetch` needs the proxy variables in its environment before it starts, so
-  the switch in `daemon.env` does not reach it (see the table above). `ws`
-  opens its own socket and reads no proxy env by itself, so the upgrade needs
-  the URL, not the switch.
+  own `fetch` needs the switch and the proxy variables in its environment
+  before it starts, so the switch in `daemon.env` does not reach it (see the
+  table above). `ws` opens its own socket and reads no proxy env by itself, so
+  the upgrade needs the URL **and** the switch — `resolveWebSocketProxyAgent`
+  returns early without `NODE_USE_ENV_PROXY=1`, and a `wss://` connection then
+  goes direct even with the proxy URL configured.
 - **SOCKS-only** (`ALL_PROXY=socks5://…`): `git` / `curl` honor it, but the
   Claude CLI's HTTP stack does not speak SOCKS — prefer exposing your proxy's
   **HTTP / mixed** port and using that in `daemon.env`.
