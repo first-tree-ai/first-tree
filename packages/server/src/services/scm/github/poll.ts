@@ -74,18 +74,45 @@ export type GithubPollCursor = {
   updatedAt: string;
   entityNumber: number;
   /**
-   * Resume point for one entity whose comment and review streams were only
-   * partly read.
+   * What is still unfinished: the repository listing, one entity's streams, or
+   * both. `null` means the poller is caught up with the repository.
    *
-   * One record is enough because the poll stops at the first partially read
-   * entity and the repository watermark advances only once both of its streams
-   * are drained. A single timestamp for both streams — the first version —
-   * let a newer review move the watermark past comments nobody had read.
+   * The two axes are independent: the listing can be unfinished while every
+   * entity it listed is drained, and one entity's streams can be unfinished
+   * while the listing itself is complete.
    */
   continuation?: GithubPollContinuation | null;
 };
 
 export type GithubPollContinuation = {
+  /**
+   * Progress on the repository listing itself.
+   */
+  listing?: GithubPollListingProgress | null;
+  /**
+   * Progress on one entity's comment and review streams.
+   */
+  entity?: GithubPollEntityProgress | null;
+};
+
+/**
+ * Where the repository listing stopped.
+ *
+ * GitHub paginates the *filtered* list, so a page number only means something
+ * while the `since` bound stands. The bound sits one second below the
+ * watermark — GitHub's `since` is exclusive, so asking from the watermark's
+ * own second hides the entities that share it — and it stays pinned while the
+ * listing is unfinished: the watermark moves as entities drain, but the page
+ * number belongs to the bound it was taken under.
+ */
+export type GithubPollListingProgress = {
+  /** `since` bound the listing pages belong to. */
+  since: string;
+  /** 1-based repository-listing page to request next. */
+  page: number;
+};
+
+export type GithubPollEntityProgress = {
   entityNumber: number;
   /** True once the comment stream reached its end; a finished stream is not refetched. */
   commentsDone: boolean;
@@ -398,6 +425,18 @@ export async function pollGithubRepository(input: PollGithubRepositoryInput): Pr
   };
   const now = input.now ?? (() => new Date());
   const since = input.cursor?.updatedAt ?? githubTimestamp(now());
+  const stored = input.cursor?.continuation ?? null;
+  const listingProgress = stored?.listing ?? null;
+  const entityProgress = stored?.entity ?? null;
+  // The listing asks from one second below the watermark. GitHub's `since` is
+  // strictly after, so asking from the watermark's own second hides every
+  // entity that shares it — and the local `(updatedAt, entityNumber)`
+  // comparison is what tells those entities apart.
+  const listingSince = listingProgress?.since ?? oneSecondEarlier(since);
+  // The page belongs to the bound it was taken under: GitHub paginates the
+  // filtered list, so a page number only means something while that bound
+  // stands. An unfinished listing therefore keeps both.
+  const listingPage = listingProgress?.page ?? 1;
   const ingressFor = (deliveryId: string): ScmIngressContext => ({
     provider: "github",
     source: { organizationId: input.organizationId, externalId: `poll:${input.repository}` },
@@ -430,12 +469,17 @@ export async function pollGithubRepository(input: PollGithubRepositoryInput): Pr
     });
   };
 
-  const listing = await fetchPages(ctx, `/repos/${input.repository}/issues`, {
-    state: "all",
-    sort: "updated",
-    direction: "asc",
-    since,
-  });
+  const listing = await fetchPages(
+    ctx,
+    `/repos/${input.repository}/issues`,
+    {
+      state: "all",
+      sort: "updated",
+      direction: "asc",
+      since: listingSince,
+    },
+    listingPage,
+  );
   requests += listing.requests;
   let truncated = listing.truncated;
 
@@ -459,10 +503,8 @@ export async function pollGithubRepository(input: PollGithubRepositoryInput): Pr
   // forever and the poller would never deliver anything.
   if (nextCursor === null) nextCursor = { updatedAt: since, entityNumber: 0 };
 
-  const continuationFor = (entityNumber: number): GithubPollContinuation | null => {
-    const stored = input.cursor?.continuation ?? null;
-    return stored !== null && stored.entityNumber === entityNumber ? stored : null;
-  };
+  const continuationFor = (entityNumber: number): GithubPollEntityProgress | null =>
+    entityProgress !== null && entityProgress.entityNumber === entityNumber ? entityProgress : null;
 
   for (const { item, number, updatedAt } of changed) {
     const isPullRequest = isRecord(item.pull_request);
@@ -545,7 +587,9 @@ export async function pollGithubRepository(input: PollGithubRepositoryInput): Pr
 
     if (!commentsDone || !reviewsDone) {
       // At least one stream is still open: keep the repository watermark where
-      // it is and remember exactly how far each one got.
+      // it is and remember exactly how far each one got. The listing keeps its
+      // page too: the entity whose streams are open lives on one of the pages
+      // this pass read, and the next pass has to see it again to resume them.
       truncated = true;
       return {
         requests,
@@ -554,13 +598,16 @@ export async function pollGithubRepository(input: PollGithubRepositoryInput): Pr
         nextCursor: {
           ...(nextCursor ?? { updatedAt: since, entityNumber: 0 }),
           continuation: {
-            entityNumber: number,
-            commentsDone,
-            commentPosition,
-            commentsSince,
-            commentsPage,
-            reviewsDone,
-            reviewsPage,
+            listing: { since: listingSince, page: listingPage },
+            entity: {
+              entityNumber: number,
+              commentsDone,
+              commentPosition,
+              commentsSince,
+              commentsPage,
+              reviewsDone,
+              reviewsPage,
+            },
           },
         },
         truncated: true,
@@ -572,7 +619,25 @@ export async function pollGithubRepository(input: PollGithubRepositoryInput): Pr
     nextCursor = { updatedAt, entityNumber: number, continuation: null };
   }
 
-  return { requests, webhooks, dropped, nextCursor, truncated };
+  // Every entity this pass read is drained, so the stored entity progress is
+  // stale: an entity that is still listed and still new would have been
+  // processed above, and one that is gone cannot be resumed. The listing
+  // itself may still hold entities beyond the page cap — its bound and its
+  // next page carry that progress, so the next pass continues there instead
+  // of starting over.
+  const pendingListing: GithubPollListingProgress | null = listing.truncated
+    ? { since: listingSince, page: listing.nextPage }
+    : null;
+  return {
+    requests,
+    webhooks,
+    dropped,
+    nextCursor: {
+      ...(nextCursor ?? { updatedAt: since, entityNumber: 0 }),
+      continuation: pendingListing === null ? null : { listing: pendingListing, entity: null },
+    },
+    truncated,
+  };
 }
 
 export type GithubPollTarget = {

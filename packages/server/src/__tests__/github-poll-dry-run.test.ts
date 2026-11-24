@@ -137,10 +137,11 @@ describe("pollGithubRepository", () => {
     expect(result.webhooks).toEqual([]);
     // The watermark starts at "now" — that is what makes the first poll
     // silent, and what the next poll measures against.
-    expect(result.nextCursor).toEqual({ updatedAt: NOW, entityNumber: 0 });
+    expect(result.nextCursor).toEqual({ updatedAt: NOW, entityNumber: 0, continuation: null });
     // The watermark starts at "now", so the request itself asks for nothing
-    // older than that — the no-backfill rule is enforced at the query, not by
-    // filtering afterwards. One request, no per-entity follow-ups.
+    // older than the watermark's own second — the no-backfill rule is enforced
+    // at the query, not by filtering afterwards. One request, no per-entity
+    // follow-ups.
     expect(result.requests).toBe(1);
   });
 
@@ -168,7 +169,10 @@ describe("pollGithubRepository", () => {
       actor: "reviewer",
     });
     expect(result.nextCursor).toEqual({ updatedAt: "2026-11-17T08:30:00Z", entityNumber: 12, continuation: null });
-    expect(calls.some((url) => new URL(url).searchParams.get("since") === CURSOR.updatedAt)).toBe(true);
+    // The listing asks from one second below the watermark: GitHub's `since`
+    // is strictly after, so asking from the watermark's own second hides every
+    // entity that shares it.
+    expect(calls.some((url) => new URL(url).searchParams.get("since") === "2026-11-17T07:59:59Z")).toBe(true);
   });
 
   it("produces no duplicate when the same window is polled twice", async () => {
@@ -302,13 +306,16 @@ describe("pollGithubRepository", () => {
     // The repository watermark does not move: the entity is only half read.
     expect(first.nextCursor?.updatedAt).toBe(CURSOR.updatedAt);
     expect(first.nextCursor?.continuation).toEqual({
-      entityNumber: 12,
-      commentsDone: false,
-      commentPosition: { createdAt: "2026-11-17T08:22:00Z", id: 5002 },
-      commentsSince: CURSOR.updatedAt,
-      commentsPage: 3,
-      reviewsDone: false,
-      reviewsPage: 3,
+      listing: { since: "2026-11-17T07:59:59Z", page: 1 },
+      entity: {
+        entityNumber: 12,
+        commentsDone: false,
+        commentPosition: { createdAt: "2026-11-17T08:22:00Z", id: 5002 },
+        commentsSince: CURSOR.updatedAt,
+        commentsPage: 3,
+        reviewsDone: false,
+        reviewsPage: 3,
+      },
     });
 
     calls.length = 0;
@@ -391,6 +398,74 @@ describe("pollGithubRepository", () => {
     });
   });
 
+  it("keeps same-second entities that span multiple polls", async () => {
+    // GitHub's `since` is strictly after the timestamp it is given, so asking
+    // from the watermark's own second hid every entity that shared it. Three
+    // entities share one `updated_at` and two of them fit into one page
+    // budget: the third was never listed again, and never reached the local
+    // `(updatedAt, entityNumber)` comparison that would have kept it.
+    const sameInstant = "2026-11-17T08:22:00Z";
+    const rows = [12, 13, 14].map((number) =>
+      issueRow({
+        id: 9000 + number,
+        number,
+        updated_at: sameInstant,
+        html_url: `https://github.com/${REPOSITORY}/pull/${number}`,
+      }),
+    );
+    const { fetch } = fetchStub((url) => {
+      const page = Number(url.searchParams.get("page"));
+      const since = url.searchParams.get("since") ?? "";
+      if (url.pathname.endsWith("/issues")) {
+        const visible = rows.filter((row) => String(row.updated_at) > since);
+        return { body: visible.length >= page ? [visible[page - 1]] : [] };
+      }
+      if (url.pathname.endsWith("/comments")) {
+        const number = Number(url.pathname.split("/").at(-2));
+        return { body: page === 1 ? [commentRow({ id: 6000 + number, created_at: "2026-11-17T08:22:30Z" })] : [] };
+      }
+      return { body: [] };
+    });
+
+    const first = await pollGithubRepository({
+      organizationId: ORGANIZATION_ID,
+      repository: REPOSITORY,
+      cursor: CURSOR,
+      fetch,
+      perPage: 1,
+      maxPages: 2,
+    });
+
+    // Two entities fit into the page budget; the third is still behind the cap.
+    expect(first.truncated).toBe(true);
+    expect(first.webhooks.map((webhook) => webhook.deliveryId)).toEqual([
+      "github:issue_comment:6012",
+      "github:issue_comment:6013",
+    ]);
+    expect(first.nextCursor?.continuation).toEqual({
+      listing: { since: "2026-11-17T07:59:59Z", page: 3 },
+      entity: null,
+    });
+
+    const second = await pollGithubRepository({
+      organizationId: ORGANIZATION_ID,
+      repository: REPOSITORY,
+      cursor: first.nextCursor,
+      fetch,
+      perPage: 1,
+      maxPages: 2,
+    });
+
+    // The third entity is read on the next poll, and the two that were already
+    // read are not repeated.
+    expect(second.webhooks.map((webhook) => webhook.deliveryId)).toEqual(["github:issue_comment:6014"]);
+    expect(second.nextCursor).toEqual({
+      updatedAt: sameInstant,
+      entityNumber: 14,
+      continuation: null,
+    });
+  });
+
   it("keeps paging when one timestamp group is larger than the page budget", async () => {
     // The comment request used to restart at page one on every pass, so a group
     // of comments sharing a timestamp that does not fit into one page budget was
@@ -468,7 +543,9 @@ describe("pollGithubRepository", () => {
     });
 
     expect(first.webhooks).toHaveLength(2);
-    expect(first.nextCursor?.continuation).toMatchObject({ commentsDone: true, reviewsDone: false, reviewsPage: 3 });
+    expect(first.nextCursor?.continuation).toMatchObject({
+      entity: { commentsDone: true, reviewsDone: false, reviewsPage: 3 },
+    });
 
     calls.length = 0;
     const second = await pollGithubRepository({
