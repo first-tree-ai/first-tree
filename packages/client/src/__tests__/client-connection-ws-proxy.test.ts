@@ -211,19 +211,23 @@ describe("resolveWebSocketProxyAgent environment precedence", () => {
   });
 
   it("keeps the plain HTTP proxy when the HTTPS variable is explicitly empty", () => {
-    // An empty value counts as unset, so the HTTPS fallback to the HTTP proxy
-    // still applies — a single chain stopped here and left the socket direct.
+    // An empty HTTPS value means "no HTTPS proxy", so the HTTP fallback still
+    // applies — that is what fetch does. (A single chain stopped here and left
+    // the socket direct.)
     process.env.HTTPS_PROXY = "";
     process.env.HTTP_PROXY = "http://only-http.example:3128";
 
     expect(proxyOf(resolveWebSocketProxyAgent(WSS))).toBe("http://only-http.example:3128/");
   });
 
-  it("reads the uppercase proxy variable when the lowercase one is empty", () => {
+  it("lets an explicitly empty lowercase value beat the uppercase spelling", () => {
+    // The maintainer's reproduction (Node 24.20 + the locked `ws`): with
+    // https_proxy="" and HTTPS_PROXY set, fetch goes direct and this resolver
+    // sent a CONNECT. An empty value is a decision, not a missing one.
     process.env.https_proxy = "";
     process.env.HTTPS_PROXY = "http://upper.example:8080";
 
-    expect(proxyOf(resolveWebSocketProxyAgent(WSS))).toBe("http://upper.example:8080/");
+    expect(proxyOf(resolveWebSocketProxyAgent(WSS))).toBeUndefined();
   });
 
   it("stays direct when every proxy variable is empty", () => {
@@ -235,11 +239,13 @@ describe("resolveWebSocketProxyAgent environment precedence", () => {
     expect(resolveWebSocketProxyAgent(WSS)).toBeUndefined();
   });
 
-  it("reads the uppercase bypass variable when the lowercase one is empty", () => {
+  it("lets an explicitly empty lowercase bypass variable beat the uppercase spelling", () => {
+    // Same rule on the other pair: measured on Node 24.13, no_proxy="" with
+    // NO_PROXY naming the host still proxies it.
     process.env.https_proxy = "http://lower.example:8080";
     process.env.no_proxy = "";
     process.env.NO_PROXY = "cloud.first-tree.ai";
 
-    expect(resolveWebSocketProxyAgent(WSS)).toBeUndefined();
+    expect(proxyOf(resolveWebSocketProxyAgent(WSS))).toBe("http://lower.example:8080/");
   });
 });

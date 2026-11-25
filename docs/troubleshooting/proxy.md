@@ -77,13 +77,17 @@ variable); for `fetch`, Node's proxy agent reads it at start. Entries take the
 forms `curl` accepts — `*` (proxy nothing), a host and its subdomains
 (`example.com` also excludes `api.example.com`), a leading-dot or `*.` suffix,
 an optional port (`example.com:8443`), and bracketed IPv6 literals (`[::1]`).
-Lowercase `https_proxy` / `no_proxy` win over the uppercase spelling, and a
-plain `HTTP_PROXY` is used for TLS destinations when no `https_proxy` is set —
-the same choices `fetch` makes.
+The first spelling that is *present* wins, so an explicitly empty lowercase
+value (`https_proxy=`) beats `HTTPS_PROXY` — an empty value is a decision, not
+missing, and `fetch` reads it the same way. A plain `HTTP_PROXY` is used for TLS
+destinations when the HTTPS variables are absent or empty — again the same
+choices `fetch` makes.
 
 `KEY=VALUE` only — one per line. A `# comment` is allowed on its own line or as
 a trailing ` # ...` on an unquoted value; quote the value (`KEY="..."`) to keep
-a literal `#`. An empty `KEY=` is ignored.
+a literal `#`. An empty `KEY=` is skipped by this loader (a half-deleted entry
+should not read as loaded), so to force "explicitly no proxy" at a spelling you
+need the process environment rather than this file.
 
 This file is **yours**: First Tree reads it on daemon start and never rewrites
 it. Edit or delete it any time and restart to apply.

@@ -99,14 +99,22 @@ export function shouldBypassProxy(hostname: string, port: number, noProxy: strin
 }
 
 /**
- * A proxy variable that is set but blank counts as unset, the way `fetch`
- * treats it: undici reads `https_proxy || HTTPS_PROXY`, so an empty lowercase
- * value falls through to the uppercase spelling.
+ * The first spelling that is *present* wins — even when its value is blank.
+ *
+ * Node's fetch reads the environment the same way. Measured on Node 24.13 with
+ * `NODE_USE_ENV_PROXY=1` against a local listener: `https_proxy=""` together
+ * with `HTTPS_PROXY=set` sends `fetch` **direct** (no CONNECT), while
+ * `https_proxy=set` together with `HTTPS_PROXY=""` proxies through the
+ * lowercase value. `no_proxy` behaves identically. So an empty value is a
+ * decision, not a missing one, and must not fall through to the other spelling.
+ *
+ * A blank value still yields `undefined`, which lets the caller's HTTPS→HTTP
+ * fallback apply: with `HTTPS_PROXY=""` and `HTTP_PROXY` set, fetch does go
+ * through the HTTP proxy.
  */
 function proxyVariable(...values: (string | undefined)[]): string | undefined {
   for (const value of values) {
-    const trimmed = value?.trim();
-    if (trimmed) return trimmed;
+    if (value !== undefined) return value.trim() || undefined;
   }
   return undefined;
 }
@@ -126,14 +134,18 @@ function proxyVariable(...values: (string | undefined)[]): string | undefined {
 export function resolveWebSocketProxyAgent(wsUrl: string): HttpsProxyAgent<string> | undefined {
   if (process.env.NODE_USE_ENV_PROXY !== "1") return undefined;
   if (!/^wss:/i.test(wsUrl)) return undefined;
-  // Lowercase first, like Node's own fetch: undici reads
-  // `https_proxy` before `HTTPS_PROXY` and `no_proxy` before `NO_PROXY`, so the
-  // two egress paths agree on which value wins when both are set.
-  // The two protocols are resolved separately and the HTTPS one falls back to
-  // the HTTP one, like undici: its HTTPS agent uses the HTTP proxy when no
+  // Lowercase first, like Node's own fetch: the first spelling that is *present*
+  // decides, so the two egress paths agree on which value wins when both are
+  // set. The two protocols are resolved separately and the HTTPS one falls back
+  // to the HTTP one, like undici: its HTTPS agent uses the HTTP proxy when no
   // HTTPS proxy is configured, so a host with only `HTTP_PROXY` set still
   // proxies HTTPS while this path would otherwise go direct. A single chain
   // stopped at a blank value and dropped that fallback.
+  //
+  // `proxyVariable` returning `undefined` therefore means two different things
+  // to the two halves of this expression, and both are correct: "this slot is
+  // explicitly empty" (fall through to the HTTP slot) and "no such variable"
+  // (nothing to fall through to).
   const proxyUrl =
     proxyVariable(process.env.https_proxy, process.env.HTTPS_PROXY) ??
     proxyVariable(process.env.http_proxy, process.env.HTTP_PROXY);
