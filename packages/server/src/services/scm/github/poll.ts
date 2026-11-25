@@ -585,7 +585,12 @@ export async function pollGithubRepository(input: PollGithubRepositoryInput): Pr
     // one for the new list. Asking for page one every time instead left a
     // timestamp group larger than the page budget stuck: every pass re-read the
     // same prefix, emitted nothing and moved the position nowhere.
-    const commentsSince = commentPosition === null ? since : oneSecondEarlier(commentPosition.createdAt);
+    //
+    // Until a position exists this entity has not been read in the catch-up
+    // run: its comments must start at the run's pinned bound, not at the
+    // watermark earlier entities moved. GitHub's `since` is exclusive, so a
+    // comment at the moving watermark would otherwise be dropped.
+    const commentsSince = commentPosition === null ? announceSince : oneSecondEarlier(commentPosition.createdAt);
     let commentsPage =
       continuation !== null && continuation.commentsSince === commentsSince ? continuation.commentsPage : 1;
     let reviewsDone = continuation?.reviewsDone ?? !isPullRequest;
@@ -609,7 +614,8 @@ export async function pollGithubRepository(input: PollGithubRepositoryInput): Pr
         const deliveryId = commentDeliveryId(commentId);
         if (createdAtComment === null || commentId === null || deliveryId === null) continue;
         const position = { createdAt: createdAtComment, id: commentId };
-        const isNew = commentPosition === null ? createdAtComment > since : isAfterPosition(commentPosition, position);
+        const isNew =
+          commentPosition === null ? createdAtComment > announceSince : isAfterPosition(commentPosition, position);
         commentPosition = laterPosition(commentPosition, position);
         if (!isNew) continue;
         record(deliveryId, "issue_comment", commentPayload(input.repository, item, comment, isPullRequest));
@@ -629,7 +635,9 @@ export async function pollGithubRepository(input: PollGithubRepositoryInput): Pr
         // A pending review has no `submitted_at`; it becomes deliverable only
         // once GitHub stamps the submission.
         if (submittedAt === null || deliveryId === null) continue;
-        if (submittedAt <= since) continue;
+        // Same pinned cutoff as comments: the moving watermark would drop a
+        // review submitted at that exact second for an entity never read here.
+        if (submittedAt <= announceSince) continue;
         record(deliveryId, "pull_request_review", reviewPayload(input.repository, item, review));
       }
     }

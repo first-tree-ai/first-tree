@@ -415,12 +415,24 @@ describe("pollGithubRepository", () => {
         html_url: `https://github.com/${REPOSITORY}/pull/${number}`,
       }),
     );
+    // The reviewer added a comment and a review at the moving watermark.
+    // GitHub's `since` is exclusive, and the local comparison used the same
+    // moving bound, so both were dropped even though #14 had never been read.
+    const catchUpComment = commentRow({ id: 8014, created_at: sameInstant });
+    const catchUpReview = reviewRow({ id: 7014, submitted_at: sameInstant });
     const { fetch } = fetchStub((url) => {
       const page = Number(url.searchParams.get("page"));
       const since = url.searchParams.get("since") ?? "";
       if (url.pathname.endsWith("/issues")) {
         const visible = rows.filter((row) => String(row.updated_at) > since);
         return { body: visible.length >= page ? [visible[page - 1]] : [] };
+      }
+      if (url.pathname.endsWith("/issues/14/comments")) {
+        const visible = [catchUpComment].filter((row) => String(row.created_at) > since);
+        return { body: page === 1 ? visible : [] };
+      }
+      if (url.pathname.endsWith("/pulls/14/reviews")) {
+        return { body: page === 1 ? [catchUpReview] : [] };
       }
       return { body: [] };
     });
@@ -446,9 +458,16 @@ describe("pollGithubRepository", () => {
     });
 
     // The third entity is reached here for the first time; its creation has
-    // never been delivered, so it still has to be.
+    // never been delivered, so it still has to be — and so do its comment and
+    // review at the same second, which belong to the catch-up run.
     expect(second.truncated).toBe(false);
-    expect(second.webhooks.map((webhook) => webhook.deliveryId)).toContain("github:issue:9014:opened");
+    expect(second.webhooks.map((webhook) => webhook.deliveryId)).toEqual(
+      expect.arrayContaining([
+        "github:issue:9014:opened",
+        "github:issue_comment:8014",
+        "github:pull_request_review:7014",
+      ]),
+    );
     expect(second.nextCursor).toEqual({
       updatedAt: sameInstant,
       entityNumber: 14,
