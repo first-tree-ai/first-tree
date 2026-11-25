@@ -517,12 +517,7 @@ export async function pollGithubRepository(input: PollGithubRepositoryInput): Pr
     // Exactly one page: `fetchPages` walks forward, and reading past the
     // resume page would see the unread entities that legitimately sit there and
     // mistake them for a moved prefix.
-    const boundary = await fetchPages(
-      { ...ctx, maxPages: 1 },
-      listingPath,
-      listingQuery,
-      listingPage - 1,
-    );
+    const boundary = await fetchPages({ ...ctx, maxPages: 1 }, listingPath, listingQuery, listingPage - 1);
     requests += boundary.requests;
     rebased = boundary.items.some((item) => {
       const number = readNumber(item.number);
@@ -533,12 +528,7 @@ export async function pollGithubRepository(input: PollGithubRepositoryInput): Pr
     if (rebased) listingPage = 1;
   }
 
-  const listing = await fetchPages(
-    ctx,
-    listingPath,
-    listingQuery,
-    listingPage,
-  );
+  const listing = await fetchPages(ctx, listingPath, listingQuery, listingPage);
   requests += listing.requests;
   let truncated = listing.truncated;
 
