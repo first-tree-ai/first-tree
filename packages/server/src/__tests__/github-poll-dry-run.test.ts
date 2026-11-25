@@ -306,7 +306,7 @@ describe("pollGithubRepository", () => {
     // The repository watermark does not move: the entity is only half read.
     expect(first.nextCursor?.updatedAt).toBe(CURSOR.updatedAt);
     expect(first.nextCursor?.continuation).toEqual({
-      listing: { since: "2026-11-17T07:59:59Z", page: 1 },
+      listing: { since: "2026-11-17T07:59:59Z", page: 1, announceSince: CURSOR.updatedAt },
       entity: {
         entityNumber: 12,
         commentsDone: false,
@@ -398,6 +398,135 @@ describe("pollGithubRepository", () => {
     });
   });
 
+  it("announces an entity first reached on a resumed page of a timestamp group", async () => {
+    // Reported on this head: three entities share `updated_at`, the page budget
+    // is two, so the third is only reached on the resumed page. Its
+    // `created_at` equals the watermark the first pass advanced to, and the
+    // bound was recomputed from that watermark — so its `opened` event was
+    // dropped even though its creation had never been announced. The bound has
+    // to belong to the catch-up run, not to the moving watermark.
+    const sameInstant = "2026-11-17T08:22:00Z";
+    const rows = [12, 13, 14].map((number) =>
+      issueRow({
+        id: 9000 + number,
+        number,
+        created_at: sameInstant,
+        updated_at: sameInstant,
+        html_url: `https://github.com/${REPOSITORY}/pull/${number}`,
+      }),
+    );
+    const { fetch } = fetchStub((url) => {
+      const page = Number(url.searchParams.get("page"));
+      const since = url.searchParams.get("since") ?? "";
+      if (url.pathname.endsWith("/issues")) {
+        const visible = rows.filter((row) => String(row.updated_at) > since);
+        return { body: visible.length >= page ? [visible[page - 1]] : [] };
+      }
+      return { body: [] };
+    });
+
+    const first = await pollGithubRepository({
+      organizationId: ORGANIZATION_ID,
+      repository: REPOSITORY,
+      cursor: CURSOR,
+      fetch,
+      perPage: 1,
+      maxPages: 2,
+    });
+    expect(first.truncated).toBe(true);
+    expect(first.webhooks.map((webhook) => webhook.deliveryId)).toContain("github:issue:9012:opened");
+
+    const second = await pollGithubRepository({
+      organizationId: ORGANIZATION_ID,
+      repository: REPOSITORY,
+      cursor: first.nextCursor,
+      fetch,
+      perPage: 1,
+      maxPages: 2,
+    });
+
+    // The third entity is reached here for the first time; its creation has
+    // never been delivered, so it still has to be.
+    expect(second.truncated).toBe(false);
+    expect(second.webhooks.map((webhook) => webhook.deliveryId)).toContain("github:issue:9014:opened");
+    expect(second.nextCursor).toEqual({
+      updatedAt: sameInstant,
+      entityNumber: 14,
+      continuation: null,
+    });
+  });
+
+  it("re-reads the listing when an entity inside the drained prefix moves", async () => {
+    // A page number is a position only while the filtered list stands still.
+    // An entity already read gets updated between passes, which moves it to the
+    // end of `sort=updated` and shifts everything else one slot earlier, so the
+    // recorded page pointed past an unread entity and the listing reported
+    // itself drained. The scan has to recover that entity instead of stepping
+    // over it.
+    const t0 = "2026-11-17T08:22:00Z";
+    const t9 = "2026-11-17T08:40:00Z";
+    let shifted = false;
+    const row12 = issueRow({
+      id: 9012,
+      number: 12,
+      created_at: t0,
+      updated_at: t0,
+      html_url: `https://github.com/${REPOSITORY}/pull/12`,
+    });
+    const row13 = issueRow({
+      id: 9013,
+      number: 13,
+      created_at: t0,
+      updated_at: t0,
+      html_url: `https://github.com/${REPOSITORY}/pull/13`,
+    });
+    const row14 = issueRow({
+      id: 9014,
+      number: 14,
+      created_at: t0,
+      updated_at: t0,
+      html_url: `https://github.com/${REPOSITORY}/pull/14`,
+    });
+    const rows = [row12, row13, row14];
+    const { fetch } = fetchStub((url) => {
+      const page = Number(url.searchParams.get("page"));
+      const since = url.searchParams.get("since") ?? "";
+      if (url.pathname.endsWith("/issues")) {
+        // 12 gets updated between passes, so it moves to the end of
+        // `sort=updated` and every other entity shifts one slot earlier.
+        const ordered = shifted ? [row13, row14, { ...row12, updated_at: t9 }] : rows;
+        const visible = ordered.filter((row) => String(row.updated_at) > since);
+        return { body: visible.length >= page ? [visible[page - 1]] : [] };
+      }
+      return { body: [] };
+    });
+
+    const first = await pollGithubRepository({
+      organizationId: ORGANIZATION_ID,
+      repository: REPOSITORY,
+      cursor: CURSOR,
+      fetch,
+      perPage: 1,
+      maxPages: 2,
+    });
+    expect(first.truncated).toBe(true);
+
+    shifted = true;
+    const second = await pollGithubRepository({
+      organizationId: ORGANIZATION_ID,
+      repository: REPOSITORY,
+      cursor: first.nextCursor,
+      fetch,
+      perPage: 1,
+      maxPages: 3,
+    });
+
+    // 14 sat behind the recorded page only because 12 moved; it is unread and
+    // must still arrive.
+    expect(second.rebased).toBe(true);
+    expect(second.webhooks.map((webhook) => webhook.deliveryId)).toContain("github:issue:9014:opened");
+  });
+
   it("keeps same-second entities that span multiple polls", async () => {
     // GitHub's `since` is strictly after the timestamp it is given, so asking
     // from the watermark's own second hid every entity that shared it. Three
@@ -443,7 +572,7 @@ describe("pollGithubRepository", () => {
       "github:issue_comment:6013",
     ]);
     expect(first.nextCursor?.continuation).toEqual({
-      listing: { since: "2026-11-17T07:59:59Z", page: 3 },
+      listing: { since: "2026-11-17T07:59:59Z", page: 3, announceSince: CURSOR.updatedAt },
       entity: null,
     });
 

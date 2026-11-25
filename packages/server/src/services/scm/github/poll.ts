@@ -110,6 +110,18 @@ export type GithubPollListingProgress = {
   since: string;
   /** 1-based repository-listing page to request next. */
   page: number;
+  /**
+   * The no-backfill bound the catch-up run started under: an entity gets its
+   * `opened` announced only when it was created after this instant.
+   *
+   * It is pinned for the whole run because the watermark is not: the watermark
+   * moves as entities drain, and recomputing the bound from it dropped the
+   * creation of any entity that shares a timestamp with the entity the
+   * previous pass advanced past. Three entities sharing `updated_at`, a page
+   * budget of two: the third is reached on the resumed page and its `opened`
+   * was never delivered.
+   */
+  announceSince: string;
 };
 
 export type GithubPollEntityProgress = {
@@ -404,6 +416,15 @@ export type PollGithubRepositoryResult = {
   dropped: number;
   nextCursor: GithubPollCursor | null;
   truncated: boolean;
+  /**
+   * The resumed page number could not be trusted — the listing had moved under
+   * it — so this pass re-read the listing from page one instead of continuing.
+   *
+   * Exposed rather than silent: a repository that churns inside the drained
+   * prefix can rebase on every pass, and an operator needs to see that
+   * instead of reading the dry run as "steady state, nothing to do".
+   */
+  rebased: boolean;
 };
 
 /**
@@ -436,7 +457,10 @@ export async function pollGithubRepository(input: PollGithubRepositoryInput): Pr
   // The page belongs to the bound it was taken under: GitHub paginates the
   // filtered list, so a page number only means something while that bound
   // stands. An unfinished listing therefore keeps both.
-  const listingPage = listingProgress?.page ?? 1;
+  let listingPage = listingProgress?.page ?? 1;
+  // The no-backfill bound belongs to the run, not to the moving watermark;
+  // see `GithubPollListingProgress.announceSince`.
+  const announceSince = listingProgress?.announceSince ?? since;
   const ingressFor = (deliveryId: string): ScmIngressContext => ({
     provider: "github",
     source: { organizationId: input.organizationId, externalId: `poll:${input.repository}` },
@@ -469,15 +493,50 @@ export async function pollGithubRepository(input: PollGithubRepositoryInput): Pr
     });
   };
 
+  const listingPath = `/repos/${input.repository}/issues`;
+  const listingQuery = {
+    state: "all",
+    sort: "updated",
+    direction: "asc",
+    since: listingSince,
+  };
+
+  // A page number is a position only while the filtered list stands still, and
+  // it does not stand still: an entity inside the pages already read can be
+  // updated between passes, which moves it to the end of `sort=updated` and
+  // shifts everything else one slot earlier. Continuing at the recorded page
+  // would then step over an unread entity and report the listing drained.
+  //
+  // So prove the boundary before trusting it: the page before ours must hold
+  // nothing newer than the cursor. When it does, the prefix moved and the
+  // number now means something else — restart from page one. Re-reading the
+  // drained prefix costs nothing in delivered events (`isNewerThanCursor`
+  // filters it) and is bounded by the page cap, which is what makes it safe.
+  let rebased = false;
+  if (listingPage > 1) {
+    // Exactly one page: `fetchPages` walks forward, and reading past the
+    // resume page would see the unread entities that legitimately sit there and
+    // mistake them for a moved prefix.
+    const boundary = await fetchPages(
+      { ...ctx, maxPages: 1 },
+      listingPath,
+      listingQuery,
+      listingPage - 1,
+    );
+    requests += boundary.requests;
+    rebased = boundary.items.some((item) => {
+      const number = readNumber(item.number);
+      const updatedAt = readString(item.updated_at);
+      if (number === null || updatedAt === null) return false;
+      return isNewerThanCursor(updatedAt, number, input.cursor);
+    });
+    if (rebased) listingPage = 1;
+  }
+
   const listing = await fetchPages(
     ctx,
-    `/repos/${input.repository}/issues`,
-    {
-      state: "all",
-      sort: "updated",
-      direction: "asc",
-      since: listingSince,
-    },
+    listingPath,
+    listingQuery,
     listingPage,
   );
   requests += listing.requests;
@@ -514,7 +573,7 @@ export async function pollGithubRepository(input: PollGithubRepositoryInput): Pr
     // `opened` is emitted once. A resumed entity already had its creation
     // announced in the pass that capped out, and re-emitting it would only
     // rely on downstream dedupe to hide the repeat.
-    if (continuation === null && createdAt !== null && createdAt > since) {
+    if (continuation === null && createdAt !== null && createdAt > announceSince) {
       record(
         openedDeliveryId(readNumber(item.id), input.repository, number),
         isPullRequest ? "pull_request" : "issues",
@@ -598,7 +657,7 @@ export async function pollGithubRepository(input: PollGithubRepositoryInput): Pr
         nextCursor: {
           ...(nextCursor ?? { updatedAt: since, entityNumber: 0 }),
           continuation: {
-            listing: { since: listingSince, page: listingPage },
+            listing: { since: listingSince, page: listingPage, announceSince },
             entity: {
               entityNumber: number,
               commentsDone,
@@ -611,6 +670,7 @@ export async function pollGithubRepository(input: PollGithubRepositoryInput): Pr
           },
         },
         truncated: true,
+        rebased,
       };
     }
 
@@ -626,7 +686,7 @@ export async function pollGithubRepository(input: PollGithubRepositoryInput): Pr
   // next page carry that progress, so the next pass continues there instead
   // of starting over.
   const pendingListing: GithubPollListingProgress | null = listing.truncated
-    ? { since: listingSince, page: listing.nextPage }
+    ? { since: listingSince, page: listing.nextPage, announceSince }
     : null;
   return {
     requests,
@@ -637,6 +697,7 @@ export async function pollGithubRepository(input: PollGithubRepositoryInput): Pr
       continuation: pendingListing === null ? null : { listing: pendingListing, entity: null },
     },
     truncated,
+    rebased,
   };
 }
 
@@ -733,6 +794,8 @@ export type GithubPollDryRunSummary = {
   dropped: number;
   failures: number;
   truncated: number;
+  /** Passes that could not trust the recorded page and re-read from page one. */
+  rebased: number;
 };
 
 /**
@@ -756,6 +819,7 @@ export async function runGithubPollDryRunOnce(options: {
     dropped: 0,
     failures: 0,
     truncated: 0,
+    rebased: 0,
   };
   if (options.targets.length === 0) {
     log.info("github poll dry run: no targets configured");
@@ -778,6 +842,7 @@ export async function runGithubPollDryRunOnce(options: {
       summary.wouldDeliver += result.webhooks.length;
       summary.dropped += result.dropped;
       if (result.truncated) summary.truncated += 1;
+      if (result.rebased) summary.rebased += 1;
       log.info(
         {
           repository: target.repository,
@@ -785,6 +850,7 @@ export async function runGithubPollDryRunOnce(options: {
           wouldDeliver: result.webhooks.length,
           dropped: result.dropped,
           truncated: result.truncated,
+          rebased: result.rebased,
           cursor: result.nextCursor,
         },
         "github poll dry run: repository polled",
