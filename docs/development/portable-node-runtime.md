@@ -102,3 +102,11 @@ range, the update fails before install with guidance to either:
 If npm metadata cannot be read, the CLI falls back to the existing npm install
 path and classifies npm's own error output. `EBADENGINE` remains a permanent
 operator-action failure.
+
+On Linux, an npm-mode daemon managed by systemd performs automatic updates in a
+transient `systemd-run` unit outside the daemon's service cgroup. The worker
+stops the daemon before npm reifies the global package tree, moves the current
+package and channel links aside for rollback, and starts the daemon only after
+the install completes. This prevents a supervisor restart from killing npm
+halfway through a reify and booting a daemon against a partial `node_modules`
+tree. Foreground and manually invoked npm updates retain the direct npm path.

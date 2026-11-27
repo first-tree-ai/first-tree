@@ -78,9 +78,10 @@ function createInstallOutputLog(log: UpdateLogger | undefined): ((chunk: string)
  * Build the command-layer `executeUpdate` callback.
  *
  * `managed=true` means a process supervisor (launchd / systemd / Docker
- * `restart`) is expected to relaunch us after `process.exit` — the callback
- * installs the new bits and exits with `SELF_RESTART_EXIT_CODE` so the
- * relaunch picks up the new binary.
+ * `restart`) owns the daemon lifecycle. Portable updates and non-Linux
+ * managed paths install the new bits and exit with `SELF_RESTART_EXIT_CODE`;
+ * managed Linux npm updates hand off to a transient systemd unit that stops
+ * and starts the service around the install.
  *
  * `managed=false` means the process is running standalone (e.g. manual
  * `client start`, `login <code> --no-start`, CI without a supervisor).
@@ -176,9 +177,13 @@ export function createExecuteUpdate({
         ? `Switching portable ${channelConfig.binName} to ${targetVersion}...`
         : `Running \`npm install -g ${pkgSpec}@${targetVersion}\`...`,
     );
+    const installOptions = {
+      managed,
+      ...(installOutput ? { output: installOutput } : {}),
+    };
     const result = isPortable
       ? await installPortableSpec(targetVersion)
-      : await installGlobalSpec(targetVersion, installOutput ? { output: installOutput } : undefined);
+      : await installGlobalSpec(targetVersion, installOptions);
     if (!result.ok) {
       emit("warn", `Install failed: ${result.reason}`);
       recordUpdateAttempt({

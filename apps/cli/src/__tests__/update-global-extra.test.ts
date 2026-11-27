@@ -1,5 +1,6 @@
+import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -208,6 +209,116 @@ describe("global update helpers", () => {
       ["install", "-g", "first-tree@latest"],
       expect.objectContaining({ category: "npm-install", timeoutMs: 300_000 }),
     );
+  });
+
+  it("runs managed Linux installs in a transient unit with rollback boundaries", async () => {
+    if (process.platform !== "linux") return;
+    spawnSyncMock.mockReturnValueOnce({ status: 0, stdout: "null", stderr: "" });
+    const child = new FakeChild();
+    registrySpawnMock.mockReturnValueOnce({ child });
+    const { installGlobalSpec } = await import("../core/update.js");
+
+    const installing = installGlobalSpec("latest", { managed: true });
+    const [command, args] = registrySpawnMock.mock.calls[0] as [string, string[]];
+    expect(command).toBe("systemd-run");
+    expect(args).toEqual(expect.arrayContaining(["--wait", "--collect", "--pipe", "--unit"]));
+    expect(args).toContain("first-tree-update.service");
+    const script = args[args.indexOf("-c") + 1];
+    expect(script).toContain("systemctl");
+    expect(script).toContain("stop 'first-tree.service'");
+    expect(script).toContain("start 'first-tree.service'");
+    expect(script).toContain("first-tree-update-backup");
+    expect(() => execFileSync("/bin/sh", ["-n", "-c", script], { encoding: "utf8" })).not.toThrow();
+
+    child.stdout.emit("data", Buffer.from("+ first-tree@1.2.3\n"));
+    child.emit("exit", 0, null);
+    await expect(installing).resolves.toEqual({ ok: true, mode: "global", installedVersion: "1.2.3" });
+  });
+
+  it("rolls back the moved npm tree before restarting after a failed managed install", async () => {
+    if (process.platform !== "linux") return;
+    spawnSyncMock.mockReturnValueOnce({ status: 0, stdout: "null", stderr: "" });
+    const child = new FakeChild();
+    registrySpawnMock.mockReturnValueOnce({ child });
+    const { installGlobalSpec } = await import("../core/update.js");
+    const installing = installGlobalSpec("latest", { managed: true });
+    const [, args] = registrySpawnMock.mock.calls[0] as [string, string[]];
+    const script = args[args.indexOf("-c") + 1];
+
+    const root = mkdtempSync(join(tmpdir(), "ft-managed-update-rollback-"));
+    try {
+      const prefix = join(root, "prefix");
+      const packageRoot = join(prefix, "lib", "node_modules");
+      const packageDir = join(packageRoot, "first-tree");
+      const binDir = join(prefix, "bin");
+      const fakeBin = join(root, "fake-bin");
+      const logPath = join(root, "systemctl.log");
+      const fakeNpm = join(fakeBin, "npm");
+      mkdirSync(packageDir, { recursive: true });
+      mkdirSync(binDir, { recursive: true });
+      mkdirSync(fakeBin, { recursive: true });
+      writeFileSync(join(packageDir, "sentinel"), "old-package");
+      writeFileSync(join(binDir, "first-tree"), "old-bin");
+      writeFileSync(join(binDir, "ft"), "old-alias");
+      writeFileSync(join(fakeBin, "systemctl"), '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$SYSTEMCTL_LOG"\nexit 0\n', {
+        mode: 0o755,
+      });
+      writeFileSync(
+        fakeNpm,
+        [
+          "#!/bin/sh",
+          `root=${JSON.stringify(packageRoot)}`,
+          `prefix=${JSON.stringify(prefix)}`,
+          'if [ "$1" = "root" ]; then printf \'%s\\n\' "$root"; exit 0; fi',
+          'if [ "$1" = "prefix" ]; then printf \'%s\\n\' "$prefix"; exit 0; fi',
+          'mkdir -p "$root/first-tree"',
+          "printf 'partial\\n' > \"$root/first-tree/partial\"",
+          "exit 42",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+
+      const env = {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+        SYSTEMCTL_LOG: logPath,
+      };
+      expect(() =>
+        execFileSync(
+          "/bin/sh",
+          ["-c", script, "first-tree-npm-update", fakeNpm, "install", "-g", "first-tree@latest"],
+          { env },
+        ),
+      ).toThrow();
+      expect(readFileSync(join(packageDir, "sentinel"), "utf8")).toBe("old-package");
+      expect(() => readFileSync(join(packageDir, "partial"))).toThrow();
+      expect(readFileSync(join(binDir, "first-tree"), "utf8")).toBe("old-bin");
+      expect(readFileSync(join(binDir, "ft"), "utf8")).toBe("old-alias");
+      expect(readFileSync(logPath, "utf8")).toMatch(/stop first-tree\.service/);
+      expect(readFileSync(logPath, "utf8")).toMatch(/start first-tree\.service/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+
+    child.emit("exit", 0, null);
+    await expect(installing).resolves.toEqual({ ok: true, mode: "global", installedVersion: null });
+  });
+
+  it("refuses a managed install when systemd-run cannot be started", async () => {
+    if (process.platform !== "linux") return;
+    spawnSyncMock.mockReturnValueOnce({ status: 0, stdout: "null", stderr: "" });
+    const spawnError = Object.assign(new Error("systemd-run not found"), { code: "ENOENT" });
+    registrySpawnMock.mockImplementationOnce(() => {
+      throw spawnError;
+    });
+    const { installGlobalSpec } = await import("../core/update.js");
+
+    await expect(installGlobalSpec("latest", { managed: true })).resolves.toMatchObject({
+      ok: false,
+      retryable: false,
+      reasonCode: "systemd_update_runner_unavailable",
+      reason: expect.stringContaining("systemd-run is unavailable"),
+    });
   });
 
   it("prefers sibling npm, tolerates empty engine stdout, and keeps non-semver installed labels", async () => {
