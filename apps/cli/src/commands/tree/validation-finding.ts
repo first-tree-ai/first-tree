@@ -35,6 +35,14 @@ export const VALIDATION_CODES = {
   membersDirectoryMissing: "TREE_MEMBERS_DIRECTORY_MISSING",
   memberNodeMissing: "TREE_MEMBER_NODE_MISSING",
   memberNodesEmpty: "TREE_MEMBER_NODES_EMPTY",
+  evidenceFileParse: "TREE_EVIDENCE_FILE_PARSE",
+  evidenceSourcesInvalid: "TREE_EVIDENCE_SOURCES_INVALID",
+  evidenceRecordInvalid: "TREE_EVIDENCE_RECORD_INVALID",
+  evidenceQuoteMissing: "TREE_EVIDENCE_QUOTE_MISSING",
+  evidenceNodeMissing: "TREE_EVIDENCE_NODE_MISSING",
+  evidenceDuplicateId: "TREE_EVIDENCE_DUPLICATE_ID",
+  evidenceDanglingReference: "TREE_EVIDENCE_DANGLING_REFERENCE",
+  evidenceContradiction: "TREE_EVIDENCE_CONTRADICTION",
 } as const;
 
 export type ValidationCode = (typeof VALIDATION_CODES)[keyof typeof VALIDATION_CODES];
