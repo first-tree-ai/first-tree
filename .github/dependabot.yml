@@ -7,6 +7,12 @@ updates:
     schedule:
       interval: daily
       time: "04:00"
+    # Dependabot holds a release back for 3 days by default; Context Tree is our
+    # own package, so its releases skip that wait.
+    cooldown:
+      default-days: 3
+      exclude:
+        - "@first-tree-ai/context-tree"
     # Branches become chore/npm_and_yarn/..., which the CI branch-name check accepts.
     pull-request-branch-name:
       prefix: chore
