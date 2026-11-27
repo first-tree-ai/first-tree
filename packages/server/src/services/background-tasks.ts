@@ -11,6 +11,14 @@ import * as chatArchiveService from "./chat/workspace/archive.js";
 import * as notificationService from "./notification.js";
 import * as clientService from "./runtime/client.js";
 import * as presenceService from "./runtime/presence.js";
+import {
+  createGithubPollDryRunState,
+  GITHUB_POLL_DRY_RUN_DEFAULT_INTERVAL_MS,
+  GITHUB_POLL_DRY_RUN_MIN_INTERVAL_MS,
+  type GithubPollDryRunOptions,
+  type GithubPollFetch,
+  runGithubPollDryRunOnce,
+} from "./scm/github/poll.js";
 import { backfillSkillResourceBundles } from "./skill-bundle.js";
 
 const log = createLogger("BackgroundTasks");
@@ -26,6 +34,8 @@ export type BackgroundTasks = {
 export type BackgroundTaskOptions = {
   cronSchedulerEnabled?: boolean;
   attachmentRetentionSweepEnabled?: boolean;
+  /** Observe-only GitHub polling; delivers nothing, logs what it would deliver. */
+  githubPollDryRun?: GithubPollDryRunOptions;
 };
 
 export function createBackgroundTasks(
@@ -38,6 +48,7 @@ export function createBackgroundTasks(
   let archiveSweepTimer: ReturnType<typeof setInterval> | null = null;
   let attachmentSweepTimer: ReturnType<typeof setInterval> | null = null;
   let attachmentRetentionTimer: ReturnType<typeof setInterval> | null = null;
+  let githubPollTimer: ReturnType<typeof setInterval> | null = null;
   const attachmentRetentionRuns = new Set<Promise<void>>();
   const cronScheduler = options.cronSchedulerEnabled === false ? null : createCronScheduler(app);
 
@@ -132,6 +143,25 @@ export function createBackgroundTasks(
         startAttachmentRetentionSweep();
       }
 
+      const pollDryRun = options.githubPollDryRun;
+      if (pollDryRun && pollDryRun.targets.length > 0) {
+        const state = createGithubPollDryRunState();
+        const intervalMs = Math.max(
+          pollDryRun.intervalMs ?? GITHUB_POLL_DRY_RUN_DEFAULT_INTERVAL_MS,
+          GITHUB_POLL_DRY_RUN_MIN_INTERVAL_MS,
+        );
+        const pollFetch = pollDryRun.fetch ?? (globalThis.fetch as unknown as GithubPollFetch);
+        log.info({ repositories: pollDryRun.targets.length, intervalMs }, "github poll dry run enabled");
+        githubPollTimer = setInterval(() => {
+          void runGithubPollDryRunOnce({
+            targets: pollDryRun.targets,
+            state,
+            fetch: pollFetch,
+            token: pollDryRun.token ?? null,
+          });
+        }, intervalMs);
+      }
+
       cronScheduler?.start();
 
       presenceService.heartbeatInstance(app.db, instanceId).catch((err) => {
@@ -163,6 +193,10 @@ export function createBackgroundTasks(
       if (attachmentRetentionTimer) {
         clearInterval(attachmentRetentionTimer);
         attachmentRetentionTimer = null;
+      }
+      if (githubPollTimer) {
+        clearInterval(githubPollTimer);
+        githubPollTimer = null;
       }
       await Promise.allSettled([...attachmentRetentionRuns]);
     },
