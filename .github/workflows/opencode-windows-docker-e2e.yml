@@ -1,0 +1,169 @@
+name: One-time OpenCode Windows Docker E2E
+
+"on":
+  push:
+    branches:
+      - test/opencode-windows-docker-e2e
+
+permissions:
+  contents: read
+
+jobs:
+  windows-docker-e2e:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    env:
+      FTQA_ROOT: .github/qa/opencode-windows-docker-e2e
+
+    steps:
+      - name: Check out exact branch revision
+        uses: actions/checkout@v4
+
+      - name: Capture runner and Docker engine identity
+        shell: pwsh
+        run: |
+          $evidenceDir = Join-Path $env:RUNNER_TEMP "opencode-windows-evidence"
+          $artifactDir = Join-Path $env:RUNNER_TEMP "opencode-windows-artifact"
+          "FTQA_EVIDENCE_DIR=$evidenceDir" >> $env:GITHUB_ENV
+          "FTQA_ARTIFACT_DIR=$artifactDir" >> $env:GITHUB_ENV
+          & "$env:FTQA_ROOT/windows/capture-runner-identity.ps1" `
+            -EvidenceDir $evidenceDir
+
+      - name: Run static contract checks
+        shell: pwsh
+        run: |
+          Push-Location $env:FTQA_ROOT
+          try {
+            npm run check:windows-static
+          } finally {
+            Pop-Location
+          }
+
+      - name: Run Windows Docker E2E
+        shell: pwsh
+        run: |
+          $projectName = "ftqa-opencode-windows-${{ github.run_id }}-${{ github.run_attempt }}"
+          $evidenceDir = $env:FTQA_EVIDENCE_DIR
+          "FTQA_PROJECT_NAME=$projectName" >> $env:GITHUB_ENV
+          & "$env:FTQA_ROOT/windows/run-windows.ps1" `
+            -EvidenceDir $evidenceDir `
+            -ProjectName $projectName
+
+      - name: Enforce scoped Docker cleanup
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          if (-not $env:FTQA_PROJECT_NAME) {
+            $env:FTQA_PROJECT_NAME = "ftqa-opencode-windows-${{ github.run_id }}-${{ github.run_attempt }}"
+          }
+          if (-not $env:FTQA_EVIDENCE_DIR) {
+            $env:FTQA_EVIDENCE_DIR = Join-Path $env:RUNNER_TEMP "opencode-windows-evidence"
+          }
+          New-Item -ItemType Directory -Force $env:FTQA_EVIDENCE_DIR | Out-Null
+          $serviceImageReferences = @(
+            @(
+              docker compose `
+                -p $env:FTQA_PROJECT_NAME `
+                -f "$env:FTQA_ROOT/compose.windows.yaml" `
+                config `
+                --images
+            ) | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Sort-Object -Unique
+          )
+          $imageConfigExit = $LASTEXITCODE
+          $serviceImageReference = $null
+          $serviceImageID = $null
+          if ($serviceImageReferences.Count -eq 1) {
+            $serviceImageReference = [string]$serviceImageReferences[0]
+            $serviceImageID = (
+              docker image inspect `
+                $serviceImageReference `
+                --format "{{.Id}}" 2>$null |
+                  Out-String
+            ).Trim()
+          }
+          docker compose `
+            -p $env:FTQA_PROJECT_NAME `
+            -f "$env:FTQA_ROOT/compose.windows.yaml" `
+            down `
+            --remove-orphans `
+            --rmi local
+          $downExit = $LASTEXITCODE
+          $containers = @(
+            docker ps -aq `
+              --filter "label=com.docker.compose.project=$env:FTQA_PROJECT_NAME"
+          ) | Where-Object { $_ }
+          $containerReadExit = $LASTEXITCODE
+          $networks = @(
+            docker network ls -q `
+              --filter "label=com.docker.compose.project=$env:FTQA_PROJECT_NAME"
+          ) | Where-Object { $_ }
+          $networkReadExit = $LASTEXITCODE
+          $serviceImageIDAlive = $false
+          if ($serviceImageID) {
+            docker image inspect $serviceImageID *> $null
+            $serviceImageIDAlive = $LASTEXITCODE -eq 0
+          }
+          $serviceImageReferenceAlive = $false
+          if ($serviceImageReference) {
+            docker image inspect $serviceImageReference *> $null
+            $serviceImageReferenceAlive = $LASTEXITCODE -eq 0
+          }
+          $receipt = [ordered]@{
+            schema = "first-tree.opencode.windows-actions-cleanup.v1"
+            status = $(
+              if (
+                $downExit -eq 0 -and
+                $containerReadExit -eq 0 -and
+                $networkReadExit -eq 0 -and
+                $imageConfigExit -eq 0 -and
+                $serviceImageReferences.Count -eq 1 -and
+                @($containers).Count -eq 0 -and
+                @($networks).Count -eq 0 -and
+                -not $serviceImageIDAlive -and
+                -not $serviceImageReferenceAlive
+              ) { "PASS" } else { "FAIL" }
+            )
+            projectName = $env:FTQA_PROJECT_NAME
+            downExitCode = $downExit
+            containers = @($containers)
+            networks = @($networks)
+            serviceImageReference = $serviceImageReference
+            serviceImageID = $serviceImageID
+            serviceImageIDAlive = $serviceImageIDAlive
+            serviceImageReferenceAlive = $serviceImageReferenceAlive
+            completedAt = [DateTime]::UtcNow.ToString("o")
+          }
+          $receiptPath = Join-Path $env:FTQA_EVIDENCE_DIR "windows-actions-cleanup-result.json"
+          [System.IO.File]::WriteAllText(
+            $receiptPath,
+            (($receipt | ConvertTo-Json -Depth 10) + [Environment]::NewLine),
+            (New-Object System.Text.UTF8Encoding($false))
+          )
+          if ($receipt.status -ne "PASS") {
+            throw "Scoped Windows Docker cleanup failed"
+          }
+          exit 0
+
+      - name: Prepare redacted evidence
+        if: always()
+        shell: pwsh
+        run: |
+          if (-not $env:FTQA_EVIDENCE_DIR) {
+            $env:FTQA_EVIDENCE_DIR = Join-Path $env:RUNNER_TEMP "opencode-windows-evidence"
+          }
+          if (-not $env:FTQA_ARTIFACT_DIR) {
+            $env:FTQA_ARTIFACT_DIR = Join-Path $env:RUNNER_TEMP "opencode-windows-artifact"
+          }
+          & "$env:FTQA_ROOT/windows/redact-evidence.ps1" `
+            -EvidenceDir $env:FTQA_EVIDENCE_DIR `
+            -OutputDir $env:FTQA_ARTIFACT_DIR
+
+      - name: Upload redacted evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencode-windows-docker-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/opencode-windows-artifact
+          if-no-files-found: error
+          retention-days: 7
